@@ -15,6 +15,7 @@ import { ChatSessionService, type ChatStateSnapshot } from "./chat-session-servi
 import { AdapterManager } from "./adapter/adapter-manager";
 import type { AdapterConfig, AdapterStatus } from "./adapter/types";
 import { startBackendIfLocal, stopBackend, applyConfigToBackend, getBackendPort, isBackendBundled } from "./backend-launcher";
+import * as frontendTools from "./frontend-tools";
 import { readModelConfigFile, writeModelConfigFile, onModelConfigChanged, startModelConfigWatch } from "./model-config";
 import { initAppLogger, getLogPath, isDebugMode } from "./app-logger";
 
@@ -173,6 +174,99 @@ function saveClientConfig() {
     );
   } catch (e) {
     console.error("[config] 保存客户端配置失败:", e);
+  }
+}
+
+// ───────────────── 前端托管工具（MCP / skill）配置 ─────────────────
+const MCP_CONFIG_PATH = path.join(app.getPath("userData"), "mcp-servers.json");
+const SKILLS_CONFIG_PATH = path.join(app.getPath("userData"), "skills.json");
+
+function loadJsonFile<T>(p: string, fallback: T): T {
+  try {
+    if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, "utf-8")) as T;
+  } catch (e) {
+    console.error(`[frontend-tools] 读取 ${p} 失败:`, e);
+  }
+  return fallback;
+}
+
+// 内置示例 skill：让用户首次启动即可看到 skill 能力（行为模板 + 一个 echo 工具）。
+const DEFAULT_SKILLS: frontendTools.SkillConfig[] = [
+  {
+    id: "builtin-helper",
+    name: "贴心助手",
+    description: "示例技能：让桌宠更温柔地回应，并提供一个可调用工具用于回显测试。",
+    enabled: true,
+    prompt: "你是一只温柔贴心的桌宠，回答简洁友好，适当使用颜文字。当用户提到「测试工具」时可使用回显工具。",
+    tools: [
+      {
+        name: "echo",
+        description: "把收到的参数原样返回，用于验证前端工具调用链路是否打通。",
+        parameters: {
+          type: "object",
+          properties: { text: { type: "string", description: "要回显的文本" } },
+          required: ["text"],
+        },
+        exec: { kind: "echo" },
+      },
+    ],
+  },
+];
+
+// 初始化前端托管工具：从 userData 读取用户配置的 MCP server 与 skill，
+// 失败/缺失时回退到内置示例 skill，保证开箱即用地把工具注册给后端。
+export function initFrontendTools(): void {
+  const mcpServers = loadJsonFile<frontendTools.McpServerConfig[]>(MCP_CONFIG_PATH, []);
+  const skills = loadJsonFile<frontendTools.SkillConfig[]>(SKILLS_CONFIG_PATH, DEFAULT_SKILLS);
+  frontendTools.setMcpServers(mcpServers);
+  frontendTools.setSkills(skills);
+  console.log(
+    `[frontend-tools] 已加载 MCP server ${mcpServers.length} 个、skill ${skills.filter((s) => s.enabled).length} 个（启用）`,
+  );
+}
+
+// ───────────────── MCP / skill 管理的 IPC ─────────────────
+// 设置页读取/保存 MCP server 与 skill 配置。保存后刷新前端工具池，
+// 并通过 ChatSessionService 重新向后端注册工具（无需重启）。
+function saveJsonFile(p: string, data: unknown): void {
+  try {
+    fs.writeFileSync(p, JSON.stringify(data, null, 2));
+  } catch (e) {
+    console.error(`[frontend-tools] 写入 ${p} 失败:`, e);
+  }
+}
+
+ipcMain.handle("mcp:list", (): frontendTools.McpServerConfig[] => {
+  return frontendTools.getMcpServers();
+});
+
+ipcMain.handle("mcp:save", (_e, list: frontendTools.McpServerConfig[]): { ok: boolean } => {
+  saveJsonFile(MCP_CONFIG_PATH, list);
+  frontendTools.setMcpServers(list);
+  reRegisterFrontendTools();
+  return { ok: true };
+});
+
+ipcMain.handle("skill:list", (): frontendTools.SkillConfig[] => {
+  return frontendTools.getSkills();
+});
+
+ipcMain.handle("skill:save", (_e, list: frontendTools.SkillConfig[]): { ok: boolean } => {
+  saveJsonFile(SKILLS_CONFIG_PATH, list);
+  frontendTools.setSkills(list);
+  reRegisterFrontendTools();
+  return { ok: true };
+});
+
+// 重新把前端工具（MCP + skill）注册给后端：通过 ChatSessionService 重新发送 register_tools / register_skills。
+function reRegisterFrontendTools(): void {
+  try {
+    const chat = (globalThis as any).__chatSessionService;
+    if (chat && typeof chat.reRegisterTools === "function") {
+      chat.reRegisterTools();
+    }
+  } catch (e) {
+    console.warn("[frontend-tools] 重新注册工具失败（可能需要重连）:", e instanceof Error ? e.message : String(e));
   }
 }
 
@@ -977,6 +1071,8 @@ function ensureChatSessionService() {
       requireToken: true,
       emitState: broadcastChatState,
     });
+    // 暴露给 MCP / skill 保存后「重新注册工具」时调用。
+    (globalThis as any).__chatSessionService = chatSessionService;
   }
 
   return chatSessionService;
@@ -1447,6 +1543,9 @@ app.whenReady().then(async () => {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
   });
+
+  // 加载前端托管的 MCP server 与 skill 配置，供 WS 连接后注册给后端调用。
+  initFrontendTools();
 
   // 本地模式（打包版）：以子进程方式自启动后端 API，关闭前端时一并关闭。
   // dev 与 remote 模式不启动本地后端。

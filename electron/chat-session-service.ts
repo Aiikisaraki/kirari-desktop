@@ -1,5 +1,6 @@
 import fs from "fs/promises";
 import path from "path";
+import * as frontendTools from "./frontend-tools";
 
 export type ChatAuthor = "user" | "pet" | "system";
 
@@ -217,6 +218,21 @@ export class ChatSessionService {
             this.state.lastError = "";
             this.clearReconnectTimer();
             this.emit();
+            // 连接建立后，把「前端托管工具」（MCP server + skill 提供的工具）注册给后端，
+            // 这样模型就能在 function-calling 中调用它们；同时注册启用中的 skill 行为模板。
+            try {
+                const schemas = frontendTools.collectToolSchemas();
+                if (schemas.length > 0) {
+                    socket.send(JSON.stringify({ type: "register_tools", tools: schemas }));
+                    console.log(`[chat-session] 已向后端注册 ${schemas.length} 个前端工具`);
+                }
+                const skillPrompts = frontendTools.collectSkillPrompts();
+                if (skillPrompts.length > 0) {
+                    socket.send(JSON.stringify({ type: "register_skills", prompts: skillPrompts }));
+                }
+            } catch (e) {
+                console.warn("[chat-session] 注册前端工具失败:", e instanceof Error ? e.message : String(e));
+            }
         };
 
         socket.onmessage = (event: { data: string }) => {
@@ -269,6 +285,12 @@ export class ChatSessionService {
     private handleMessage(rawData: string) {
         try {
             const payload = JSON.parse(rawData);
+
+            // 后端回调解「前端托管工具」：在本进程（Electron 主进程）实际执行后回传结果。
+            if (payload.type === "tool_invoke" && typeof payload.call_id === "string") {
+                void this.handleToolInvoke(payload);
+                return;
+            }
 
             if (payload.type === "pet_response" && typeof payload.speech === "string") {
                 const speech = payload.speech.trim();
@@ -325,6 +347,38 @@ export class ChatSessionService {
                 this.state.bubbleInteractive = false;
             }
         }
+    }
+
+    // 执行后端回调的前端工具，并把结果回传（tool_result）。
+    private async handleToolInvoke(payload: { call_id: string; name: string; args?: unknown }) {
+        const socket = this.socket;
+        if (!socket || socket.readyState !== (globalThis as any).WebSocket?.OPEN) {
+            return;
+        }
+        let content: string;
+        try {
+            const result = await frontendTools.executeTool(payload.name, (payload.args as Record<string, unknown>) || {});
+            content = typeof result === "string" ? result : JSON.stringify(result);
+        } catch (e) {
+            content = `前端工具执行异常：${e instanceof Error ? e.message : String(e)}`;
+        }
+        socket.send(
+            JSON.stringify({ type: "tool_result", call_id: payload.call_id, content }),
+        );
+    }
+
+    // 设置页变更 MCP / skill 后，重新把工具注册给后端（无需重启）。
+    reRegisterTools(): void {
+        const socket = this.socket;
+        if (!socket || socket.readyState !== (globalThis as any).WebSocket?.OPEN) {
+            console.log("[chat-session] 未连接，跳过重新注册工具（下次连接会自动注册）");
+            return;
+        }
+        const schemas = frontendTools.collectToolSchemas();
+        socket.send(JSON.stringify({ type: "register_tools", tools: schemas }));
+        const skillPrompts = frontendTools.collectSkillPrompts();
+        socket.send(JSON.stringify({ type: "register_skills", prompts: skillPrompts }));
+        console.log(`[chat-session] 重新注册 ${schemas.length} 个前端工具、${skillPrompts.length} 条技能指令`);
     }
 
     private setConnectionError(message: string) {

@@ -94,3 +94,15 @@ contextBridge.exposeInMainWorld("botAdapterApi", {
     ipcRenderer.on("adapter:status", (_event, status: AdapterStatus[]) => cb(status));
   },
 });
+
+// 前端托管的 MCP server 管理：列出 / 保存（保存后后端会自动重新加载工具）。
+contextBridge.exposeInMainWorld("mcpApi", {
+  list: (): Promise<unknown[]> => ipcRenderer.invoke("mcp:list"),
+  save: (list: unknown[]): Promise<{ ok: boolean }> => ipcRenderer.invoke("mcp:save", list),
+});
+
+// 前端托管的 skill（技能）管理：列出 / 保存。skill 可含行为模板（注入 system）与可调用工具。
+contextBridge.exposeInMainWorld("skillApi", {
+  list: (): Promise<unknown[]> => ipcRenderer.invoke("skill:list"),
+  save: (list: unknown[]): Promise<{ ok: boolean }> => ipcRenderer.invoke("skill:save", list),
+});

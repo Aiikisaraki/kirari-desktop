@@ -8,6 +8,8 @@ import AvatarSettings from "./AvatarSettings.vue";
 import AccountSettings from "./AccountSettings.vue";
 import ModelConfigSettings from "./ModelConfigSettings.vue";
 import BotAdapterSettings from "./BotAdapterSettings.vue";
+import McpSettings from "./McpSettings.vue";
+import SkillSettings from "./SkillSettings.vue";
 import { useApiToken } from "../../composables/useApiToken";
 import { SETTINGS_CONTEXT, type SettingsContext } from "./settingsContext";
 
@@ -91,7 +93,12 @@ const sections = computed(() => {
         { id: "avatar", label: "形象", emoji: "🐾" },
     ];
     if (mode.value === "remote") list.push({ id: "account", label: "账号", emoji: "🔑" });
-    list.push({ id: "model", label: "模型", emoji: "🧠" }, { id: "bot", label: "机器人", emoji: "🤖" });
+    list.push(
+        { id: "model", label: "模型", emoji: "🧠" },
+        { id: "mcp", label: "MCP", emoji: "🔌" },
+        { id: "skill", label: "技能", emoji: "🧩" },
+        { id: "bot", label: "机器人", emoji: "🤖" },
+    );
     return list;
 });
 
@@ -138,6 +145,8 @@ onMounted(() => {
                     <AvatarSettings />
                     <AccountSettings />
                     <ModelConfigSettings />
+                    <McpSettings />
+                    <SkillSettings />
                     <BotAdapterSettings />
                 </div>
             </main>
