@@ -1,5 +1,6 @@
 import fs from "fs/promises";
 import path from "path";
+import { nativeImage } from "electron";
 import * as frontendTools from "./frontend-tools";
 
 export type ChatAuthor = "user" | "pet" | "system";
@@ -48,6 +49,39 @@ type ChatSessionOptions = {
 
 const WELCOME_MESSAGE = "今天也一起加油吧。";
 const LONG_REPLY_PROMPT = "回复较长，点我看详情";
+
+// 发送前图片压缩阈值：在客户端就从源头把图压小，桌面→pet-api→模型的整条链路都受益，
+// 避免超大图直接喂给视觉模型导致推理失败或白白吃带宽/ token。
+const MAX_IMAGE_LONG_EDGE = 1280; // 最长边像素上限（多数视觉模型甜区 512–1024，留点余量）
+const IMAGE_JPEG_QUALITY = 0.8; // 转 JPEG 质量，单图通常压到 < 300KB
+
+// 对 base64 data URL 图片做等比缩放 + JPEG 压缩；远程 http(s) URL 由模型自行拉取，原样透传。
+// 任何异常（解码失败、resize 为空）一律回退原图，绝不阻断发送。
+function downscaleImageDataUrl(dataUrl: string): string {
+    if (!dataUrl || !dataUrl.startsWith("data:image/")) {
+        return dataUrl;
+    }
+    try {
+        const img = nativeImage.createFromDataURL(dataUrl);
+        if (img.isEmpty()) return dataUrl;
+        const size = img.getSize();
+        const longEdge = Math.max(size.width, size.height);
+        if (longEdge <= MAX_IMAGE_LONG_EDGE) {
+            return dataUrl;
+        }
+        const scale = MAX_IMAGE_LONG_EDGE / longEdge;
+        const resized = img.resize({
+            width: Math.max(1, Math.round(size.width * scale)),
+            height: Math.max(1, Math.round(size.height * scale)),
+        });
+        const out = resized.toDataURL("image/jpeg", IMAGE_JPEG_QUALITY);
+        if (!out) return dataUrl;
+        // 罕见情况：小尺寸高噪点图压缩后反而更大，保留更小者
+        return out.length >= dataUrl.length ? dataUrl : out;
+    } catch {
+        return dataUrl;
+    }
+}
 
 export class ChatSessionService {
     private readonly backendUrl: string;
@@ -100,9 +134,11 @@ export class ChatSessionService {
 
     async sendMessage(payload: { text: string; images?: string[] }) {
         const text = (payload.text || "").trim();
-        const images = Array.isArray(payload.images)
+        const rawImages = Array.isArray(payload.images)
             ? payload.images.filter((x) => typeof x === "string" && x.trim())
             : [];
+        // 发送前把过大的图片压缩好（最长边≤1280 + JPEG q0.8），从源头规避模型处理超大图失败。
+        const images = rawImages.map((img) => downscaleImageDataUrl(img));
         if (!text && images.length === 0) {
             return false;
         }
