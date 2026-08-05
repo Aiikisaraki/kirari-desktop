@@ -13,6 +13,7 @@ export interface ModelConfigFile {
     searchKey?: string;
     searchEndpoint?: string;
     searchProvider?: string; // 'uapis' | 'tavily' | 'searxng'
+    basePersona?: string; // 用户自定义基础人格（自由文字）；缺省/空则后端回退到预设人格
     seeded?: boolean;
 }
 
@@ -34,15 +35,18 @@ export function readModelConfigFile(): ModelConfigFile {
 
 export function writeModelConfigFile(patch: Partial<ModelConfigFile>): ModelConfigFile {
     const current = readModelConfigFile();
-    // 只合并 patch 中明确提供的「非空」字段；未提供（undefined）或空串的字段
-    // 一律不写入，否则 { ...current, model: undefined } 会覆盖已有值，而 JSON.stringify
-    // 会丢弃 undefined 的 key，导致用户未改动的配置（如 model）被无声清空。
-    const clean: Partial<ModelConfigFile> = {};
+    // 合并规则：
+    //  - 未提供（undefined）的字段：不动现有值，避免 { ...current, model: undefined }
+    //    把用户未改动的配置无声清空（JSON.stringify 会丢弃 undefined 的 key）。
+    //  - 非空字符串：写入（trim 后）。
+    //  - 空字符串：显式删除该字段（用于「恢复预设」等清空场景，如 basePersona）。
+    const next: ModelConfigFile = { ...current };
     for (const k of Object.keys(patch) as (keyof ModelConfigFile)[]) {
         const v = patch[k];
-        if (typeof v === "string" && v.trim() !== "") clean[k] = v.trim();
+        if (typeof v !== "string") continue;
+        if (v.trim() !== "") next[k] = v.trim();
+        else delete (next as Partial<ModelConfigFile>)[k];
     }
-    const next: ModelConfigFile = { ...current, ...clean };
     try {
         fs.writeFileSync(CONFIG_FILE, JSON.stringify(next, null, 2), "utf-8");
     } catch (e) {

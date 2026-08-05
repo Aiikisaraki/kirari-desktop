@@ -230,6 +230,9 @@ export class ChatSessionService {
                 if (skillPrompts.length > 0) {
                     socket.send(JSON.stringify({ type: "register_skills", prompts: skillPrompts }));
                 }
+                // 基础人格：始终推送（空串表示使用后端预设），保证人格锚点随连接生效。
+                const persona = frontendTools.collectBasePersona();
+                socket.send(JSON.stringify({ type: "register_persona", persona }));
             } catch (e) {
                 console.warn("[chat-session] 注册前端工具失败:", e instanceof Error ? e.message : String(e));
             }
@@ -378,7 +381,9 @@ export class ChatSessionService {
         socket.send(JSON.stringify({ type: "register_tools", tools: schemas }));
         const skillPrompts = frontendTools.collectSkillPrompts();
         socket.send(JSON.stringify({ type: "register_skills", prompts: skillPrompts }));
-        console.log(`[chat-session] 重新注册 ${schemas.length} 个前端工具、${skillPrompts.length} 条技能指令`);
+        const persona = frontendTools.collectBasePersona();
+        socket.send(JSON.stringify({ type: "register_persona", persona }));
+        console.log(`[chat-session] 重新注册 ${schemas.length} 个前端工具、${skillPrompts.length} 条技能指令、基础人格${persona ? "（自定义）" : "（预设）"}`);
     }
 
     private setConnectionError(message: string) {

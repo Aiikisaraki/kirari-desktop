@@ -14,6 +14,7 @@ interface ModelConfigFile {
     searchKey?: string;
     searchEndpoint?: string;
     searchProvider?: string; // 'uapis' | 'tavily' | 'searxng'
+    basePersona?: string; // 用户自定义基础人格（自由文字）；缺省/空则后端回退预设人格
     seeded?: boolean;
 }
 
@@ -232,12 +233,13 @@ export function useApiToken() {
             hasSearchKey: !!searchKey,
             searchEndpoint,
             searchProvider,
+            basePersona: typeof data.basePersona === "string" ? data.basePersona : "",
         };
         writeProfileCache(profile);
         return profile;
     }
 
-    async function setModelConfig(patch: { model?: string; endpoint?: string; key?: string; searchKey?: string; searchEndpoint?: string; searchProvider?: string }) {
+    async function setModelConfig(patch: { model?: string; endpoint?: string; key?: string; searchKey?: string; searchEndpoint?: string; searchProvider?: string; basePersona?: string }) {
         isLoading.value = true;
         error.value = "";
         try {

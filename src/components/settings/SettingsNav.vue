@@ -49,15 +49,19 @@ function go(id: string) {
         aria-label="设置分区导航"
     >
         <div class="settings-sidebar__header">
-            <p v-if="greeting" class="settings-sidebar__title settings-sidebar__title--greeting">
+            <p
+                v-if="greeting"
+                class="settings-sidebar__title settings-sidebar__title--greeting"
+            >
                 {{ greeting }}
             </p>
             <p v-else class="settings-sidebar__title">⚙️ 分区导航</p>
-            <p class="settings-sidebar__sub">
-                {{ sections.length }} 个分区，点击切换对应设置。
-            </p>
         </div>
-        <div class="settings-sidebar__list" role="tablist" aria-orientation="vertical">
+        <div
+            class="settings-sidebar__list"
+            role="tablist"
+            aria-orientation="vertical"
+        >
             <button
                 v-for="s in sections"
                 :key="s.id"
@@ -101,7 +105,9 @@ function go(id: string) {
             :aria-selected="activeId === s.id ? 'true' : 'false'"
             @click="go(s.id)"
         >
-            <span class="nav-pill__emoji" aria-hidden="true">{{ s.emoji }}</span>
+            <span class="nav-pill__emoji" aria-hidden="true">{{
+                s.emoji
+            }}</span>
             <span class="nav-pill__label">{{ s.label }}</span>
         </button>
     </nav>

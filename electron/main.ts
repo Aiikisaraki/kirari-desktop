@@ -220,8 +220,11 @@ export function initFrontendTools(): void {
   const skills = loadJsonFile<frontendTools.SkillConfig[]>(SKILLS_CONFIG_PATH, DEFAULT_SKILLS);
   frontendTools.setMcpServers(mcpServers);
   frontendTools.setSkills(skills);
+  // 启动时载入用户自定义基础人格（如有），确保 WS 连接建立后即可推送，无需先打开设置页。
+  const initialCfg = readModelConfigFile();
+  frontendTools.setBasePersona(initialCfg.basePersona || "");
   console.log(
-    `[frontend-tools] 已加载 MCP server ${mcpServers.length} 个、skill ${skills.filter((s) => s.enabled).length} 个（启用）`,
+    `[frontend-tools] 已加载 MCP server ${mcpServers.length} 个、skill ${skills.filter((s) => s.enabled).length} 个（启用）、基础人格${initialCfg.basePersona ? "（自定义）" : "（预设）"}`,
   );
 }
 
@@ -975,6 +978,7 @@ ipcMain.handle("config:set", (_event, patch: Record<string, unknown>) => {
     searchKey: typeof patch.searchKey === "string" ? patch.searchKey : undefined,
     searchEndpoint: typeof patch.searchEndpoint === "string" ? patch.searchEndpoint : undefined,
     searchProvider: typeof patch.searchProvider === "string" ? patch.searchProvider : undefined,
+    basePersona: typeof patch.basePersona === "string" ? patch.basePersona : undefined,
   });
   // 写文件会触发 fs.watch → 同步后端 + 广播；这里再显式执行一次，确保本进程内保存也能即时生效。
   handleModelConfigChanged(next);
@@ -984,6 +988,9 @@ ipcMain.handle("config:set", (_event, patch: Record<string, unknown>) => {
 // config.json 被外部编辑器修改（或本进程写入）后：同步到后端 DB 并广播给所有窗口。
 function handleModelConfigChanged(cfg: ReturnType<typeof readModelConfigFile>) {
   void applyConfigToBackend();
+  // 基础人格随配置变更即时生效：更新持有人并通过 WS 重新注册给后端（无需重启）。
+  frontendTools.setBasePersona(cfg.basePersona || "");
+  reRegisterFrontendTools();
   for (const win of [petWindow, chatWindow, settingsWindow]) {
     if (win && !win.isDestroyed()) win.webContents.send("config:changed", cfg);
   }

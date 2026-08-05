@@ -68,6 +68,10 @@ const mcpSessions = new Map<string, { endpoint: string; sessionId?: string }>();
 const skills = new Map<string, SkillConfig>();
 const skillTools = new Map<string, ResolvedTool>();
 
+// 用户自定义基础人格（自由文字段落）；空串表示使用后端预设人格。
+// 由主进程从 config.json 载入，并在设置页保存时更新，经 WS 推送给后端。
+let basePersona = "";
+
 const FRONTEND_PREFIX = "frontend__";
 
 function toFrontendName(raw: string): string {
@@ -303,6 +307,16 @@ export function collectSkillPrompts(): string[] {
     }
   }
   return prompts;
+}
+
+// 用户自定义基础人格：设置后写入、读取，供 chat-session 经 WS 推送给后端。
+// 空串表示未设置，后端会回退到预设人格。
+export function setBasePersona(value: string): void {
+  basePersona = typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+export function collectBasePersona(): string {
+  return basePersona;
 }
 
 // ───────────────────────── 对外聚合 ─────────────────────────

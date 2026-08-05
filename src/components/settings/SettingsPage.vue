@@ -5,6 +5,7 @@ import SettingsNav from "./SettingsNav.vue";
 import AppearanceSettings from "./AppearanceSettings.vue";
 import GeneralSettings from "./GeneralSettings.vue";
 import AvatarSettings from "./AvatarSettings.vue";
+import PersonaSettings from "./PersonaSettings.vue";
 import AccountSettings from "./AccountSettings.vue";
 import ModelConfigSettings from "./ModelConfigSettings.vue";
 import BotAdapterSettings from "./BotAdapterSettings.vue";
@@ -36,6 +37,8 @@ const activeComponent = computed(() => {
             return GeneralSettings;
         case "avatar":
             return AvatarSettings;
+        case "persona":
+            return PersonaSettings;
         case "account":
             return AccountSettings;
         case "model":
@@ -147,6 +150,7 @@ const sections = computed(() => {
         { id: "appearance", label: "外观", emoji: "🎨", hint: "主题与视觉风格" },
         { id: "general", label: "通用", emoji: "✨", hint: "备注名与开机自启" },
         { id: "avatar", label: "形象", emoji: "🐾", hint: "桌宠精灵" },
+        { id: "persona", label: "人格", emoji: "🎭", hint: "自定义基础人格" },
     ];
     if (mode.value === "remote")
         list.push({ id: "account", label: "账号", emoji: "🔑", hint: "服务端地址与登录" });
