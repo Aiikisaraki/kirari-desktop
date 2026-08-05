@@ -2,10 +2,12 @@
 import { inject, onMounted, ref, watch } from "vue";
 import { SETTINGS_CONTEXT } from "./settingsContext";
 import { useApiToken } from "../../composables/useApiToken";
+import { useToast } from "../../composables/useToast";
 
 const { mode, authed, accountName, refreshAuth, login, register, logout } =
     inject(SETTINGS_CONTEXT)!;
-const { getDeployConfig, setDeployServer } = useApiToken();
+const { getDeployConfig, setDeployServer, getProfile } = useApiToken();
+const toast = useToast();
 
 const authMode = ref<"login" | "register">("login");
 const username = ref("");
@@ -71,8 +73,13 @@ async function handleLogin() {
     isLoading.value = true;
     try {
         const r = await login(username.value, password.value);
-        if (r.ok) await refreshAuth();
-        else loginError.value = r.message || "登录失败";
+        if (r.ok) {
+            await refreshAuth();
+            toast.success("登录成功");
+            await afterAuthSuccess();
+        } else {
+            loginError.value = r.message || "登录失败";
+        }
     } finally {
         isLoading.value = false;
     }
@@ -101,10 +108,29 @@ async function handleRegister() {
             return;
         }
         const lr = await login(username.value.trim(), password.value);
-        if (lr.ok) await refreshAuth();
-        else loginError.value = lr.message || "注册成功，但自动登录失败，请手动登录";
+        if (lr.ok) {
+            await refreshAuth();
+            toast.success("注册并登录成功");
+            await afterAuthSuccess();
+        } else {
+            loginError.value = lr.message || "注册成功，但自动登录失败，请手动登录";
+        }
     } finally {
         isLoading.value = false;
+    }
+}
+
+// 登录/注册成功后：远程模式下若服务端尚未配置大模型，主动提示去「设置 → 模型」，
+// 否则用户会直接发消息、后端才报“大模型未配置”，体验上毫无前兆。
+async function afterAuthSuccess() {
+    if (mode.value !== "remote") return;
+    try {
+        const profile = await getProfile();
+        if (!profile.hasToken) {
+            toast.warning("远程账号尚未配置大模型，请到「设置 → 模型」填写 API 信息后即可对话", 6000);
+        }
+    } catch {
+        // 读取失败不阻塞，聊天窗口自身会在未配置时显示错误横幅兜底。
     }
 }
 
@@ -235,15 +261,10 @@ function handleLogout() {
                     </button>
                 </div>
 
-                <div class="settings-row">
-                    <div class="settings-row__body">
-                        <span class="settings-row__icon" aria-hidden="true">👤</span>
-                        <div class="settings-row__text">
-                            <h4 class="settings-row__title">用户名</h4>
-                            <p class="settings-row__desc">3-32 个字符，用于登录与显示。</p>
-                        </div>
-                    </div>
-                    <div class="settings-row__control">
+                <form id="auth-form" class="auth-form" @submit.prevent="authMode === 'login' ? handleLogin() : handleRegister()">
+                    <label class="auth-field">
+                        <span class="auth-field__label">用户名</span>
+                        <span class="auth-field__hint">3-32 个字符，用于登录与显示</span>
                         <input
                             v-model="username"
                             class="text-input"
@@ -252,18 +273,11 @@ function handleLogout() {
                             placeholder="用户名"
                             :disabled="isLoading"
                         />
-                    </div>
-                </div>
+                    </label>
 
-                <div class="settings-row">
-                    <div class="settings-row__body">
-                        <span class="settings-row__icon" aria-hidden="true">🔒</span>
-                        <div class="settings-row__text">
-                            <h4 class="settings-row__title">密码</h4>
-                            <p class="settings-row__desc">至少 6 位，注册 / 登录共用。</p>
-                        </div>
-                    </div>
-                    <div class="settings-row__control">
+                    <label class="auth-field">
+                        <span class="auth-field__label">密码</span>
+                        <span class="auth-field__hint">至少 6 位，注册 / 登录共用</span>
                         <input
                             v-model="password"
                             class="text-input"
@@ -273,18 +287,16 @@ function handleLogout() {
                             "
                             placeholder="密码"
                             :disabled="isLoading"
-                            @keyup.enter="
-                                authMode === 'login' ? handleLogin() : handleRegister()
-                            "
                         />
-                    </div>
-                </div>
+                    </label>
+                </form>
 
                 <div class="settings-card__group">
                     <div class="btn-row">
                         <button
-                            type="button"
-                            class="btn btn--primary"
+                            type="submit"
+                            form="auth-form"
+                            class="btn btn--primary auth-submit"
                             :disabled="isLoading"
                             @click="authMode === 'login' ? handleLogin() : handleRegister()"
                         >

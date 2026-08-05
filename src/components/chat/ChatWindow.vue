@@ -202,6 +202,13 @@ const statusState = computed(() => {
                 </div>
             </header>
 
+            <!-- 错误横幅：后端明确下发的错误（如“大模型未配置”）在此可见呈现，
+                 不再只表现为状态栏的“连接异常”文字。模型修复后收到正常回复会自动消失。 -->
+            <div v-if="lastError" class="chat-error-banner" role="alert">
+                <span class="chat-error-banner__icon" aria-hidden="true">⚠</span>
+                <span class="chat-error-banner__text">{{ lastError }}</span>
+            </div>
+
             <section ref="threadRef" class="chat-thread" aria-live="polite">
                 <template v-for="item in threadItems" :key="item.key">
                     <!-- 时间分隔标记 -->
@@ -388,6 +395,33 @@ const statusState = computed(() => {
         opacity: 1;
         transform: scale(1.05);
     }
+}
+
+/* ===== 错误横幅：后端明确下发的错误（如大模型未配置） ===== */
+.chat-error-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin: 8px 12px 2px;
+    padding: 9px 12px;
+    border-radius: 12px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: #8e4553;
+    background: rgba(214, 110, 130, 0.14);
+    border: 1px solid rgba(214, 110, 130, 0.38);
+    backdrop-filter: blur(8px) saturate(140%);
+    -webkit-backdrop-filter: blur(8px) saturate(140%);
+}
+
+.chat-error-banner__icon {
+    flex: 0 0 auto;
+    font-size: 15px;
+    line-height: 1.4;
+}
+
+.chat-error-banner__text {
+    min-width: 0;
 }
 
 /* ===== 底部输入区：圆角工具栏 + 对齐修复 ===== */

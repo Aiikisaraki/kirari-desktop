@@ -496,6 +496,8 @@ let dragState: {
 } | null = null;
 let isQuitting = false;
 let chatSessionService: ChatSessionService | null = null;
+// 聊天会话持久化文件路径：启动时确定一次，登录/登出重建连接时复用，避免重复拼路径。
+let chatSessionStoragePath = "";
 
 async function readApiResponse(response: Response) {
   const text = await response.text();
@@ -578,6 +580,31 @@ ipcMain.handle("deploy:get-config", () => clientConfig);
 ipcMain.handle("deploy:get-capabilities", () => ({
   localAvailable: localBackendAvailable,
 }));
+
+// 切换部署模式（本地部署 ⇄ 连接远程服务端）。
+// 关键诉求：切换时自动清除「对方模式」的残留配置，避免用户手动登出+重配。
+//   - 切到 remote：清空本地 server 地址与远程 sessionToken（builtinToken 保留，无害），
+//     重启后进入 remote 模式，由设置页填写服务端地址并登录。
+//   - 切到 local：恢复 localhost 默认地址与内置令牌，清空远程 sessionToken，
+//     重启后随程序启动内置后端、以内置令牌免登录。
+// deployment 字段保持 "integrated"（由本安装包写入），确保重启后不会被 L158 的
+// 「非一键部署残留」保护块再次强制重置，使本次切换稳定生效。
+// 切换需要重启：后端连接与聊天通道在启动时依 mode 建立，无法在运行时热切换。
+ipcMain.handle("deploy:switch-mode", (_event, target: "local" | "remote") => {
+  if (target === "remote") {
+    clientConfig.mode = "remote";
+    clientConfig.server = { wsUrl: "", httpUrl: "" };
+    clientConfig.sessionToken = undefined;
+  } else {
+    clientConfig.mode = "local";
+    clientConfig.server = { wsUrl: "ws://localhost:9089/ws", httpUrl: "http://localhost:9089" };
+    clientConfig.sessionToken = undefined;
+  }
+  saveClientConfig();
+  // 先登记重启，再退出；relaunch 在 quit 后拉起新实例。
+  app.relaunch();
+  app.quit();
+});
 
 // 远程模式下由设置页修改服务端地址（ws/http）。写入 clientConfig 并持久化，
 // 立即刷新主进程连接地址、重建适配器连接（无需重启即可生效）。
@@ -924,6 +951,10 @@ ipcMain.handle("deploy:set-session", (_event, token: string | null) => {
       chatSessionService = null;
       chatServiceUserid = null;
     }
+  } else if (!chatSessionService) {
+    // 防御性分支：若登录链路未兜底重建（例如未来某路径只调用 set-session），
+    // 在此补一次重连。已重建则跳过，避免重复 dispose/recreate。
+    reconnectChatSession();
   }
 });
 ipcMain.handle("token:login", async (_event, credentials: { username: string; password: string }) => {
@@ -937,12 +968,10 @@ ipcMain.handle("token:login", async (_event, credentials: { username: string; pa
     if (!response.ok) return { ok: false, message: String(data.message || "登录失败") };
     settingsSessionToken = String(data.sessionToken);
     loggedInUid = Number(data.uid);
-    // 登录账户变化后，按新身份重建聊天服务，避免聊天记忆/配置错配。
-    if (chatSessionService && chatServiceUserid !== loggedInUid) {
-      chatSessionService.dispose();
-      chatSessionService = null;
-      chatServiceUserid = null;
-    }
+    // 登录后按新身份（含新会话令牌）重建聊天服务并自动重连：
+    // 旧连接已被放弃，若不在登录成功后立即重建+init，聊天窗口会停留在断开态，
+    // 直到用户手动发一条消息才惰性触发连接——这正是“登录后不自动连接”的根因。
+    reconnectChatSession();
     // 持久化登录凭证，重启桌宠后自动恢复登录态。
     clientConfig.sessionToken = settingsSessionToken;
     saveClientConfig();
@@ -1091,6 +1120,21 @@ function ensureChatSessionService() {
   }
 
   return chatSessionService;
+}
+
+// 按当前部署模式 / 登录态重建聊天服务并立即连接。
+// token:login 登录成功后必须调用：旧连接已被放弃，若不重建则聊天窗口停留在断开态，
+// 直到用户手动发消息才惰性触发连接（即“登录后不自动连接”的旧问题）。
+function reconnectChatSession(): void {
+  if (chatSessionService) {
+    chatSessionService.dispose();
+    chatSessionService = null;
+    chatServiceUserid = null;
+  }
+  if (!chatSessionStoragePath) {
+    chatSessionStoragePath = path.join(app.getPath("userData"), "chat-session.json");
+  }
+  void ensureChatSessionService().init(chatSessionStoragePath);
 }
 
 function ensurePetWindow() {
@@ -1630,7 +1674,8 @@ app.whenReady().then(async () => {
   }
 
   let res = await checkBackendHealth();
-  await ensureChatSessionService().init(path.join(app.getPath("userData"), "chat-session.json"));
+  chatSessionStoragePath = path.join(app.getPath("userData"), "chat-session.json");
+  await ensureChatSessionService().init(chatSessionStoragePath);
   createTray();
   ensurePetWindow();
 

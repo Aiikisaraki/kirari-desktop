@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, provide, ref } from "vue";
+import { computed, nextTick, onMounted, provide, ref } from "vue";
 import WindowChrome from "../common/WindowChrome.vue";
 import SettingsNav from "./SettingsNav.vue";
 import AppearanceSettings from "./AppearanceSettings.vue";
@@ -76,6 +76,14 @@ function handleMqChange(e: MediaQueryListEvent) {
 
 function setActiveId(id: string) {
     activeId.value = id;
+    // 切 tab 时把整页滚动容器归零。否则上个 tab（如模型、技能、MCP）
+    // 滚到的 scrollTop 会保留下来，新 tab 的卡片标题可能被滚到视口上方看不见，
+    // 底部内容（密码框、提交按钮等）被顶到视口下方。nextTick 后再归零，
+    // 让 :key 触发的旧组件卸载 + 新组件挂载先完成，避免 reflow 中途触发 scroll。
+    void nextTick(() => {
+        const root = document.querySelector(".settings-root") as HTMLElement | null;
+        if (root) root.scrollTop = 0;
+    });
 }
 
 async function refreshAuth() {

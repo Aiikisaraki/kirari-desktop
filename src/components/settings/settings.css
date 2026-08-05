@@ -764,6 +764,29 @@
 }
 .avatar-tip svg { flex: 0 0 auto; margin-top: 1px; color: var(--pet-accent); }
 
+/* 账号页紧凑表单：把原来 icon+title+desc+input 的两个 row 折叠成 label+input，
+   让「用户名/密码 + 按钮」在桌面端也能一屏内完整显示，避免被滚动条遮住。 */
+.auth-form { display: flex; flex-direction: column; gap: 14px; margin: 0; padding: 0; }
+.auth-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.auth-field__label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--pet-muted);
+  letter-spacing: 0.2px;
+}
+.auth-field__hint {
+  font-size: 11.5px;
+  color: var(--pet-muted);
+  opacity: 0.75;
+  line-height: 1.4;
+}
+.auth-field .text-input { width: 100%; }
+/* 桌面端（≥860px）让两个字段并排，进一步压缩卡片高度 */
+@media (min-width: 860px) {
+  .auth-form { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 18px; }
+  .auth-form > .auth-submit-row { grid-column: 1 / -1; }
+}
+
 /* ---------- 账号板块 ---------- */
 .auth-tabs { display: flex; gap: 8px; }
 .auth-tab {
@@ -824,7 +847,14 @@
   /* 侧栏固定宽，右栏撑满剩余空间（minmax 让 grid track 在极窄屏可被压缩） */
   grid-template-columns: 232px minmax(0, 1fr);
   gap: 18px;
-  flex: 1 1 auto;
+  /* 关键：桌面端让 .settings-shell 高度由内容决定（flex: 0 0 auto），
+     而不是被 .settings-root（flex column + height:100%）拉伸成固定视口高度。
+     否则卡片内容超过视口高时，会被钉死在固定高度的 grid 行里裁剪，
+     .settings-shell__card 上的 overflow:hidden 再兜底切掉底部，
+     整页滚动失效、内容看不全（必须拉大窗口才看全）。
+     改为内容驱动后，.settings-root 的 overflow-y:auto 接管整页滚动，
+     侧栏 sticky 也随之生效。 */
+  flex: 0 0 auto;
   min-height: 0;
   padding: 12px 18px 40px;
   width: 100%;
@@ -1311,6 +1341,62 @@
   width: min(280px, 36vw);
 }
 .settings-row__control > .btn-row { gap: 8px }
+
+/* 分段选择器（二选一互斥，如部署模式） */
+.segmented {
+  display: inline-flex;
+  padding: 4px;
+  gap: 4px;
+  background: var(--pet-accent-soft);
+  border: 1.5px solid var(--pet-accent-strong-border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.segmented__item {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--pet-muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 7px 14px;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background 150ms ease, color 150ms ease, box-shadow 150ms ease;
+  min-height: 36px; /* 触摸目标 ≥44px 的底线之上 */
+}
+.segmented__item:not(:disabled):hover { color: var(--pet-accent); }
+.segmented__item.is-active {
+  background: #fff;
+  color: var(--pet-accent);
+  box-shadow: 0 2px 8px var(--pet-primary-shadow);
+}
+.segmented__item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 切换部署模式前的确认条 */
+.settings-confirm {
+  margin: 14px 0 4px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: var(--pet-accent-soft);
+  border: 1.5px solid var(--pet-accent-strong-border);
+  animation: from-fade 220ms ease both;
+}
+.settings-confirm__text {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--pet-accent);
+}
+.settings-confirm__actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
 
 /* 控件纵向铺开（窄屏或长表单） */
 .settings-row--column {

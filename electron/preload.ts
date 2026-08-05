@@ -29,6 +29,9 @@ contextBridge.exposeInMainWorld("tokenApi", {
   ): Promise<{ ok: boolean; server: { wsUrl: string; httpUrl: string } }> =>
     ipcRenderer.invoke("deploy:set-server", server),
   setSession: (token: string | null): Promise<void> => ipcRenderer.invoke("deploy:set-session", token),
+  // 切换部署模式（本地部署 ⇄ 连接远程服务端）；主进程会清除对方模式残留并重启。
+  switchMode: (target: "local" | "remote"): Promise<void> =>
+    ipcRenderer.invoke("deploy:switch-mode", target),
   login: (username: string, password: string): Promise<{ ok: boolean; uid?: number; message?: string }> =>
     ipcRenderer.invoke("token:login", { username, password }),
   register: (username: string, password: string): Promise<{ ok: boolean; message?: string }> =>

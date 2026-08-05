@@ -23,6 +23,7 @@ interface TokenApiBridge {
     getCapabilities(): Promise<{ localAvailable: boolean }>;
     setDeployServer(server: { wsUrl: string; httpUrl: string }): Promise<{ ok: boolean; server: { wsUrl: string; httpUrl: string } }>;
     setSession(token: string | null): Promise<void>;
+    switchMode(target: "local" | "remote"): Promise<void>;
     login(username: string, password: string): Promise<{ ok: boolean; uid?: number; message?: string }>;
     register(username: string, password: string): Promise<{ ok: boolean; message?: string }>;
     request(request: { method: 'GET' | 'POST' | 'PUT'; path: string; body: Record<string, unknown> }): Promise<{ status: number; data: Record<string, unknown> }>;
@@ -172,14 +173,37 @@ export function useApiToken() {
         }
     }
 
-    async function updateProfile(patch: { model?: string; apiEndpoint?: string; token?: string; searchKey?: string; searchEndpoint?: string; searchProvider?: string }) {
+    async function updateProfile(patch: {
+        // 远程模式下「原生」命名（/api/profile 直接吃 apiEndpoint/token 的字段名）。
+        model?: string;
+        apiEndpoint?: string;
+        token?: string;
+        searchKey?: string;
+        searchEndpoint?: string;
+        searchProvider?: string;
+        // 兼容形态：ModelConfigSettings.handleSave 在本地/远程模式下共用同一份 patch，
+        // 但本地模式 patch 的字段名是 endpoint / key。若只用 remote 字段名，
+        // 远程模式下 endpoint/token 会被静默丢弃导致后端 INSERT 出空 token（用户实际遇到过）。
+        endpoint?: string;
+        key?: string;
+    }) {
         isLoading.value = true;
         error.value = '';
         try {
+            // 双形态归一化：优先用 remote 字段名（更贴合 /api/profile），回退到 local 形态。
+            const apiEndpoint =
+                patch.apiEndpoint !== undefined
+                    ? patch.apiEndpoint
+                    : patch.endpoint !== undefined
+                      ? patch.endpoint
+                      : undefined;
+            const token =
+                patch.token !== undefined ? patch.token : patch.key !== undefined ? patch.key : undefined;
+
             const body: Record<string, string> = {};
             if (patch.model !== undefined) body.model = patch.model;
-            if (patch.apiEndpoint !== undefined) body.api_endpoint = patch.apiEndpoint;
-            if (patch.token !== undefined) body.token = patch.token;
+            if (apiEndpoint !== undefined) body.api_endpoint = apiEndpoint;
+            if (token !== undefined) body.token = token;
             if (patch.searchKey !== undefined) body.search_key = patch.searchKey;
             if (patch.searchEndpoint !== undefined) body.search_endpoint = patch.searchEndpoint;
             if (patch.searchProvider !== undefined) body.search_provider = patch.searchProvider;
@@ -206,6 +230,11 @@ export function useApiToken() {
 
     async function logout() {
         await getBridge().setSession(null);
+    }
+
+    // 切换部署模式（本地部署 ⇄ 连接远程服务端）。主进程会清除对方模式残留并重启应用。
+    async function switchMode(target: "local" | "remote"): Promise<void> {
+        await getBridge().switchMode(target);
     }
 
     // ---- 本地模式：直接读写模型配置文件（config.json） ----
@@ -291,5 +320,5 @@ export function useApiToken() {
         }
     }
 
-    return { isLoading, error, getDeployConfig, getCapabilities, setDeployServer, login, register, getProfile, updateProfile, logout, readProfileCache, getModelConfig, setModelConfig, onModelConfigChanged };
+    return { isLoading, error, getDeployConfig, getCapabilities, setDeployServer, login, register, getProfile, updateProfile, logout, switchMode, readProfileCache, getModelConfig, setModelConfig, onModelConfigChanged };
 }

@@ -129,27 +129,27 @@ Function ModelConfigShow
   ${EndIf}
 
   ; ── 标题 ──────────────────────────────────────────────────────
-  ${NSD_CreateLabel} 0 0      100% 16u "模型配置"
+  ${NSD_CreateLabel} 0 0      100% 14u "模型配置"
 
-  ${NSD_CreateLabel} 0 18u    100% 20u "配置大模型连接信息，留空可稍后在程序「设置」中填写。"
+  ${NSD_CreateLabel} 0 16u    100% 18u "配置大模型连接信息。本地部署模式也需要填写（这是调用大模型的密钥，不是本地后端地址），留空可稍后在程序「设置」中填写。"
 
   ; ── API Endpoint（标签与输入框同行，节省垂直空间） ────────
-  ${NSD_CreateLabel}   0 44u   75u 12u "API Endpoint："
-  ${NSD_CreateText}    78u 42u  100% 14u "https://api.chatanywhere.tech/v1"
+  ${NSD_CreateLabel}   0 40u   75u 12u "API Endpoint："
+  ${NSD_CreateText}    78u 38u  180u 14u "https://api.chatanywhere.tech/v1"
   Pop $ModelCfgEndpointBox
 
   ; ── 模型名称 ─────────────────────────────────────────────────
-  ${NSD_CreateLabel}   0 64u   75u 12u "模型名称："
-  ${NSD_CreateText}    78u 62u  100% 14u "gpt-5.4-mini"
+  ${NSD_CreateLabel}   0 58u   75u 12u "模型名称："
+  ${NSD_CreateText}    78u 56u  180u 14u "gpt-5.4-mini"
   Pop $ModelCfgModelBox
 
-  ; ── API Key ───────────────────────────────────────────────────
-  ${NSD_CreateLabel}   0 84u   75u 12u "API Key："
-  ${NSD_CreatePassword}78u 82u  100% 14u ""
+  ; ── API Key（显式宽度 180u，避免 100% 宽度在部分 DPI/主题下溢出导致不可见） ──
+  ${NSD_CreateLabel}   0 76u   75u 12u "API Key："
+  ${NSD_CreatePassword}78u 74u  180u 14u ""
   Pop $ModelCfgKeyBox
 
-  ; ── 跳过勾选框（确保在可见区域内） ─────────────────────────
-  ${NSD_CreateCheckBox} 0 106u  100% 12u "跳过，稍后再配置"
+  ; ── 跳过勾选框（压缩纵向间距，确保密钥框与勾选框均在可见区域内） ──
+  ${NSD_CreateCheckBox} 0 96u   100% 12u "跳过，稍后再配置"
   Pop $ModelCfgSkipBox
 
   nsDialogs::Show
@@ -249,11 +249,46 @@ FunctionEnd
 # 仅卸载构建期展开本宏（避免安装构建引用未定义符号触发告警）。
 # ============================================================================
 !ifdef BUILD_UNINSTALLER
+# ── 卸载前可选「清除所有配置和个人数据」自定义页 ──────────────────────
+# 在确认卸载前插入一个勾选页：勾选后于 customUnInstall 中删除
+# %APPDATA%\akisaki-kirari 与 %LOCALAPPDATA%\akisaki-kirari（配置/登录态/皮肤/日志全清）。
+# 默认不勾选，避免误删；仅卸载构建展开本段，安装构建不引用。
+Var UninstCleanChk
+Var UninstCleanState
+
+Function un.CleanDataShow
+  nsDialogs::Create 1018
+  Pop $0
+  ${If} $0 == error
+    Abort
+  ${EndIf}
+  ${NSD_CreateLabel} 0 0 100% 28u "删除程序时，是否同时清除本机上的所有个人数据？"
+  ${NSD_CreateLabel} 0 30u 100% 32u "包括配置文件、登录态、已下载皮肤与日志（位于 %APPDATA%\akisaki-kirari 与 %LOCALAPPDATA%\akisaki-kirari）。此操作不可恢复。"
+  ${NSD_CreateCheckBox} 0 66u 100% 12u "同时清除所有配置和个人数据"
+  Pop $UninstCleanChk
+  nsDialogs::Show
+FunctionEnd
+
+Function un.CleanDataLeave
+  ${NSD_GetState} $UninstCleanChk $UninstCleanState
+FunctionEnd
+
+Page custom un.CleanDataShow un.CleanDataLeave
+
 !macro customUnInstall
   ClearErrors
   ExecWait '"$INSTDIR\aki-kirari-pet.exe" --clear-auto-launch' $R0
   ${If} $R0 != "0"
     DetailPrint "清理开机启动登录项返回: $R0"
+  ${EndIf}
+  ${If} $UninstCleanState == 1
+    ${If} $APPDATA != ""
+      RMDir /r "$APPDATA\akisaki-kirari"
+    ${EndIf}
+    ${If} $LOCALAPPDATA != ""
+      RMDir /r "$LOCALAPPDATA\akisaki-kirari"
+    ${EndIf}
+    DetailPrint "已清除配置与个人数据"
   ${EndIf}
 !macroend
 !endif

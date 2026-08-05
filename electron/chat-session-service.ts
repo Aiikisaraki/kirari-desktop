@@ -311,6 +311,8 @@ export class ChatSessionService {
                     : [];
                 this.state.messages.push(this.createMessage("pet", speech, emotion, images));
                 this.state.waitingForReply = false;
+                // 收到正常回复即清除之前的错误提示（如“大模型未配置”），横幅随之消失。
+                this.state.lastError = "";
                 this.state.bubbleMessage = speech.length <= 10 ? speech : LONG_REPLY_PROMPT;
                 this.state.bubbleInteractive = speech.length > 10;
                 this.persist();
