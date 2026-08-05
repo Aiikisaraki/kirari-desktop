@@ -273,7 +273,7 @@ Function un.CleanDataLeave
   ${NSD_GetState} $UninstCleanChk $UninstCleanState
 FunctionEnd
 
-Page custom un.CleanDataShow un.CleanDataLeave
+UninstPage custom un.CleanDataShow un.CleanDataLeave
 
 !macro customUnInstall
   ClearErrors
