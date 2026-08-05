@@ -3,18 +3,18 @@ import { ref, onMounted } from "vue";
 import { useToast } from "../../composables/useToast";
 
 interface SkillTool {
-  name: string;
-  description: string;
-  parameters: unknown;
-  exec: { kind: "http" | "echo"; url?: string; method?: string };
+    name: string;
+    description: string;
+    parameters: unknown;
+    exec: { kind: "http" | "echo"; url?: string; method?: string };
 }
 interface Skill {
-  id: string;
-  name: string;
-  description: string;
-  enabled: boolean;
-  prompt?: string;
-  tools?: SkillTool[];
+    id: string;
+    name: string;
+    description: string;
+    enabled: boolean;
+    prompt?: string;
+    tools?: SkillTool[];
 }
 
 const toast = useToast();
@@ -24,176 +24,308 @@ const showEditor = ref(false);
 const editing = ref<Skill | null>(null);
 
 function genId() {
-  return "skill-" + Math.random().toString(36).slice(2, 9);
+    return "skill-" + Math.random().toString(36).slice(2, 9);
 }
 
 async function load() {
-  loading.value = true;
-  try {
-    const list = (await (window as any).skillApi.list()) as Skill[];
-    skills.value = Array.isArray(list) ? list : [];
-  } catch (e) {
-    toast.error("读取技能配置失败");
-  } finally {
-    loading.value = false;
-  }
+    loading.value = true;
+    try {
+        const list = (await (window as any).skillApi.list()) as Skill[];
+        skills.value = Array.isArray(list) ? list : [];
+    } catch (e) {
+        toast.error("读取技能配置失败");
+    } finally {
+        loading.value = false;
+    }
 }
 
 function openAdd() {
-  editing.value = { id: genId(), name: "", description: "", enabled: true, prompt: "", tools: [] };
-  showEditor.value = true;
+    editing.value = {
+        id: genId(),
+        name: "",
+        description: "",
+        enabled: true,
+        prompt: "",
+        tools: [],
+    };
+    showEditor.value = true;
 }
 
 function openEdit(s: Skill) {
-  editing.value = JSON.parse(JSON.stringify(s));
-  showEditor.value = true;
+    editing.value = JSON.parse(JSON.stringify(s));
+    showEditor.value = true;
 }
 
 async function save() {
-  if (!editing.value) return;
-  if (!editing.value.name.trim()) {
-    toast.error("请填写技能名称");
-    return;
-  }
-  const idx = skills.value.findIndex((x) => x.id === editing.value!.id);
-  if (idx >= 0) skills.value[idx] = { ...editing.value };
-  else skills.value.push({ ...editing.value });
-  await persist();
-  showEditor.value = false;
+    if (!editing.value) return;
+    if (!editing.value.name.trim()) {
+        toast.error("请填写技能名称");
+        return;
+    }
+    const idx = skills.value.findIndex((x) => x.id === editing.value!.id);
+    if (idx >= 0) skills.value[idx] = { ...editing.value };
+    else skills.value.push({ ...editing.value });
+    await persist();
+    showEditor.value = false;
 }
 
 async function remove(s: Skill) {
-  skills.value = skills.value.filter((x) => x.id !== s.id);
-  await persist();
+    skills.value = skills.value.filter((x) => x.id !== s.id);
+    await persist();
 }
 
 async function toggle(s: Skill) {
-  s.enabled = !s.enabled;
-  await persist();
+    s.enabled = !s.enabled;
+    await persist();
 }
 
 async function persist() {
-  try {
-    await (window as any).skillApi.save(skills.value);
-    toast.success("技能配置已保存");
-  } catch (e) {
-    toast.error("保存失败");
-  }
+    try {
+        await (window as any).skillApi.save(skills.value);
+        toast.success("技能配置已保存");
+    } catch (e) {
+        toast.error("保存失败");
+    }
 }
 
 onMounted(load);
 </script>
 
 <template>
-  <section class="settings-section">
-    <h3 class="settings-section__title">🧩 技能（Skill）</h3>
-    <p class="settings-section__desc">
-      技能既可以是「行为模板」（注入模型系统指令，调整桌宠的语气/人设），也可以绑定「可调用工具」
-      （如 HTTP 接口）。启用中的技能会在对话时生效，其工具会被注册到后端供模型调用。
-    </p>
-
-    <div v-if="loading" class="skill-empty">加载中…</div>
-    <div v-else-if="skills.length === 0" class="skill-empty">尚未添加任何技能。</div>
-
-    <ul v-else class="skill-list">
-      <li v-for="s in skills" :key="s.id" class="skill-item">
-        <div class="skill-item__main">
-          <span class="skill-item__name">{{ s.name }}</span>
-          <span class="skill-item__desc">{{ s.description }}</span>
-          <span v-if="s.tools && s.tools.length" class="skill-item__tag">
-            {{ s.tools.length }} 个工具
-          </span>
-        </div>
-        <div class="skill-item__actions">
-          <label class="switch">
-            <input type="checkbox" :checked="s.enabled" @change="toggle(s)" />
-            <span class="switch__slider"></span>
-          </label>
-          <button class="btn-ghost" @click="openEdit(s)">编辑</button>
-          <button class="btn-ghost btn-danger" @click="remove(s)">删除</button>
-        </div>
-      </li>
-    </ul>
-
-    <button class="btn-primary" @click="openAdd">+ 添加技能</button>
-
-    <div v-if="showEditor && editing" class="skill-modal" @click.self="showEditor = false">
-      <div class="skill-modal__panel">
-        <h4>编辑技能</h4>
-        <label class="field">
-          <span>名称</span>
-          <input v-model="editing.name" placeholder="例如：贴心助手" />
-        </label>
-        <label class="field">
-          <span>描述</span>
-          <input v-model="editing.description" placeholder="一句话说明这个技能的作用" />
-        </label>
-        <label class="field">
-          <span>行为模板（注入系统指令）</span>
-          <textarea v-model="editing.prompt" rows="4" placeholder="例如：你是一只温柔的桌宠，回答简洁友好…"></textarea>
-        </label>
-        <label class="field field--inline">
-          <input type="checkbox" v-model="editing.enabled" />
-          <span>启用该技能</span>
-        </label>
-        <p class="skill-hint">
-          工具（可选）：当前内置示例技能已包含一个「回显」工具。如需自定义 HTTP 工具，可在
-          <code>skills.json</code> 中手动添加 <code>tools</code> 字段。
+    <section id="skill" class="settings-card">
+        <h3 class="settings-card__title">
+            <span class="title-emoji">🧩</span>
+            <span>技能</span>
+        </h3>
+        <p class="settings-card__desc">
+            技能既可以是「行为模板」（注入模型系统指令，调整桌宠的语气/人设），也可以绑定「可调用工具」
+            （如 HTTP 接口）。启用中的技能会在对话时生效，其工具会被注册到后端供模型调用。
         </p>
-        <div class="skill-modal__actions">
-          <button class="btn-ghost" @click="showEditor = false">取消</button>
-          <button class="btn-primary" @click="save">保存</button>
+
+        <div v-if="loading" class="settings-card__group">
+            <span class="settings-hint">加载中…</span>
         </div>
-      </div>
-    </div>
-  </section>
+        <div v-else-if="skills.length === 0" class="settings-card__group">
+            <span class="settings-hint">尚未添加任何技能，点击下方按钮开始接入。</span>
+        </div>
+
+        <ul v-else class="skill-list">
+            <li v-for="s in skills" :key="s.id" class="skill-item">
+                <div class="skill-item__main">
+                    <span class="skill-item__name">{{ s.name }}</span>
+                    <span class="skill-item__desc">{{ s.description }}</span>
+                    <span v-if="s.tools && s.tools.length" class="skill-item__tag">
+                        {{ s.tools.length }} 个工具
+                    </span>
+                </div>
+                <div class="skill-item__actions">
+                    <label class="switch" :aria-label="`启用 ${s.name}`">
+                        <input
+                            type="checkbox"
+                            :checked="s.enabled"
+                            @change="toggle(s)"
+                        />
+                        <span class="switch__slider"></span>
+                    </label>
+                    <button
+                        type="button"
+                        class="btn btn--ghost btn--sm"
+                        @click="openEdit(s)"
+                    >
+                        编辑
+                    </button>
+                    <button
+                        type="button"
+                        class="btn btn--ghost btn--sm btn--danger"
+                        @click="remove(s)"
+                    >
+                        删除
+                    </button>
+                </div>
+            </li>
+        </ul>
+
+        <div class="settings-card__group skill-add">
+            <button class="btn btn--import btn--block" @click="openAdd">
+                + 添加技能
+            </button>
+        </div>
+
+        <!-- 编辑弹层 -->
+        <div
+            v-if="showEditor && editing"
+            class="skill-modal"
+            @click.self="showEditor = false"
+        >
+            <div class="skill-modal__panel">
+                <h4>编辑技能</h4>
+                <label class="field">
+                    <span class="field-label">名称</span>
+                    <input
+                        v-model="editing.name"
+                        class="text-input"
+                        placeholder="例如：贴心助手"
+                    />
+                </label>
+                <label class="field">
+                    <span class="field-label">描述</span>
+                    <input
+                        v-model="editing.description"
+                        class="text-input"
+                        placeholder="一句话说明这个技能的作用"
+                    />
+                </label>
+                <label class="field">
+                    <span class="field-label">行为模板（注入系统指令）</span>
+                    <textarea
+                        v-model="editing.prompt"
+                        class="text-input"
+                        rows="4"
+                        placeholder="例如：你是一只温柔的桌宠，回答简洁友好…"
+                        style="resize: vertical; padding-top: 10px; padding-bottom: 10px"
+                    />
+                </label>
+                <label class="checkbox-row">
+                    <input type="checkbox" v-model="editing.enabled" />
+                    <span>启用该技能</span>
+                </label>
+                <p class="settings-hint">
+                    工具（可选）：当前内置示例技能已包含一个「回显」工具。如需自定义 HTTP
+                    工具，可在 <code>skills.json</code> 中手动添加 <code>tools</code> 字段。
+                </p>
+                <div class="btn-row">
+                    <button
+                        type="button"
+                        class="btn btn--ghost"
+                        @click="showEditor = false"
+                    >
+                        取消
+                    </button>
+                    <button type="button" class="btn btn--primary" @click="save">
+                        保存
+                    </button>
+                </div>
+            </div>
+        </div>
+    </section>
 </template>
 
 <style scoped>
-.settings-section { padding: 4px 0; }
-.settings-section__title { margin: 0 0 6px; font-size: 15px; }
-.settings-section__desc { margin: 0 0 14px; font-size: 12.5px; color: var(--text-2, #9aa0a6); line-height: 1.6; }
-.skill-empty { font-size: 13px; color: var(--text-2, #9aa0a6); padding: 8px 0 14px; }
-.skill-list { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+/* 基础样式：窄窗口（视口 < 860px）沿用你喜欢的原样，不做任何改动 */
+.skill-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
 .skill-item {
-  display: flex; align-items: center; justify-content: space-between;
-  background: var(--panel-2, #f3f4f6); border-radius: 10px; padding: 10px 12px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: center;
+    padding: 12px 14px;
+    border-radius: 14px;
+    background: var(--pet-accent-soft);
+    border: 1px dashed var(--pet-accent-strong-border);
 }
-.skill-item__main { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
-.skill-item__name { font-weight: 600; font-size: 13.5px; }
-.skill-item__desc { font-size: 11.5px; color: var(--text-2, #9aa0a6); }
-.skill-item__tag { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: #e6fcf5; color: #0ca678; }
-.skill-item__actions { display: flex; align-items: center; gap: 8px; }
-.btn-ghost {
-  border: 1px solid var(--border, #dcdce3); background: transparent; color: var(--text, #333);
-  border-radius: 8px; padding: 4px 10px; font-size: 12.5px; cursor: pointer;
+.skill-item__main {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex-wrap: wrap;
 }
-.btn-danger { color: #e03131; border-color: #ffc9c9; }
-.btn-primary {
-  background: var(--accent, #5b6cff); color: #fff; border: none; border-radius: 8px;
-  padding: 7px 14px; font-size: 13px; cursor: pointer;
+.skill-item__name {
+    font-weight: 700;
+    font-size: 13.5px;
+    color: var(--pet-ink);
 }
-.switch { position: relative; display: inline-block; width: 38px; height: 20px; }
-.switch input { opacity: 0; width: 0; height: 0; }
-.switch__slider { position: absolute; inset: 0; background: #cfcfd6; border-radius: 999px; transition: .2s; }
-.switch input:checked + .switch__slider { background: var(--accent, #5b6cff); }
+.skill-item__desc {
+    font-size: 12.5px;
+    color: var(--pet-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 220px;
+}
+.skill-item__tag {
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: rgba(22, 163, 74, 0.1);
+    color: #16a34a;
+    font-weight: 700;
+}
+.skill-item__actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 0 auto;
+}
+/* 宽窗口（视口 ≥ 860px）：列表限宽 760 居中 + 加大 item 内边距，
+   避免 item 在宽卡里被拉成"丝带"且内边距显得过薄。
+   窄窗口完全不进这个 media query，保持原样。 */
+@media (min-width: 860px) {
+    .skill-list {
+        width: 100%;
+        max-width: 760px;
+        margin: 0 auto;
+        gap: 14px;
+    }
+    .skill-item {
+        padding: 18px 24px;
+        gap: 16px;
+        border-radius: 16px;
+    }
+    .skill-item__main { gap: 10px; }
+    .skill-item__name,
+    .skill-item__tag { flex: 0 0 auto; }
+    .skill-item__desc {
+        font-size: 13px;
+        white-space: normal;
+        max-width: 360px;
+        flex: 1 1 200px;
+        line-height: 1.5;
+    }
+    .skill-item__actions { gap: 10px; }
+}
+.btn--danger {
+    color: var(--pet-danger);
+    border-color: rgba(243, 18, 96, 0.3);
+    background: rgba(243, 18, 96, 0.05);
+}
+.btn--danger:not(:disabled):hover {
+    background: rgba(243, 18, 96, 0.12);
+}
+
+/* 弹层 */
 .skill-modal {
-  position: fixed; inset: 0; background: rgba(0,0,0,.35); display: flex;
-  align-items: center; justify-content: center; z-index: 50;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
 }
 .skill-modal__panel {
-  width: 460px; max-width: 90vw; background: var(--panel, #fff); border-radius: 14px;
-  padding: 18px 20px; display: flex; flex-direction: column; gap: 10px;
+    width: 480px;
+    max-width: 92vw;
+    background: var(--pet-surface-strong);
+    border: 1px solid var(--pet-border);
+    border-radius: 18px;
+    padding: 18px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    box-shadow: 0 18px 48px rgba(15, 23, 42, 0.2);
 }
-.skill-modal__panel h4 { margin: 0 0 4px; }
-.field { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
-.field > span { color: var(--text-2, #9aa0a6); }
-.field input, .field textarea, .field select {
-  border: 1px solid var(--border, #dcdce3); border-radius: 8px; padding: 6px 9px; font-size: 13px;
-  font-family: inherit; resize: vertical;
+.skill-modal__panel h4 {
+    margin: 0 0 4px;
+    font-size: 15px;
+    font-weight: 800;
+    color: var(--pet-ink);
 }
-.field--inline { flex-direction: row; align-items: center; gap: 6px; }
-.skill-hint { font-size: 11.5px; color: var(--text-2, #9aa0a6); line-height: 1.5; margin: 0; }
-.skill-hint code { background: var(--panel-2, #f3f4f6); padding: 1px 5px; border-radius: 4px; }
-.skill-modal__actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 6px; }
 </style>

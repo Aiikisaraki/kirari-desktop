@@ -12,7 +12,12 @@
   display: flex;
   flex-direction: column;
   height: 100%;
-  overflow: hidden;
+  /* 之前 overflow: hidden 会把 AccountSettings 里两张卡中的第二张
+     在视口外裁切。改成 overflow-y: auto 让整页可滚：
+     侧栏已是 position: sticky，顶部 .settings-top 也将加 sticky，
+     滚动时导航区不丢失。 */
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 .settings-root::before,
 .settings-root::after {
@@ -42,7 +47,9 @@
   z-index: 1;
 }
 
-/* ---------- 顶部：问候条 + 图标胶囊导航，合并为单一轻卡片 ---------- */
+/* ---------- 顶部 sticky 头：仅移动端 ----------
+   桌面端由 .settings-greeting-bar 在右栏顶部单独承担问候条职责，
+   避免「全宽顶部头 + 侧栏 + 问候条『账号』/侧栏『账号』」的视觉冲突。 */
 .settings-top {
   margin: 10px 12px 6px;
   padding: 8px 10px 6px;
@@ -52,6 +59,29 @@
   box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06);
   display: grid;
   gap: 8px;
+  flex: 0 0 auto;
+}
+/* 仅 .settings-top--mobile（移动端）走 sticky + 半透明毛玻璃背景 */
+.settings-top.settings-top--mobile {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  background: rgba(255, 255, 255, 0.78);
+}
+
+/* ---------- 桌面端问候条（仅占右栏顶部，不和侧栏重复） ---------- */
+.settings-greeting-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  border-radius: 18px;
+  background: var(--pet-surface-strong);
+  border: 1px solid var(--pet-border);
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06);
   flex: 0 0 auto;
 }
 
@@ -210,33 +240,49 @@
 .settings-main {
   flex: 1 1 auto;
   min-height: 0;
-  overflow-y: auto;
-  scroll-behavior: smooth;
+  /* 整页滚动由 .settings-root 负责，移动端不再嵌套滚动容器 */
   padding: 14px 14px 40px;
 }
-.settings-main__inner {
-  display: grid;
-  gap: 16px;
-  max-width: 540px;
-  margin: 0 auto;
+.settings-main__card {
+  display: block;
   width: 100%;
+  max-width: 100%;
+  margin: 0;
+  /* 取消 max-height 与 overflow-y，让多卡内容自然堆叠完整显示 */
 }
+/* 移动端整页滚动由 .settings-root 接管，本容器不再嵌套滚动 */
 
 /* ---------- 区块卡片 ---------- */
 .settings-card {
   position: relative;
   display: grid;
-  gap: 12px;
-  padding: 20px 18px 18px;
+  align-content: start;
+  grid-auto-rows: auto;
+  /* 卡片内垂直间距（24 → 18）：之前 24 让标题/描述/group/row 之间每段都漂 24px，
+     累积下来整张卡被空白撑得很高；18 是 "看得见节奏但仍能呼吸" 的甜点，
+     与横版专属样式（写在 @media 里）自然衔接。 */
+  gap: 18px;
+  /* .settings-card 在桌面端 .settings-shell（grid 容器）里被作为 grid item，
+     align-self: start 让它按内容高度自适应、不被拉伸到同列最高——这是
+     「卡片套卡片」嵌套时想要的。
+     但在多卡组件 .settings-account-wrap（flex column）里，align-self: start
+     会让子卡收缩到内容宽——探针已证实：card0 width=557（内容撑大）、card1 width=337.8（收缩）。
+     所以这条规则只对 .settings-shell 内部的 .settings-card 生效，
+     多卡组件里的子卡由下方 stretch 规则显式拉满。 */
+  /* 基础 padding：34px 是竖版用户认可的"挺好"状态，左右留白已经够；
+     横版（≥860px）在 @media 里单独加大到 48，避免横卡内容贴边。
+     padding-bottom 从 32 → 22，与「移除 group:last-of-type 的底 padding」叠加，
+     让卡片底部不再留出 50px+ 空白带。 */
+  padding: 34px 34px 22px;
   border-radius: 22px;
   background: var(--pet-surface-strong);
   border: 1px solid var(--pet-border);
   box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06);
-  /* 与 SettingsNav.go() 中 sticky 头高度 + 12px 边距保持一致；
-     即便将来用 scrollIntoView 也能正确落在头下方，不会顶没头部。 */
-  scroll-margin-top: 92px;
   overflow: hidden;
 }
+/* 仅桌面端 .settings-shell（grid 容器）里 .settings-card 才 align-self: start，
+   多卡组件 .settings-account-wrap（flex column）下保持 stretch，让子卡撑满容器。 */
+.settings-shell > * > .settings-card { align-self: start; }
 /* 卡片顶部彩色细线（视觉签名） */
 .settings-card::before {
   content: "";
@@ -250,38 +296,69 @@
   opacity: 0.75;
 }
 
+/* 卡片挂载淡入：每次 :key 变化导致组件挂载时，从 from-fade 状态淡入到正常态。
+   相比 <Transition mode="out-in"> 更可控：不会因为 transitionend
+   被其他 CSS 覆盖而卡住。 */
+.from-fade {
+  animation: fromFade 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes fromFade {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .from-fade { animation: none; }
+}
+
 .settings-card__title {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 14px;
   margin: 0;
-  font-size: 15.5px;
+  /* 标题字号再加大一档（17 → 19），与描述的字号拉开更明显的视觉层级 */
+  font-size: 19px;
   font-weight: 800;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.4px;
   color: var(--pet-ink);
+  /* 标题与下方描述之间额外下边距（2 → 8），让"标题行"和"描述段"有清晰的句子间距 */
+  padding-bottom: 8px;
 }
 .settings-card__title .title-emoji {
-  font-size: 20px;
+  font-size: 24px;
   line-height: 1;
   display: inline-grid;
   place-items: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 12px;
+  /* emoji 块再加大（42 → 46），整体视觉锚点更醒目 */
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
   background: var(--pet-accent-soft);
   flex: 0 0 auto;
+  box-shadow: 0 4px 10px var(--pet-primary-shadow);
 }
 .settings-card__desc {
   margin: 0;
   color: var(--pet-muted);
-  font-size: 12.5px;
-  line-height: 1.6;
+  /* 描述字号 13.5 → 14.5，行高 1.7 → 1.75；letter-spacing +0.2px 让中文段落
+     视觉密度更松；同时加 padding-top 给标题与描述之间多 4px 呼吸（叠加 grid gap 24） */
+  font-size: 14.5px;
+  line-height: 1.75;
+  letter-spacing: 0.2px;
+  /* 描述与下方内容（list / form / group）之间多留 12px，
+     避免 "一句话紧贴着 list 第一行" 的压迫感 */
+  padding-bottom: 12px;
 }
 
 /* ---------- 表单字段 ---------- */
-.field { display: grid; gap: 7px; }
+.field { display: grid; gap: 9px; }
 .field > .field-label {
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 700;
   color: var(--pet-muted);
   letter-spacing: 0.2px;
@@ -289,14 +366,14 @@
 .text-input,
 .settings-select {
   width: 100%;
-  height: 42px;
-  padding: 0 14px;
+  height: 44px;
+  padding: 0 16px;
   border: 1.5px solid var(--pet-border);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.7);
   color: var(--pet-ink);
   font: inherit;
-  font-size: 14px;
+  font-size: 14.5px;
   transition: border-color 180ms ease, box-shadow 180ms ease, background 180ms ease;
 }
 .text-input::placeholder { color: var(--pet-muted); opacity: 0.65; }
@@ -372,35 +449,38 @@
 .settings-hint {
   margin: 0;
   color: var(--pet-muted);
-  font-size: 12px;
-  line-height: 1.6;
+  /* 提示字号 12.5 → 13.5，行高 1.65 → 1.7，与描述字号层级一致 */
+  font-size: 13.5px;
+  line-height: 1.7;
 }
 .settings-hint--warn { color: var(--pet-danger); font-weight: 600; }
 .settings-card code, .settings-hint code {
   background: var(--pet-accent-soft);
   color: var(--pet-accent);
-  padding: 1px 6px;
-  border-radius: 6px;
-  font-size: 11.5px;
+  padding: 2px 8px;
+  border-radius: 7px;
+  font-size: 12.5px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 .settings-error {
   margin: 0;
   color: var(--pet-danger);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
-  padding: 8px 12px;
-  border-radius: 12px;
+  /* 错误提示 padding 10/14 → 14/18，让整张 banner 更显眼、内文不贴边 */
+  padding: 14px 18px;
+  border-radius: 14px;
   background: rgba(243, 18, 96, 0.08);
   border: 1px solid rgba(243, 18, 96, 0.18);
 }
 .settings-success {
   margin: 0;
   color: #16a34a;
-  font-size: 12.5px;
+  font-size: 13.5px;
   font-weight: 600;
-  padding: 8px 12px;
-  border-radius: 12px;
+  /* 成功提示 padding 10/14 → 14/18，与错误 banner 对齐 */
+  padding: 14px 18px;
+  border-radius: 14px;
   background: rgba(22, 163, 74, 0.08);
   border: 1px solid rgba(22, 163, 74, 0.18);
 }
@@ -419,20 +499,20 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
-  height: 40px;
-  padding: 0 18px;
+  gap: 8px;
+  height: 42px;
+  padding: 0 20px;
   border: 0;
   border-radius: 14px;
   font: inherit;
-  font-size: 13.5px;
+  font-size: 14px;
   font-weight: 700;
   cursor: pointer;
   transition: filter 160ms ease, transform 160ms ease, background 160ms ease,
               border-color 160ms ease, box-shadow 160ms ease;
 }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn--sm { height: 32px; padding: 0 12px; font-size: 12.5px; border-radius: 11px; }
+.btn--sm { height: 34px; padding: 0 14px; font-size: 13px; border-radius: 12px; }
 .btn--primary {
   color: #fff;
   background: var(--pet-accent);
@@ -497,12 +577,23 @@
 @media (max-width: 480px) {
   .theme-grid { grid-template-columns: 1fr; }
 }
+/* 宽窗口（视口 ≥ 860px）：2 列主题卡整体限宽 760 居中，
+   避免在宽卡下被拉到 400+px 一张导致左 swatch+文字、右大片空白。 */
+@media (min-width: 860px) {
+  .theme-grid {
+    max-width: 760px;
+    margin: 0 auto;
+    gap: 14px;
+  }
+  .theme-card { padding: 16px 20px; }
+}
 .theme-card {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px 14px;
+  gap: 14px;
+  /* 主题块 padding 加大（12 14 → 14 16），与外卡新节奏匹配 */
+  padding: 14px 16px;
   border: 1.5px solid var(--pet-border);
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.6);
@@ -597,16 +688,16 @@
 }
 
 /* ---------- 联网搜索提供商（圆角胶囊式单选） ---------- */
-.provider-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+.provider-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 2px; }
 .provider-option {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  padding: 6px 12px;
+  gap: 8px;
+  padding: 8px 14px;
   border: 1.5px solid var(--pet-border);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.55);
-  font-size: 13px;
+  font-size: 13.5px;
   font-weight: 600;
   color: var(--pet-ink);
   cursor: pointer;
@@ -640,8 +731,8 @@
 /* ---------- 形象管理 ---------- */
 .avatar-current {
   display: grid;
-  gap: 10px;
-  padding: 14px 16px;
+  gap: 12px;
+  padding: 16px 18px;
   border-radius: 16px;
   background: linear-gradient(135deg, var(--pet-accent-soft) 0%, rgba(255, 255, 255, 0.5) 100%);
   border: 1px dashed var(--pet-accent-strong-border);
@@ -661,15 +752,15 @@
 .avatar-tip {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: 9px;
   margin: 0;
-  padding: 10px 12px;
+  padding: 12px 14px;
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.6);
   border: 1px solid var(--pet-border);
   color: var(--pet-muted);
-  font-size: 12px;
-  line-height: 1.6;
+  font-size: 12.5px;
+  line-height: 1.65;
 }
 .avatar-tip svg { flex: 0 0 auto; margin-top: 1px; color: var(--pet-accent); }
 
@@ -699,10 +790,677 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 12px 14px;
+  gap: 12px;
+  padding: 14px 18px;
   border-radius: 14px;
   background: var(--pet-accent-soft);
+  /* 显式 width: 100%：作为 .settings-card (display: grid) 的子元素，
+     默认 justify-self: stretch 应当撑满 cell 宽，但 flex 容器在某些
+     情况下的 intrinsic size 会让 stretch 失效，导致 account-bar 收缩
+     到内容宽，"退出登录"按钮内缩一截，与第一张卡的"保存并重新连接"
+     满宽按钮在视觉上不对齐。显式 100% 兜底，确保两卡等宽。 */
+  width: 100%;
+  box-sizing: border-box;
 }
 .account-bar__name { font-weight: 700; color: var(--pet-ink); }
 .account-bar__name .me { color: var(--pet-accent); }
+
+/* =====================================================================
+   v2：响应式双栏 / 行状项（WorkBuddy 风格的"一行一控件"）
+   桌面 ≥ 720px：左侧固定垂直侧栏 + 右侧卡片堆叠
+   移动 < 720px：塌缩为顶部水平胶囊 + 单列卡片
+   与现有 .settings-card / .field / .btn 等向下兼容，原组件无需改动。
+   ===================================================================== */
+
+/* ---------- 顶部 sticky 头在双栏下也保留 ---------- */
+.settings-top {
+  position: relative;
+  z-index: 2;
+}
+
+/* ---------- 页面外壳：CSS Grid 双栏 ---------- */
+.settings-shell {
+  display: grid;
+  /* 侧栏固定宽，右栏撑满剩余空间（minmax 让 grid track 在极窄屏可被压缩） */
+  grid-template-columns: 232px minmax(0, 1fr);
+  gap: 18px;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 12px 18px 40px;
+  width: 100%;
+  max-width: 1280px;
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+.settings-shell__main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  /* 占满剩余高度，让卡片可以自然堆叠完整显示 */
+  flex: 1 1 auto;
+  /* 右栏卡片之间间距 */
+  gap: 16px;
+}
+
+/* AccountSettings / 等多卡 tab 的单根 wrapper：透明占位，不影响视觉。
+   gap 从 16 → 12 让两张卡视觉上更紧凑，"节奏一致"才像在同一列。 */
+.settings-account-wrap,
+.settings-stack-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+/* 桌面端：右栏圆角卡片主区域。
+   这里是"圆角卡片主区域"——修"内容对不齐"时我曾把它误改成无圆角背景的裸容器
+   （padding: 4px），导致外层视觉签名丢失、只剩里面区块自己的一张小卡。
+   现在恢复为一张铺满右栏的大圆角卡片，里面是当前区块的内容。 */
+.settings-shell__card {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  /* 基础 padding 34px（竖版用户认可的"挺好"值）；横版在 @media 里跳到 48 */
+  padding: 34px 34px 32px;
+  border-radius: 22px;
+  background: var(--pet-surface-strong);
+  border: 1px solid var(--pet-border);
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06);
+  overflow: hidden;
+  align-self: start;
+  scroll-behavior: smooth;
+}
+/* 桌面端下，区块自身的小圆角卡片透明融入主区域，避免"卡片套卡片"双层圆角 */
+.settings-shell__card .settings-card {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  border-radius: 0;
+  padding: 0;
+}
+.settings-shell__card .settings-card::before { display: none; }
+
+/* ---------- 多卡组件：让子卡独立显示，不再被外层 .settings-shell__card 包络 ----------
+   AccountSettings 用 .settings-account-wrap 包了两张 .settings-card，本意就是
+   "两张独立圆角白卡"（移动端表现正是如此）。
+
+   【Vue class 透传关键约束】<component class="settings-shell__card from-fade" />
+   会把这两个 class 合并到 AccountSettings 根元素 .settings-account-wrap 上——
+   也就是说 .settings-account-wrap 跟 .settings-shell__card 是**同一个元素**，
+   不是父子关系。所以选择器必须是复合类：.settings-shell__card.settings-account-wrap。
+   （之前的 .settings-shell__card:has(> .settings-account-wrap) 永远不匹配，
+    CSS 看起来写得"聪明"实际选了错结构——直接证据：
+    desktop 探针 hasSelectorMatches: false / sameElementCompound: true）
+
+   匹配成功后：
+   - 外层主区域自身透明（不再像普通单卡那样包络子卡）
+   - 子卡恢复圆角白卡 padding 34px、横版跳档 48px */
+.settings-shell__card.settings-account-wrap,
+.settings-shell__card.settings-stack-wrap {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  border-radius: 0;
+  padding: 0;
+  /* 显式 flex column + 12px gap：让两张子卡有清晰视觉分隔 */
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.settings-shell__card.settings-account-wrap::before,
+.settings-shell__card.settings-stack-wrap::before { display: none; }
+
+.settings-shell__card.settings-account-wrap > .settings-card,
+.settings-shell__card.settings-stack-wrap > .settings-card {
+  background: var(--pet-surface-strong);
+  border: 1px solid var(--pet-border);
+  border-radius: 22px;
+  padding: 34px 34px 22px;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06);
+}
+.settings-shell__card.settings-account-wrap > .settings-card::before,
+.settings-shell__card.settings-stack-wrap > .settings-card::before { display: block; }
+
+/* 多卡组件：横版（≥860px）子卡 padding 跳档到 48px，与单卡组件保持一致 */
+@media (min-width: 860px) {
+  .settings-shell__card.settings-account-wrap > .settings-card,
+  .settings-shell__card.settings-stack-wrap > .settings-card {
+    padding: 40px 48px 32px;
+  }
+}
+
+/* ---------- 移动端多卡组件：与桌面端同理，但要解决「flex column 里 align-self: start 让子卡收缩到内容宽」 ----------
+   探针证据：移动端 card0 width=557、card1 width=337.8（视觉上对不齐）。
+   .settings-account-wrap 是 flex column，子项默认 stretch 应撑满，
+   但上面 .settings-shell > * > .settings-card 的 align-self: start 限定只在
+   桌面端 .settings-shell 内部生效，这里移动端不受其影响——所以问题不在那。
+   真正原因：.settings-main__card 是 display:block（不是 flex），里面
+   .settings-account-wrap 是 display:flex + flex-direction:column；
+   flex column 的 align-items 默认 stretch，理论上应撑满——实测却没撑满，
+   因为 .settings-account-wrap 本身没有显式 width/box-sizing。
+   显式撑满是最稳妥的方案。 */
+.settings-main__card.settings-account-wrap,
+.settings-main__card.settings-stack-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.settings-main__card.settings-account-wrap > .settings-account-wrap,
+.settings-main__card.settings-stack-wrap > .settings-stack-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+.settings-main__card.settings-account-wrap > .settings-account-wrap > .settings-card,
+.settings-main__card.settings-stack-wrap > .settings-stack-wrap > .settings-card {
+  width: 100%;
+  box-sizing: border-box;
+}
+/* 主区域顶部的彩色细线（视觉签名），从原 .settings-card::before 继承过来 */
+.settings-shell__card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 12px;
+  right: 12px;
+  height: 3px;
+  background: var(--pet-brand-gradient);
+  border-radius: 0 0 6px 6px;
+  opacity: 0.75;
+}
+
+/* ---------- 左栏：垂直侧栏（仅桌面） ---------- */
+.settings-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 12px 12px;
+  border-radius: 22px;
+  background: var(--pet-surface-strong);
+  border: 1px solid var(--pet-border);
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06);
+  align-self: flex-start;
+  position: sticky;
+  top: 14px;
+  max-height: calc(100vh - 28px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+.settings-sidebar::-webkit-scrollbar { width: 6px; }
+.settings-sidebar::-webkit-scrollbar-thumb {
+  background: var(--pet-border);
+  border-radius: 3px;
+}
+.settings-sidebar__header {
+  display: grid;
+  /* 关键：显式单列 + 两行。p（block）+ p（inline-flex）默认在 grid 里
+     会被放在不同行，但有些浏览器在 grid-auto-flow 推断时会出错，
+     这里锁死布局让标题和副标题永远垂直堆叠。 */
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  gap: 4px;
+  padding: 4px 8px 12px;
+  border-bottom: 1px dashed var(--pet-border);
+  margin-bottom: 6px;
+}
+.settings-sidebar__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--pet-ink);
+  letter-spacing: 0.4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* 显式锁到第 1 行，避免 grid auto-flow 推断异常导致两行重叠 */
+  grid-row: 1;
+}
+.settings-sidebar__title--greeting {
+  font-size: 14px;
+  color: var(--pet-accent-strong);
+  letter-spacing: 0.2px;
+}
+.settings-sidebar__sub {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--pet-muted);
+  line-height: 1.5;
+  /* 显式锁到第 2 行 */
+  grid-row: 2;
+}
+.settings-sidebar__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-sidebar__item {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1.5px solid transparent;
+  border-radius: 13px;
+  background: transparent;
+  color: var(--pet-muted);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  transition: background 180ms ease, color 180ms ease, transform 180ms ease,
+              border-color 180ms ease, box-shadow 180ms ease;
+}
+.settings-sidebar__item:hover {
+  background: var(--pet-accent-soft);
+  color: var(--pet-ink);
+}
+.settings-sidebar__item .nav-emoji {
+  font-size: 16px;
+  width: 30px;
+  height: 30px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.65);
+  flex: 0 0 auto;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.06));
+}
+.settings-sidebar__item .nav-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-sidebar__item.is-active {
+  color: var(--pet-accent-strong);
+  background: var(--pet-accent-soft);
+  border-color: var(--pet-accent-soft);
+  box-shadow: 0 4px 12px var(--pet-primary-shadow);
+}
+.settings-sidebar__item.is-active .nav-emoji {
+  background: var(--pet-brand-gradient);
+  color: #fff;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.16));
+}
+.settings-sidebar__count {
+  font-size: 10.5px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--pet-accent-soft);
+  color: var(--pet-accent);
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+.settings-sidebar__item.is-active .settings-sidebar__count {
+  background: rgba(255, 255, 255, 0.85);
+}
+.settings-sidebar__footer {
+  margin-top: auto;
+  padding: 10px 8px 2px;
+  border-top: 1px dashed var(--pet-border);
+  font-size: 10.5px;
+  color: var(--pet-muted);
+  line-height: 1.45;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.settings-sidebar__footer .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #16a34a;
+  box-shadow: 0 0 6px rgba(22, 163, 74, 0.5);
+}
+
+/* ---------- 移动端顶部胶囊 ---------- */
+.settings-mobile-nav {
+  display: none;
+  flex: 0 0 auto;
+  /* 【锁宽】align-self: stretch + width: auto：白色胶囊容器始终占满可用宽度，
+     内部 pill 展开 / 收起只在内部重排，绝不引起容器本身宽度抖动。 */
+  align-self: stretch;
+  width: auto;
+  box-sizing: border-box;
+  margin: 8px 12px 0;
+  padding: 8px 10px;
+  /* 【锁高】hover 时 pill 会上浮 + 放大，固定容器高度防止竖向跳动；
+     overflow: visible 让放大的 pill 不被裁切。 */
+  min-height: 58px;
+  align-items: center;
+  overflow: visible;
+  border-radius: 18px;
+  background: var(--pet-surface-strong);
+  border: 1px solid var(--pet-border);
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06);
+  /* 一排居中：emoji-only 图标按钮（文字由 .nav-pill__label 隐藏），
+     8 个总宽远小于窄窗，必然一行居中铺满；用户明确嫌两排换行丑。 */
+  gap: 8px;
+  flex-wrap: nowrap;
+  justify-content: center;
+}
+.settings-mobile-nav .nav-pill {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* 收起态是 42px 方形图标按钮（emoji 20px + 左右各 11px padding 恰好 42），
+     展开时靠 __label 的 max-width 撑开，宽度不写死才能平滑过渡。 */
+  min-width: 42px;
+  height: 42px;
+  padding: 0 11px;
+  border: 1.5px solid transparent;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.55);
+  color: var(--pet-muted);
+  font: inherit;
+  font-size: 20px;
+  cursor: pointer;
+  transition: background 180ms ease, color 180ms ease, border-color 180ms ease,
+              transform 180ms ease, box-shadow 180ms ease;
+}
+.settings-mobile-nav .nav-pill__emoji {
+  font-size: 20px;
+  line-height: 1;
+  flex: 0 0 auto;
+  /* 回弹曲线：hover 时 emoji 轻微弹一下，属于「变换层」不占布局 */
+  transition: transform 240ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+/* 文字默认「压扁」到 0 宽（不是 display:none，否则无法做过渡动画），
+   hover / 键盘聚焦 / 当前选中 时展开。 */
+.settings-mobile-nav .nav-pill__label {
+  max-width: 0;
+  margin-left: 0;
+  opacity: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-align: center;
+  font-size: 12.5px;
+  font-weight: 700;
+  line-height: 1;
+  transition: max-width 260ms cubic-bezier(0.22, 1, 0.36, 1),
+              margin-left 260ms cubic-bezier(0.22, 1, 0.36, 1),
+              opacity 180ms ease;
+}
+/* 展开态宽度写死 44px（够放 3 个中文字），不用 88px 的「按内容贴合」——
+   因为不同字数（外观 2 字 / 机器人 3 字）展开量不同，整排位移幅度就会
+   忽大忽小，看着像抖。固定宽度后每次展开位移量完全一致。 */
+.settings-mobile-nav .nav-pill:hover .nav-pill__label,
+.settings-mobile-nav .nav-pill:focus-visible .nav-pill__label,
+.settings-mobile-nav .nav-pill.is-active .nav-pill__label {
+  max-width: 44px;
+  margin-left: 7px;
+  opacity: 1;
+}
+/* 【宽度守恒·核心】只要排里有任意 pill 被 hover，当前选中的那个（若不是
+   被 hover 的自己）就把文字收起 —— 一排「永远只有一个展开位」，
+   总宽度恒定，hover 时整排零位移、容器零抖动。
+   :has() 在 Electron/Chromium 上原生支持。 */
+.settings-mobile-nav:has(.nav-pill:hover) .nav-pill.is-active:not(:hover) .nav-pill__label {
+  max-width: 0;
+  margin-left: 0;
+  opacity: 0;
+}
+/* 【hover 非选中·强调】布局宽度不动，全部靠 transform / 描边 / 光晕：
+   上浮 2px + 放大 3% + 品牌色描边 + 双层光晕 + 文字染品牌色 + emoji 回弹。 */
+.settings-mobile-nav .nav-pill:hover:not(.is-active) {
+  background: var(--pet-accent-soft);
+  color: var(--pet-accent-strong);
+  border-color: var(--pet-accent-strong);
+  transform: translateY(-2px) scale(1.03);
+  box-shadow: 0 8px 18px var(--pet-brand-shadow),
+              0 0 0 3px var(--pet-accent-soft);
+}
+.settings-mobile-nav .nav-pill:hover .nav-pill__emoji {
+  transform: scale(1.18) rotate(-5deg);
+}
+.settings-mobile-nav .nav-pill:focus-visible {
+  outline: 2px solid var(--pet-accent-strong);
+  outline-offset: 2px;
+}
+.settings-mobile-nav .nav-pill.is-active {
+  background: var(--pet-brand-gradient);
+  color: #fff;
+  border-color: transparent;
+  box-shadow: 0 4px 12px var(--pet-brand-shadow);
+}
+/* 选中态自身 hover：只做克制的上浮，不抢非选中项的强调风头 */
+.settings-mobile-nav .nav-pill.is-active:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 7px 18px var(--pet-brand-shadow);
+}
+/* 尊重系统「减少动态效果」：直接切换，不做宽度补间与位移 */
+@media (prefers-reduced-motion: reduce) {
+  .settings-mobile-nav .nav-pill,
+  .settings-mobile-nav .nav-pill__emoji,
+  .settings-mobile-nav .nav-pill__label { transition: none; }
+  .settings-mobile-nav .nav-pill:hover:not(.is-active),
+  .settings-mobile-nav .nav-pill.is-active:hover { transform: none; }
+  .settings-mobile-nav .nav-pill:hover .nav-pill__emoji { transform: none; }
+}
+
+/* ---------- 行状项（一行一控件，WorkBuddy 风格） ---------- */
+.settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  /* 上下 padding 加大（14→18），左右对齐到外卡 26px 留白 */
+  padding: 20px 0;
+  border-top: 1px solid var(--pet-border);
+}
+.settings-row:first-child { border-top: 0; padding-top: 6px; }
+.settings-row:last-child { padding-bottom: 6px; }
+.settings-row__body {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+}
+.settings-row__icon {
+  /* 行内图标块也加大一档，匹配外卡标题的视觉权重 */
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: var(--pet-accent-soft);
+  color: var(--pet-accent);
+  display: inline-grid;
+  place-items: center;
+  font-size: 17px;
+  flex: 0 0 auto;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4);
+}
+.settings-row__text {
+  display: flex;
+  flex-direction: column;
+  /* 标题与描述之间多 2px 间距 */
+  gap: 5px;
+  min-width: 0;
+}
+.settings-row__title {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 700;
+  color: var(--pet-ink);
+  letter-spacing: 0.2px;
+  line-height: 1.3;
+}
+.settings-row__desc {
+  margin: 0;
+  font-size: 13px;
+  color: var(--pet-muted);
+  line-height: 1.6;
+}
+.settings-row__control {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  justify-self: end;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.settings-row__control > .text-input,
+.settings-row__control > .settings-select {
+  width: min(280px, 36vw);
+}
+.settings-row__control > .btn-row { gap: 8px }
+
+/* 控件纵向铺开（窄屏或长表单） */
+.settings-row--column {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+.settings-row--column .settings-row__control {
+  justify-self: stretch;
+  width: 100%;
+}
+.settings-row--column .settings-row__control > .text-input,
+.settings-row--column .settings-row__control > .settings-select { width: 100% }
+
+/* 纯说明行（仅标题 + 描述，无控件） */
+.settings-row--read-only { padding: 10px 0 }
+
+/* ---------- 卡片内二级分区（嵌套子卡） ---------- */
+.settings-card__group {
+  display: grid;
+  /* 分区上下内边距从 26/28 收紧到 16/18 —— 之前为单行按钮/登录注册 tabs 也包了
+     54px 空白（26+28），对 1 个按钮 / 2 个 tab 完全是浪费纵向空间；
+     现在 16+18=34px 体验类似分组又不会让卡片被空白撑得很高。 */
+  gap: 14px;
+  padding: 16px 0 18px;
+  border-top: 1px solid var(--pet-border);
+}
+.settings-card__group:first-of-type {
+  border-top: 0;
+}
+/* 卡片内最后一个 group 不再加底 padding（避免 18 + 卡 padding-bottom 32 = 50px
+   的空白带出现在 "保存并重新连接" 按钮下面再没人接住）。 */
+.settings-card__group:last-of-type { padding-bottom: 0; }
+/* 列表类 tab（技能 / MCP）的 "添加" 按钮容器：窄窗口填满（与列表同宽）；
+   宽窗口（≥ 860px）与 .skill-list / .mcp-list 同样 760 上限并居中 */
+.settings-card__group.skill-add,
+.settings-card__group.mcp-add {
+  width: 100%;
+}
+@media (min-width: 860px) {
+  .settings-card__group.skill-add,
+  .settings-card__group.mcp-add {
+    max-width: 760px;
+    margin: 0 auto;
+  }
+}
+.settings-card__group-title {
+  margin: 0;
+  /* 子标题字号加大（12.5 → 13.5），gap 微调以匹配新字重 */
+  font-size: 13.5px;
+  font-weight: 800;
+  color: var(--pet-muted);
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.settings-card__group-title .group-mark {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--pet-brand-gradient);
+  flex: 0 0 auto;
+}
+
+/* ---------- 自绘开关（iOS 风，圆角胶囊 + 滑块） ---------- */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 42px;
+  height: 24px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.switch input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+  z-index: 1;
+}
+.switch__slider {
+  position: absolute;
+  inset: 0;
+  background: var(--pet-border);
+  border-radius: 999px;
+  transition: background 200ms ease, box-shadow 200ms ease;
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.06);
+}
+.switch__slider::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 2px 4px rgba(15, 23, 42, 0.18);
+  transition: transform 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.switch input:checked + .switch__slider {
+  background: var(--pet-brand-gradient);
+  box-shadow: 0 3px 10px var(--pet-brand-shadow);
+}
+.switch input:checked + .switch__slider::after {
+  transform: translateX(18px);
+}
+.switch input:disabled + .switch__slider { opacity: 0.5; cursor: not-allowed }
+
+/* ---------- 响应式断点 ---------- */
+@media (min-width: 860px) {
+  /* 横版专属：把主区域横向 padding 跳到 48px，让标题 / 描述 / 按钮等
+     所有内容有明显视觉留白，不再贴边。
+     竖版（<860px）保持基础 34px，用户已确认"挺好"。 */
+  .settings-shell__card { padding: 40px 48px 36px; }
+}
+@media (max-width: 860px) {
+  .settings-shell { grid-template-columns: 200px minmax(0, 1fr); gap: 12px; padding: 10px 12px 24px; }
+}
+@media (max-width: 640px) {
+  .settings-shell { grid-template-columns: 1fr; gap: 8px; padding: 8px 8px 24px; }
+  .settings-shell .settings-sidebar { display: none; }
+  .settings-mobile-nav { display: flex; }
+}
+@media (max-width: 480px) {
+  /* 窄屏（视口 ≤ 480）：基础样式稍缩一档，避免 padding 占比过大 */
+  .settings-card { padding: 24px 20px 22px; gap: 18px; }
+  .settings-card__title { font-size: 17px; padding-bottom: 6px; }
+  .settings-card__title .title-emoji { width: 40px; height: 40px; font-size: 21px; }
+  .settings-card__desc { font-size: 13.5px; line-height: 1.7; padding-bottom: 10px; }
+  .settings-card__group { gap: 14px; padding: 20px 0 22px; }
+  .settings-hint { font-size: 12.5px; }
+  .settings-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+    padding: 14px 16px;
+  }
+  .settings-row__control {
+    justify-self: stretch;
+    width: 100%;
+  }
+  .settings-row__control > .text-input,
+  .settings-row__control > .settings-select {
+    width: 100%;
+    min-width: 0;
+  }
+  .settings-row__control .btn-row { flex-wrap: wrap }
+}

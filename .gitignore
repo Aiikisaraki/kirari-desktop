@@ -1,54 +1,44 @@
+!.vscode/extensions.json
+# Editor directories and files
+# Electron 打包输出（安装包）
+# Environment variables（含开发者自己的大模型 key / 连接配置，禁止提交）
 # Logs
-logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
-
-node_modules
-
+# WorkBuddy 工作目录（记忆 / 自动化等本地文件，不提交）
+# prepack 生成的后端 staging 目录（含源码快照，不提交；CI 会从 kirari-core 拉取）
+# 保留 build-resources 下的配置（如 installer.nsh / 图标），仅忽略上面生成的子目录
 # 前端构建产物（vite 输出 / 主进程打包）
+# 打包时由 scripts/prepack-backend-runtime.cjs 注入的 Node 运行时二进制（不提交）
+# 打包时由 scripts/write-edition-nsh.cjs 生成的版本宏（含 EDITION 定义，不提交）
+# 本地调试脚本（开发期诊断用，不提交）
+*.local
+*.log
+*.njsproj
+*.ntvs*
+*.sln
+*.suo
+*.sw?
+.DS_Store
+.env
+.env.*.local
+.env.local
+.idea
+.vscode/*
+.workbuddy/
+build
+build-diag.py
+build-resources/backend-runtime/
+build-resources/edition.nsh
+build-resources/pet-api-bundle/
 dist
 dist-electron
-build
-out
 dist-ssr
-*.local
-
-# Electron 打包输出（安装包）
+lerna-debug.log*
+logs
+node_modules
+npm-debug.log*
+out
+pnpm-debug.log*
 release
-
-# 打包时由 scripts/prepack-backend-runtime.cjs 注入的 Node 运行时二进制（不提交）
-build-resources/backend-runtime/
-
-# prepack 生成的后端 staging 目录（含源码快照，不提交；CI 会从 kirari-core 拉取）
-build-resources/pet-api-bundle/
-
-# 保留 build-resources 下的配置（如 installer.nsh / 图标），仅忽略上面生成的子目录
-
-# 打包时由 scripts/write-edition-nsh.cjs 生成的版本宏（含 EDITION 定义，不提交）
-build-resources/edition.nsh
-
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
-.DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-
-# Environment variables（含开发者自己的大模型 key / 连接配置，禁止提交）
-.env
-.env.local
-.env.*.local
-
-# 本地调试脚本（开发期诊断用，不提交）
 scripts/_diag*.cjs
-
-# WorkBuddy 工作目录（记忆 / 自动化等本地文件，不提交）
-.workbuddy/
+yarn-debug.log*
+yarn-error.log*

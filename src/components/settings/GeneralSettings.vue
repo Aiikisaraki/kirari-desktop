@@ -77,37 +77,55 @@ onMounted(() => {
             <span class="title-emoji">✨</span>
             <span>通用</span>
         </h3>
+        <p class="settings-card__desc">
+            桌宠姓名与启动行为，与外观/账号相互独立。
+        </p>
 
-        <div class="field">
-            <label class="field-label" for="petName">桌宠备注名</label>
-            <input
-                id="petName"
-                v-model="petName"
-                class="text-input"
-                type="text"
-                autocomplete="off"
-                placeholder="例如：绮莉、Kirari、小K…"
-                maxlength="16"
-                :disabled="petNameSaving"
-                @change="handlePetNameChange"
-                @keyup.enter="handlePetNameChange"
-            />
-            <p class="settings-hint">
-                设置后，聊天窗口顶部会显示这个名字（默认 Kirari）。
-            </p>
+        <!-- 桌宠备注名：行状，右侧是输入框 -->
+        <div class="settings-row">
+            <div class="settings-row__body">
+                <span class="settings-row__icon" aria-hidden="true">🐾</span>
+                <div class="settings-row__text">
+                    <h4 class="settings-row__title">桌宠备注名</h4>
+                    <p class="settings-row__desc">聊天窗口顶部会显示这个名字；默认 Kirari。</p>
+                </div>
+            </div>
+            <div class="settings-row__control">
+                <input
+                    id="petName"
+                    v-model="petName"
+                    class="text-input"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="例如：绮莉、Kirari、小K…"
+                    maxlength="16"
+                    :disabled="petNameSaving"
+                    @change="handlePetNameChange"
+                    @keyup.enter="handlePetNameChange"
+                />
+            </div>
         </div>
 
-        <div class="divider"></div>
-
-        <label class="checkbox-row">
-            <input
-                type="checkbox"
-                v-model="autoLaunch"
-                :disabled="autoLaunchBusy"
-                @change="handleAutoLaunchChange"
-            />
-            <span>开机自动启动</span>
-        </label>
-        <p class="settings-hint">勾选后，系统登录时会自动启动 Kirari绮莉。</p>
+        <!-- 开机自启动：行状，右侧是开关 -->
+        <div class="settings-row">
+            <div class="settings-row__body">
+                <span class="settings-row__icon" aria-hidden="true">⚡</span>
+                <div class="settings-row__text">
+                    <h4 class="settings-row__title">开机自动启动</h4>
+                    <p class="settings-row__desc">系统登录时自动启动 Kirari，开关切换即时生效。</p>
+                </div>
+            </div>
+            <div class="settings-row__control">
+                <label class="switch" aria-label="开机自动启动">
+                    <input
+                        type="checkbox"
+                        v-model="autoLaunch"
+                        :disabled="autoLaunchBusy"
+                        @change="handleAutoLaunchChange"
+                    />
+                    <span class="switch__slider"></span>
+                </label>
+            </div>
+        </div>
     </section>
 </template>

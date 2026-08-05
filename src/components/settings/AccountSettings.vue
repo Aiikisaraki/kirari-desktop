@@ -119,55 +119,83 @@ function handleLogout() {
 </script>
 
 <template>
-    <template v-if="mode === 'remote'">
-        <!-- 远程服务端地址：用户部署好服务端后在此填写，保存即重连 -->
-        <section class="settings-card">
-            <h3 class="settings-card__title">
-                <span class="title-emoji">🌐</span>
-                <span>服务端地址</span>
-            </h3>
+    <!--
+        single root wrapper：避免 fragment 导致 SettingsPage 传入的
+        class="settings-shell__card from-fade" 被 Vue 静默丢弃。
+        这里只是占位元素，所有真实样式由内层 <section class="settings-card"> 承担。
+    -->
+    <div class="settings-account-wrap">
+        <template v-if="mode === 'remote'">
+            <!-- 远程服务端地址 -->
+            <section class="settings-card">
+                <h3 class="settings-card__title">
+                    <span class="title-emoji">🌐</span>
+                    <span>服务端地址</span>
+                </h3>
             <p class="settings-card__desc">
                 连接远程服务端时使用的地址。修改后自动重新连接，无需重启应用。
             </p>
 
-            <div class="field">
-                <label class="field-label" for="wsUrl">WebSocket 地址</label>
-                <input
-                    id="wsUrl"
-                    v-model="wsUrl"
-                    class="text-input"
-                    type="text"
-                    placeholder="ws://your-server:9089/ws"
-                    :disabled="serverLoading"
-                />
-            </div>
-            <div class="field">
-                <label class="field-label" for="httpUrl">HTTP 地址</label>
-                <input
-                    id="httpUrl"
-                    v-model="httpUrl"
-                    class="text-input"
-                    type="text"
-                    placeholder="http://your-server:9089"
-                    :disabled="serverLoading"
-                />
+            <!-- WebSocket 地址 -->
+            <div class="settings-row">
+                <div class="settings-row__body">
+                    <span class="settings-row__icon" aria-hidden="true">🔗</span>
+                    <div class="settings-row__text">
+                        <h4 class="settings-row__title">WebSocket 地址</h4>
+                        <p class="settings-row__desc">实时双向通道，用于桌宠 ↔ 服务端推拉消息。</p>
+                    </div>
+                </div>
+                <div class="settings-row__control">
+                    <input
+                        v-model="wsUrl"
+                        class="text-input"
+                        type="text"
+                        placeholder="ws://your-server:9089/ws"
+                        :disabled="serverLoading"
+                    />
+                </div>
             </div>
 
-            <button
-                type="button"
-                class="btn btn--primary btn--block"
-                :disabled="serverLoading"
-                @click="handleSaveServer"
-            >
-                {{
-                    serverLoading
-                        ? "保存中..."
-                        : serverSaved
-                          ? "已保存 ✓"
-                          : "保存并重新连接"
-                }}
-            </button>
-            <div v-if="serverError" class="settings-error">{{ serverError }}</div>
+            <!-- HTTP 地址 -->
+            <div class="settings-row">
+                <div class="settings-row__body">
+                    <span class="settings-row__icon" aria-hidden="true">📡</span>
+                    <div class="settings-row__text">
+                        <h4 class="settings-row__title">HTTP 地址</h4>
+                        <p class="settings-row__desc">REST 通道，用于登录、文件、配置同步。</p>
+                    </div>
+                </div>
+                <div class="settings-row__control">
+                    <input
+                        v-model="httpUrl"
+                        class="text-input"
+                        type="text"
+                        placeholder="http://your-server:9089"
+                        :disabled="serverLoading"
+                    />
+                </div>
+            </div>
+
+            <!-- 操作 -->
+            <div class="settings-card__group">
+                <div class="btn-row">
+                    <button
+                        type="button"
+                        class="btn btn--primary"
+                        :disabled="serverLoading"
+                        @click="handleSaveServer"
+                    >
+                        {{
+                            serverLoading
+                                ? "保存中..."
+                                : serverSaved
+                                  ? "已保存 ✓"
+                                  : "保存并重新连接"
+                        }}
+                    </button>
+                </div>
+                <div v-if="serverError" class="settings-error">{{ serverError }}</div>
+            </div>
         </section>
 
         <!-- 账号：登录 / 注册 -->
@@ -207,53 +235,72 @@ function handleLogout() {
                     </button>
                 </div>
 
-                <div class="field">
-                    <label class="field-label" for="username">用户名</label>
-                    <input
-                        id="username"
-                        v-model="username"
-                        class="text-input"
-                        type="text"
-                        autocomplete="username"
-                        placeholder="用户名"
-                        :disabled="isLoading"
-                    />
-                </div>
-                <div class="field">
-                    <label class="field-label" for="password">密码</label>
-                    <input
-                        id="password"
-                        v-model="password"
-                        class="text-input"
-                        type="password"
-                        :autocomplete="
-                            authMode === 'login' ? 'current-password' : 'new-password'
-                        "
-                        placeholder="密码"
-                        :disabled="isLoading"
-                        @keyup.enter="
-                            authMode === 'login' ? handleLogin() : handleRegister()
-                        "
-                    />
+                <div class="settings-row">
+                    <div class="settings-row__body">
+                        <span class="settings-row__icon" aria-hidden="true">👤</span>
+                        <div class="settings-row__text">
+                            <h4 class="settings-row__title">用户名</h4>
+                            <p class="settings-row__desc">3-32 个字符，用于登录与显示。</p>
+                        </div>
+                    </div>
+                    <div class="settings-row__control">
+                        <input
+                            v-model="username"
+                            class="text-input"
+                            type="text"
+                            autocomplete="username"
+                            placeholder="用户名"
+                            :disabled="isLoading"
+                        />
+                    </div>
                 </div>
 
-                <button
-                    type="button"
-                    class="btn btn--primary btn--block"
-                    :disabled="isLoading"
-                    @click="authMode === 'login' ? handleLogin() : handleRegister()"
-                >
-                    {{
-                        isLoading
-                            ? authMode === "login"
-                                ? "登录中..."
-                                : "注册中..."
-                            : authMode === "login"
-                              ? "登录"
-                              : "注册"
-                    }}
-                </button>
-                <div v-if="loginError" class="settings-error">{{ loginError }}</div>
+                <div class="settings-row">
+                    <div class="settings-row__body">
+                        <span class="settings-row__icon" aria-hidden="true">🔒</span>
+                        <div class="settings-row__text">
+                            <h4 class="settings-row__title">密码</h4>
+                            <p class="settings-row__desc">至少 6 位，注册 / 登录共用。</p>
+                        </div>
+                    </div>
+                    <div class="settings-row__control">
+                        <input
+                            v-model="password"
+                            class="text-input"
+                            type="password"
+                            :autocomplete="
+                                authMode === 'login' ? 'current-password' : 'new-password'
+                            "
+                            placeholder="密码"
+                            :disabled="isLoading"
+                            @keyup.enter="
+                                authMode === 'login' ? handleLogin() : handleRegister()
+                            "
+                        />
+                    </div>
+                </div>
+
+                <div class="settings-card__group">
+                    <div class="btn-row">
+                        <button
+                            type="button"
+                            class="btn btn--primary"
+                            :disabled="isLoading"
+                            @click="authMode === 'login' ? handleLogin() : handleRegister()"
+                        >
+                            {{
+                                isLoading
+                                    ? authMode === "login"
+                                        ? "登录中..."
+                                        : "注册中..."
+                                    : authMode === "login"
+                                      ? "登录"
+                                      : "注册"
+                            }}
+                        </button>
+                    </div>
+                    <div v-if="loginError" class="settings-error">{{ loginError }}</div>
+                </div>
             </template>
 
             <!-- 已登录：账户信息 + 退出 -->
@@ -272,5 +319,6 @@ function handleLogout() {
                 </div>
             </template>
         </section>
-    </template>
+        </template>
+    </div>
 </template>

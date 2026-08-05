@@ -458,7 +458,13 @@ type SettingsApiRequest = {
 
 const petWindowSize = { width: 360, height: 400 };
 const chatWindowSize = { width: 420, height: 620 };
-const settingsWindowSize = { width: 560, height: 720 };
+// 桌面端默认 980×720：让用户首次打开就能进入桌面端双栏布局（侧栏 + 右栏卡片）
+// 并触发 ≥860px 的横版专属样式（padding 48px 等）。若给到 560 这种窄宽度，
+// SettingsPage 的 matchMedia("(max-width: 720px)") 会判定为窄窗、走移动端布局，
+// 永远看不到双栏，表现为"卡片消失 / 导航不见"。
+// minWidth 锁到 640：保证即使被用户拖到很窄，也仍处于"双栏布局"档位，
+// 只有真正接近手机的宽度（≤640）才会回退到顶部胶囊的移动端布局。
+const settingsWindowSize = { width: 980, height: 720 };
 // 后端连接地址。本地模式下，这些值会在 startBackendIfLocal 之后被动态端口刷新
 // （见下方 init 流程），覆盖配置里写死的 9089；远程模式沿用配置中的远端地址。
 let backendUrl = clientConfig.server.wsUrl || "ws://localhost:9089/ws";
@@ -541,6 +547,8 @@ function createSettingsWindow() {
     title: "设置",
     width: settingsWindowSize.width,
     height: settingsWindowSize.height,
+    minWidth: 640,
+    minHeight: 560,
     show: false,
     frame: false,
     transparent: true,

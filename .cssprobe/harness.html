@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="aurora-glass">
+<head>
+<meta charset="utf-8" />
+<title>settings css probe</title>
+<style>/*__CSS__*/</style>
+<style>
+  html, body { margin: 0; padding: 0; min-height: 100%; }
+</style>
+</head>
+<body>
+<div id="mount"></div>
+<script>
+(function(){
+// 复刻 AccountSettings.vue 的真实 DOM（remote 模式 + 已登录）。
+// 关键：Vue class 透传会把 settings-shell__card / settings-main__card
+// 合并到组件根元素 .settings-account-wrap 上（同一个元素，不是父子关系）。
+const cardServer = `
+<section class="settings-card">
+  <h3 class="settings-card__title"><span class="title-emoji">🌐</span><span>服务端地址</span></h3>
+  <p class="settings-card__desc">连接远程服务端时使用的地址。修改后自动重新连接，无需重启应用。</p>
+  <div class="settings-row">
+    <div class="settings-row__body">
+      <span class="settings-row__icon">🔗</span>
+      <div class="settings-row__text">
+        <h4 class="settings-row__title">WebSocket 地址</h4>
+        <p class="settings-row__desc">实时双向通道，用于桌宠 ↔ 服务端推拉消息。</p>
+      </div>
+    </div>
+    <div class="settings-row__control"><input class="text-input" type="text" placeholder="ws://your-server:9089/ws" /></div>
+  </div>
+  <div class="settings-row">
+    <div class="settings-row__body">
+      <span class="settings-row__icon">📡</span>
+      <div class="settings-row__text">
+        <h4 class="settings-row__title">HTTP 地址</h4>
+        <p class="settings-row__desc">REST 通道，用于登录、文件、配置同步。</p>
+      </div>
+    </div>
+    <div class="settings-row__control"><input class="text-input" type="text" placeholder="http://your-server:9089" /></div>
+  </div>
+  <div class="settings-card__group">
+    <div class="btn-row"><button type="button" class="btn btn--primary">保存并重新连接</button></div>
+  </div>
+</section>`;
+
+const cardAccount = `
+<section id="account" class="settings-card">
+  <h3 class="settings-card__title"><span class="title-emoji">👤</span><span>服务端账号</span></h3>
+  <p class="settings-card__desc">已登录，可同步配置到服务端。</p>
+  <div class="account-bar">
+    <span>当前账户：<strong>Kirari</strong></span>
+    <button type="button" class="btn btn--ghost">退出登录</button>
+  </div>
+</section>`;
+
+const wrapInner = cardServer + cardAccount;
+const mode = "__MODE__";
+
+const sidebar = `
+<aside class="settings-sidebar">
+  <div class="settings-sidebar__header">
+    <p class="settings-sidebar__title">⚙️ 分区导航</p>
+    <p class="settings-sidebar__sub">8 个分区，点击切换对应设置。</p>
+  </div>
+  <nav class="settings-sidebar__nav">
+    ${['🎨 外观','🧩 通用','🐾 形象','👤 账号','🧠 模型','🔌 MCP','🛠 技能','🤖 机器人']
+      .map((t,i)=>`<button class="nav-item ${i===3?'is-active':''}">${t}</button>`).join('')}
+  </nav>
+</aside>`;
+
+document.getElementById('mount').outerHTML = mode === 'desktop'
+  ? `<div class="settings-root">
+       <div class="settings-shell">
+         ${sidebar}
+         <div class="settings-shell__main">
+           <div class="settings-account-wrap settings-shell__card from-fade">${wrapInner}</div>
+         </div>
+       </div>
+     </div>`
+  : `<div class="settings-root">
+       <section class="settings-top settings-top--mobile">
+         <header class="settings-greeting">
+           <span class="settings-greeting__avatar">🐾</span>
+           <p class="settings-greeting__text">
+             <span class="settings-greeting__hi">Hi</span>
+             <span class="settings-greeting__name">Kirari</span>
+             <span class="settings-greeting__sub">· 👤 账号</span>
+           </p>
+           <span class="settings-greeting__spacer"></span>
+           <span class="settings-greeting__badge is-on"><span class="badge-dot"></span>已登录</span>
+         </header>
+         <nav class="settings-mobile-nav">
+           ${['🎨|外观','🧩|通用','🐾|形象','👤|账号','🧠|模型','🔌|MCP','🛠|技能','🤖|机器人']
+             .map((t,i)=>{const p=t.split('|');
+               return `<button class="nav-pill ${i===3?'is-active':''}"><span class="nav-pill__emoji">${p[0]}</span><span class="nav-pill__label">${p[1]}</span></button>`;}).join('')}
+         </nav>
+       </section>
+       <main class="settings-main">
+         <div class="settings-account-wrap settings-main__card from-fade">${wrapInner}</div>
+       </main>
+     </div>`;
+
+// ── 探针：把关键元素的 computed style / rect 暴露给主进程 ──
+window.__probe = function () {
+  const pick = (el) => {
+    if (!el) return null;
+    const cs = getComputedStyle(el);
+    const r = el.getBoundingClientRect();
+    return {
+      cls: el.className,
+      bg: cs.backgroundColor,
+      border: cs.borderTopWidth + ' ' + cs.borderTopStyle + ' ' + cs.borderTopColor,
+      radius: cs.borderTopLeftRadius,
+      padding: cs.paddingTop + ' ' + cs.paddingRight + ' ' + cs.paddingBottom + ' ' + cs.paddingLeft,
+      shadow: cs.boxShadow === 'none' ? 'none' : 'yes',
+      rect: { x: +r.x.toFixed(1), y: +r.y.toFixed(1), w: +r.width.toFixed(1), h: +r.height.toFixed(1) },
+    };
+  };
+  const wrap = document.querySelector('.settings-account-wrap');
+  const cards = Array.prototype.slice.call(document.querySelectorAll('.settings-account-wrap > .settings-card'));
+  return {
+    viewport: { w: innerWidth, h: innerHeight },
+    // 当前 CSS 里写的 :has(> .settings-account-wrap) 是否真能命中（本次 bug 的核心假设）
+    hasSelectorMatches: !!document.querySelector('.settings-shell__card:has(> .settings-account-wrap), .settings-main__card:has(> .settings-account-wrap)'),
+    // 同元素复合类（正确写法应命中这个）
+    sameElementCompound: !!document.querySelector('.settings-shell__card.settings-account-wrap, .settings-main__card.settings-account-wrap'),
+    wrap: pick(wrap),
+    cards: cards.map(pick),
+    gapBetweenCards: cards.length === 2
+      ? +(cards[1].getBoundingClientRect().top - cards[0].getBoundingClientRect().bottom).toFixed(1)
+      : null,
+    accountBar: pick(document.querySelector('.account-bar')),
+    primaryBtn: pick(document.querySelector('.btn--primary')),
+  };
+};
+})();
+</script>
+</body>
+</html>

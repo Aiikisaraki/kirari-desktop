@@ -271,94 +271,126 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
       </div>
     </div>
 
-    <button v-else type="button" class="btn btn--import btn--block" @click="showForm = true">
+    <button v-else type="button" class="btn btn--import btn--block adapter-add" @click="showForm = true">
       + 添加机器人适配器
     </button>
   </section>
 </template>
 
 <style scoped>
+/* 基础样式：窄窗口（视口 < 860px）沿用原样，不做任何改动 */
 .adapter-list {
-  display: grid;
-  gap: 12px;
+    display: grid;
+    gap: 12px;
 }
 .adapter-card {
-  display: grid;
-  gap: 10px;
-  padding: 14px;
-  border-radius: 13px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0.42));
-  border: 1px solid var(--pet-accent-soft);
+    display: grid;
+    gap: 10px;
+    padding: 14px;
+    border-radius: 14px;
+    background: var(--pet-accent-soft);
+    border: 1px dashed var(--pet-accent-strong-border);
+}
+/* 宽窗口（视口 ≥ 860px）：限宽 760 居中 + 加大内边距，与技能 / MCP 一致 */
+@media (min-width: 860px) {
+    .adapter-list {
+        width: 100%;
+        max-width: 760px;
+        margin: 0 auto;
+        gap: 14px;
+    }
+    .adapter-card {
+        gap: 12px;
+        padding: 18px 22px;
+        border-radius: 16px;
+    }
 }
 .adapter-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
 }
 .adapter-name {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
 .badge {
-  font-size: 11px;
-  font-weight: 700;
-  padding: 2px 8px;
-  border-radius: 999px;
-  color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 9px;
+    border-radius: 999px;
+    color: #fff;
+    letter-spacing: 0.3px;
 }
 .badge.onebot {
-  background: linear-gradient(135deg, #34d399, #059669);
+    background: linear-gradient(135deg, #34d399, #059669);
 }
 .badge.qqofficial {
-  background: linear-gradient(135deg, #38bdf8, #2563eb);
+    background: linear-gradient(135deg, #38bdf8, #2563eb);
 }
 .status-dot {
-  font-size: 12px;
-  font-weight: 700;
+    font-size: 12px;
+    font-weight: 700;
 }
 .status-dot.on {
-  color: #16a34a;
+    color: #16a34a;
 }
 .status-dot.off {
-  color: var(--pet-muted);
+    color: var(--pet-muted);
 }
 .adapter-err {
-  font-size: 12px;
-  color: var(--pet-danger);
+    font-size: 12px;
+    color: var(--pet-danger);
 }
 .adapter-actions {
-  display: flex;
-  gap: 8px;
+    display: flex;
+    gap: 8px;
 }
 .group-row {
-  display: grid;
-  gap: 6px;
+    display: grid;
+    gap: 6px;
 }
 .owner-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
 }
 .owner-tag {
-  font-size: 12px;
-  font-weight: 700;
-  color: #16a34a;
-  background: rgba(22, 163, 74, 0.1);
-  padding: 3px 8px;
-  border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    color: #16a34a;
+    background: rgba(22, 163, 74, 0.1);
+    padding: 3px 8px;
+    border-radius: 999px;
 }
 .owner-select {
-  flex: 1;
-  min-width: 140px;
+    flex: 1;
+    min-width: 140px;
 }
+/* 基础样式：窄窗口沿用原样 */
 .adapter-form {
-  display: grid;
-  gap: 12px;
-  padding: 14px;
-  border-radius: 13px;
-  background: rgba(255, 255, 255, 0.5);
-  border: 1px solid var(--pet-accent-soft);
+    display: grid;
+    gap: 12px;
+    padding: 14px;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.55);
+    border: 1px solid var(--pet-border);
+}
+/* 添加按钮：基础态填满；宽窗口（≥ 860px）与 .adapter-list 同宽上限 760 居中 */
+.btn.btn--import.btn--block.adapter-add {
+    width: 100%;
+    margin: 18px auto 0;
+}
+@media (min-width: 860px) {
+    .adapter-form {
+        gap: 14px;
+        padding: 18px 22px;
+        border-radius: 16px;
+    }
+    .btn.btn--import.btn--block.adapter-add {
+        max-width: 760px;
+    }
 }
 </style>

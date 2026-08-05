@@ -1,115 +1,108 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+/**
+ * 设置页分区导航（受控组件）。
+ *
+ * 之前实现了 IntersectionObserver 滚动联动 + scrollTo 跳转，
+ * 但当 SettingsPage 改为"标签页式"（一次只渲染一张卡）后，
+ * 滚动联动失去意义——这里只负责点击切换，激活态完全由父组件控制。
+ *
+ * 视觉上桌面端走左侧垂直侧栏，移动端走顶部水平胶囊，
+ * 两种模式共用同一份 props / emit 契约。
+ */
+interface Section {
+    id: string;
+    label: string;
+    emoji: string;
+    hint?: string;
+    count?: number | (() => number);
+}
 
 const props = defineProps<{
-    sections: { id: string; label: string; emoji: string }[];
+    mode: "sidebar" | "pills";
+    sections: Section[];
     activeId?: string;
+    /** 侧栏顶部问候语，如 "Hi Kirari · 🎨 外观"。不传则不显示问候行。 */
+    greeting?: string;
 }>();
 const emit = defineEmits<{
     "update:activeId": [id: string];
 }>();
 
-const active = ref(props.activeId ?? props.sections[0]?.id ?? "");
-let observer: IntersectionObserver | null = null;
-let emitTimer: ReturnType<typeof setTimeout> | null = null;
-let userScrollingTimer: ReturnType<typeof setTimeout> | null = null;
-let userScrolling = false;
+const versionTag = "0.3.1"; // 与 package.json 同步，发布时一齐改
 
-/**
- * 计算点击跳转的目标 scrollTop。
- * 关键修复：不调用 el.scrollIntoView()，避免它在嵌套滚动场景下
- * 把外层 window 一起滚（会把 WindowChrome 顶出视口）。
- * 改用 .settings-main.scrollTo()，并显式把目标 section 顶到 sticky 头下方。
- */
+function resolveCount(c: Section["count"]): number | undefined {
+    if (typeof c === "function") return c();
+    return c;
+}
+
 function go(id: string) {
-    const container = document.querySelector(".settings-main") as HTMLElement | null;
-    const target = document.getElementById(id);
-    if (!container || !target) return;
-    // 目标 section 相对 scroll 容器的偏移（容器的 border 内边距外）
-    const top = target.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop;
-    // 顶部 sticky 头（.settings-top）高度，用 scroll-margin 补偿
-    const header = document.querySelector(".settings-top") as HTMLElement | null;
-    const offset = header ? header.offsetHeight + 12 : 12;
-    // 用户主动点击 nav 时，先暂停 IntersectionObserver 一小段时间，
-    // 避免滚动过程中误把别的 section 当成 active。
-    userScrolling = true;
-    if (userScrollingTimer) clearTimeout(userScrollingTimer);
-    container.scrollTo({ top: Math.max(0, top - offset), behavior: "smooth" });
-    active.value = id;
-    emit("update:activeId", id);
-    userScrollingTimer = setTimeout(() => {
-        userScrolling = false;
-    }, 450);
+    // 受控组件：本地不维护激活态，点击只 emit 让父级切换。
+    if (id !== props.activeId) emit("update:activeId", id);
 }
-
-function emitActive(id: string) {
-    if (emitTimer) clearTimeout(emitTimer);
-    emitTimer = setTimeout(() => {
-        if (userScrolling) return; // 主动点击时由 go() 直接 emit
-        emit("update:activeId", id);
-    }, 80);
-}
-
-onMounted(() => {
-    const container = document.querySelector(".settings-main") as HTMLElement | null;
-    if (!container) return;
-    observer = new IntersectionObserver(
-        (entries) => {
-            if (userScrolling) return;
-            const visible = entries
-                .filter((e) => e.isIntersecting)
-                .sort((a, b) => b.intersectionRatio - a.intersectionRatio);
-            if (visible[0]) {
-                const id = visible[0].target.id;
-                if (id !== active.value) {
-                    active.value = id;
-                    emitActive(id);
-                }
-            }
-        },
-        {
-            root: container as unknown as Element,
-            threshold: [0.2, 0.5, 0.8],
-            // 顶部按 sticky 头 + 12px 边距收缩，底部保留少量 buffer
-            rootMargin: "-80px 0px -40% 0px",
-        },
-    );
-    props.sections.forEach((s) => {
-        const el = document.getElementById(s.id);
-        if (el) observer!.observe(el);
-    });
-});
-
-watch(active, (v) => {
-    // go() 已直接 emit；这里只在 active 真正变化时 emit，避免循环
-    if (v) emit("update:activeId", v);
-});
-watch(() => props.activeId, (v) => {
-    if (v && v !== active.value) active.value = v;
-});
-
-onBeforeUnmount(() => {
-    observer?.disconnect();
-    if (emitTimer) clearTimeout(emitTimer);
-    if (userScrollingTimer) clearTimeout(userScrollingTimer);
-});
 </script>
 
 <template>
-    <nav class="settings-nav" aria-label="设置分区导航">
+    <!-- 桌面端：左侧垂直侧栏 -->
+    <nav
+        v-if="mode === 'sidebar'"
+        class="settings-sidebar"
+        aria-label="设置分区导航"
+    >
+        <div class="settings-sidebar__header">
+            <p v-if="greeting" class="settings-sidebar__title settings-sidebar__title--greeting">
+                {{ greeting }}
+            </p>
+            <p v-else class="settings-sidebar__title">⚙️ 分区导航</p>
+            <p class="settings-sidebar__sub">
+                {{ sections.length }} 个分区，点击切换对应设置。
+            </p>
+        </div>
+        <div class="settings-sidebar__list" role="tablist" aria-orientation="vertical">
+            <button
+                v-for="s in sections"
+                :key="s.id"
+                type="button"
+                role="tab"
+                class="settings-sidebar__item"
+                :class="{ 'is-active': activeId === s.id }"
+                :aria-selected="activeId === s.id ? 'true' : 'false'"
+                @click="go(s.id)"
+            >
+                <span class="nav-emoji" aria-hidden="true">{{ s.emoji }}</span>
+                <span class="nav-label">{{ s.label }}</span>
+                <span
+                    v-if="resolveCount(s.count) !== undefined"
+                    class="settings-sidebar__count"
+                >
+                    {{ resolveCount(s.count) }}
+                </span>
+            </button>
+        </div>
+        <p class="settings-sidebar__footer">
+            <span class="dot" />
+            <span>v{{ versionTag }} · 一切为你而设</span>
+        </p>
+    </nav>
+
+    <!-- 移动端：顶部水平胶囊 -->
+    <nav
+        v-else
+        class="settings-mobile-nav"
+        aria-label="设置分区导航"
+        role="tablist"
+    >
         <button
             v-for="s in sections"
             :key="s.id"
             type="button"
-            class="settings-nav__item"
-            :class="{ 'is-active': active === s.id }"
-            :title="s.label"
-            :aria-label="s.label"
-            :aria-current="active === s.id ? 'true' : undefined"
+            role="tab"
+            class="nav-pill"
+            :class="{ 'is-active': activeId === s.id }"
+            :aria-selected="activeId === s.id ? 'true' : 'false'"
             @click="go(s.id)"
         >
-            <span class="nav-emoji" aria-hidden="true">{{ s.emoji }}</span>
-            <span class="visually-hidden">{{ s.label }}</span>
+            <span class="nav-pill__emoji" aria-hidden="true">{{ s.emoji }}</span>
+            <span class="nav-pill__label">{{ s.label }}</span>
         </button>
     </nav>
 </template>

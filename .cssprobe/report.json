@@ -1,0 +1,164 @@
+{
+  "desktop": {
+    "viewport": {
+      "w": 980,
+      "h": 900
+    },
+    "hasSelectorMatches": false,
+    "sameElementCompound": true,
+    "wrap": {
+      "cls": "settings-account-wrap settings-shell__card from-fade",
+      "bg": "rgba(0, 0, 0, 0)",
+      "border": "0px none rgb(26, 29, 46)",
+      "radius": "0px",
+      "padding": "0px 0px 0px 0px",
+      "shadow": "none",
+      "rect": {
+        "x": 268,
+        "y": 12,
+        "w": 679,
+        "h": 792.6
+      }
+    },
+    "cards": [
+      {
+        "cls": "settings-card",
+        "bg": "rgba(255, 255, 255, 0.96)",
+        "border": "1px solid rgba(100, 116, 139, 0.18)",
+        "radius": "22px",
+        "padding": "40px 48px 32px 48px",
+        "shadow": "yes",
+        "rect": {
+          "x": 268,
+          "y": 12,
+          "w": 679,
+          "h": 509.3
+        }
+      },
+      {
+        "cls": "settings-card",
+        "bg": "rgba(255, 255, 255, 0.96)",
+        "border": "1px solid rgba(100, 116, 139, 0.18)",
+        "radius": "22px",
+        "padding": "40px 48px 32px 48px",
+        "shadow": "yes",
+        "rect": {
+          "x": 268,
+          "y": 533.3,
+          "w": 679,
+          "h": 271.4
+        }
+      }
+    ],
+    "gapBetweenCards": 12,
+    "accountBar": {
+      "cls": "account-bar",
+      "bg": "rgba(91, 141, 239, 0.14)",
+      "border": "0px none rgb(26, 29, 46)",
+      "radius": "14px",
+      "padding": "14px 18px 14px 18px",
+      "shadow": "none",
+      "rect": {
+        "x": 317,
+        "y": 701.6,
+        "w": 581,
+        "h": 70
+      }
+    },
+    "primaryBtn": {
+      "cls": "btn btn--primary",
+      "bg": "rgb(91, 141, 239)",
+      "border": "0px none rgb(255, 255, 255)",
+      "radius": "14px",
+      "padding": "0px 20px 0px 20px",
+      "shadow": "yes",
+      "rect": {
+        "x": 317,
+        "y": 446.3,
+        "w": 581,
+        "h": 42
+      }
+    }
+  },
+  "mobile": {
+    "viewport": {
+      "w": 600,
+      "h": 1000
+    },
+    "hasSelectorMatches": false,
+    "sameElementCompound": true,
+    "wrap": {
+      "cls": "settings-account-wrap settings-main__card from-fade",
+      "bg": "rgba(0, 0, 0, 0)",
+      "border": "0px none rgb(26, 29, 46)",
+      "radius": "0px",
+      "padding": "0px 0px 0px 0px",
+      "shadow": "none",
+      "rect": {
+        "x": 14,
+        "y": 166,
+        "w": 557,
+        "h": 760.6
+      }
+    },
+    "cards": [
+      {
+        "cls": "settings-card",
+        "bg": "rgba(255, 255, 255, 0.96)",
+        "border": "1px solid rgba(100, 116, 139, 0.18)",
+        "radius": "22px",
+        "padding": "34px 34px 22px 34px",
+        "shadow": "yes",
+        "rect": {
+          "x": 14,
+          "y": 166,
+          "w": 557,
+          "h": 493.3
+        }
+      },
+      {
+        "cls": "settings-card",
+        "bg": "rgba(255, 255, 255, 0.96)",
+        "border": "1px solid rgba(100, 116, 139, 0.18)",
+        "radius": "22px",
+        "padding": "34px 34px 22px 34px",
+        "shadow": "yes",
+        "rect": {
+          "x": 14,
+          "y": 671.3,
+          "w": 557,
+          "h": 255.4
+        }
+      }
+    ],
+    "gapBetweenCards": 12,
+    "accountBar": {
+      "cls": "account-bar",
+      "bg": "rgba(91, 141, 239, 0.14)",
+      "border": "0px none rgb(26, 29, 46)",
+      "radius": "14px",
+      "padding": "14px 18px 14px 18px",
+      "shadow": "none",
+      "rect": {
+        "x": 49,
+        "y": 833.6,
+        "w": 487,
+        "h": 70
+      }
+    },
+    "primaryBtn": {
+      "cls": "btn btn--primary",
+      "bg": "rgb(91, 141, 239)",
+      "border": "0px none rgb(255, 255, 255)",
+      "radius": "14px",
+      "padding": "0px 20px 0px 20px",
+      "shadow": "yes",
+      "rect": {
+        "x": 49,
+        "y": 594.3,
+        "w": 487,
+        "h": 42
+      }
+    }
+  }
+}
