@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, screen, shell, Tray } from "electron";
 import fs from "fs";
 import path from "path";
+import { createHash } from "crypto";
 
 // 将自定义协议注册为「标准安全协议」，使渲染进程可以直接用
 // fetch() / new Image() / CSS url() 等方式加载 avatar:// / pet:// 资源，
@@ -482,6 +483,23 @@ function resolveChatUserid(): number {
   return loggedInUid && loggedInUid > 0 ? loggedInUid : 1;
 }
 
+// 聊天记录按「部署模式 + 服务端 + 登录身份」隔离存储：避免本地部署与分离部署
+// （或不同远程服务器 / 不同账号）的聊天历史混在同一份文件里互相串味。
+// 旧版只有一个固定的 chat-session.json，切换模式/账号时加载的是同一份记录，
+// 即「本地部署的记录和分离部署登录其他服务器的记录混在一起」bug 的根源。
+function resolveChatStoragePath(): string {
+  const base = app.getPath("userData");
+  if (clientConfig.mode === "local") {
+    return path.join(base, "chat-session.local.json");
+  }
+  // 远程模式：同一台服务器 + 同一 uid 视为同一会话身份，各自独立文件。
+  // 服务端地址做哈希以生成安全文件名（避免 URL 中特殊字符 / 过长）。
+  const serverId = clientConfig.server?.httpUrl || clientConfig.server?.wsUrl || "unknown";
+  const hash = createHash("sha1").update(serverId).digest("hex").slice(0, 12);
+  const uid = resolveChatUserid();
+  return path.join(base, `chat-session.remote.${hash}.${uid}.json`);
+}
+
 let settingsSessionToken: string | null = clientConfig.sessionToken ?? null;
 let settingsWindow: PetWindow | null = null;
 
@@ -496,7 +514,8 @@ let dragState: {
 } | null = null;
 let isQuitting = false;
 let chatSessionService: ChatSessionService | null = null;
-// 聊天会话持久化文件路径：启动时确定一次，登录/登出重建连接时复用，避免重复拼路径。
+// 聊天会话持久化文件路径：按当前部署模式/服务端/登录身份隔离（见 resolveChatStoragePath），
+// 每次重建聊天连接时重算，确保不同身份加载各自独立的聊天历史。
 let chatSessionStoragePath = "";
 
 async function readApiResponse(response: Response) {
@@ -1131,9 +1150,8 @@ function reconnectChatSession(): void {
     chatSessionService = null;
     chatServiceUserid = null;
   }
-  if (!chatSessionStoragePath) {
-    chatSessionStoragePath = path.join(app.getPath("userData"), "chat-session.json");
-  }
+  // 身份（模式/服务端/uid）可能已变化，重算隔离路径，避免加载到别的身份的聊天记录。
+  chatSessionStoragePath = resolveChatStoragePath();
   void ensureChatSessionService().init(chatSessionStoragePath);
 }
 
@@ -1674,7 +1692,20 @@ app.whenReady().then(async () => {
   }
 
   let res = await checkBackendHealth();
-  chatSessionStoragePath = path.join(app.getPath("userData"), "chat-session.json");
+  chatSessionStoragePath = resolveChatStoragePath();
+  // 兼容迁移：旧版把全部历史存在固定的 chat-session.json。本地模式改用独立文件，
+  // 首次启动时把旧文件内容搬到本地槽位，避免既有本地聊天记录凭空消失（远程历史不迁移，避免错归身份）。
+  const legacyChatPath = path.join(app.getPath("userData"), "chat-session.json");
+  if (clientConfig.mode === "local" && chatSessionStoragePath !== legacyChatPath) {
+    try {
+      if (!fs.existsSync(chatSessionStoragePath) && fs.existsSync(legacyChatPath)) {
+        fs.copyFileSync(legacyChatPath, chatSessionStoragePath);
+        console.log("[chat] 已迁移旧版本地聊天记录到 chat-session.local.json");
+      }
+    } catch (e) {
+      console.warn("[chat] 迁移旧聊天记录失败（不影响启动）:", e instanceof Error ? e.message : String(e));
+    }
+  }
   await ensureChatSessionService().init(chatSessionStoragePath);
   createTray();
   ensurePetWindow();
