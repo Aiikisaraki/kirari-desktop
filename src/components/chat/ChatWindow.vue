@@ -22,6 +22,23 @@ const pendingImages = ref<string[]>([]);
 const threadRef = ref<HTMLElement | null>(null);
 const petName = ref("Kirari");
 
+/* ===== 工具栏：表情弹层 / 戳一戳 状态 ===== */
+const showEmoji = ref(false);
+const petPoked = ref(false);
+const emojiList = ["😊", "😂", "🥰", "😎", "🤔", "👍", "🎉", "💡", "❤️", "🌟", "🐱", "✨"];
+
+function insertEmoji(e: string) {
+    draft.value += e;
+    showEmoji.value = false;
+}
+
+function pokePet() {
+    petPoked.value = true;
+    window.setTimeout(() => {
+        petPoked.value = false;
+    }, 600);
+}
+
 /* ===== 时间分隔标记 ===== */
 const TIME_SEP_THRESHOLD = 5 * 60 * 1000; // 5 分钟
 
@@ -158,6 +175,7 @@ function sendMessageLocal() {
     sendMessage(draft.value, pendingImages.value);
     draft.value = "";
     pendingImages.value = [];
+    showEmoji.value = false;
 }
 
 function handleKeydown(event: KeyboardEvent) {
@@ -191,7 +209,9 @@ const statusState = computed(() => {
         <main class="chat-window" :aria-label="windowTitle">
             <header class="chat-header">
                 <div class="chat-peer">
-                    <div class="chat-avatar" aria-hidden="true">{{ petNameInitial }}</div>
+                    <div class="chat-avatar" :class="{ poking: petPoked }" aria-hidden="true">
+                        {{ petNameInitial }}
+                    </div>
                     <div class="chat-peer-info">
                         <div class="chat-peer-name">{{ petName || "Kirari" }}</div>
                         <div class="chat-peer-status" :class="statusState.className">
@@ -215,33 +235,54 @@ const statusState = computed(() => {
                     <div v-if="item.type === 'timestamp'" class="chat-time-sep">
                         <span class="chat-time-sep__pill">{{ formatTime(item.timestamp!) }}</span>
                     </div>
-                    <!-- 消息气泡 -->
+
+                    <!-- 系统消息：居中提示 -->
+                    <div v-else-if="item.message!.author === 'system'" class="chat-sysnote">
+                        {{ item.message!.text }}
+                    </div>
+
+                    <!-- 消息行：头像常驻 + 带尾气泡 -->
                     <article
                         v-else
-                        class="chat-message"
+                        class="msg-row"
                         :class="`is-${item.message!.author}`"
                     >
-                        <div class="markdown-body" v-html="renderMarkdown(item.message!.text)"></div>
-                        <div
-                            v-if="item.message!.images && item.message!.images!.length"
-                            class="msg-images"
-                        >
-                            <a
-                                v-for="(img, i) in item.message!.images"
-                                :key="i"
-                                :href="img"
-                                target="_blank"
-                                class="msg-image-wrap"
+                        <div class="msg-avatar" aria-hidden="true">
+                            {{ item.message!.author === "user" ? "你" : petNameInitial }}
+                        </div>
+                        <div class="msg-col">
+                            <div
+                                class="msg-bubble markdown-body"
+                                v-html="renderMarkdown(item.message!.text)"
+                            ></div>
+                            <div
+                                v-if="item.message!.images && item.message!.images!.length"
+                                class="msg-images"
                             >
-                                <img :src="img" alt="图片" class="msg-image" loading="lazy" />
-                            </a>
+                                <a
+                                    v-for="(img, i) in item.message!.images"
+                                    :key="i"
+                                    :href="img"
+                                    target="_blank"
+                                    class="msg-image-wrap"
+                                >
+                                    <img :src="img" alt="图片" class="msg-image" loading="lazy" />
+                                </a>
+                            </div>
+                            <div class="msg-time">{{ formatTime(item.message!.timestamp) }}</div>
                         </div>
                     </article>
                 </template>
 
-                <div v-if="waitingForReply" class="chat-waiting" role="status" aria-live="polite">
-                    <span class="chat-waiting-dot" aria-hidden="true"></span>
-                    <span>{{ petName || "Kirari" }} 正在思考...</span>
+                <!-- 思考中：以 pet 行呈现，头像 + 气泡 -->
+                <div v-if="waitingForReply" class="msg-row is-pet">
+                    <div class="msg-avatar" aria-hidden="true">{{ petNameInitial }}</div>
+                    <div class="msg-col">
+                        <div class="msg-bubble msg-waiting" role="status" aria-live="polite">
+                            <span class="msg-waiting-dot" aria-hidden="true"></span>
+                            <span>{{ petName || "Kirari" }} 正在思考...</span>
+                        </div>
+                    </div>
                 </div>
             </section>
 
@@ -252,6 +293,66 @@ const statusState = computed(() => {
                         <button type="button" class="pending-remove" @click="removePendingImage(i)">×</button>
                     </div>
                 </div>
+
+                <div class="compose-toolbar">
+                    <button
+                        type="button"
+                        class="ctool"
+                        title="表情"
+                        aria-label="表情"
+                        @click="showEmoji = !showEmoji"
+                    >
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
+                            <path d="M12 2c5.523 0 10 4.477 10 10s-4.477 10-10 10S2 17.523 2 12S6.477 2 12 2m4.214 11.87a1 1 0 0 0-1.414-.014A3.98 3.98 0 0 1 12 15a3.98 3.98 0 0 1-2.8-1.144a1 1 0 0 0-1.4 1.428A6 6 0 0 0 12 17a6 6 0 0 0 4.2-1.716a1 1 0 0 0 .014-1.414M8.5 8a1.5 1.5 0 1 0 0 3a1.5 1.5 0 0 0 0-3m7 0a1.5 1.5 0 1 0 0 3a1.5 1.5 0 0 0 0-3" />
+                        </svg>
+                    </button>
+                    <button
+                        type="button"
+                        class="ctool"
+                        title="图片"
+                        aria-label="图片"
+                        @click="fileInput?.click()"
+                    >
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
+                            <path fill-rule="evenodd" clip-rule="evenodd" d="M5 3a3 3 0 0 0-3 3v10a2 2 0 0 0 2 2V6a1 1 0 0 1 1-1h14a2 2 0 0 0-2-2zm0 5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2v11.333a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2zm15 0H7v8.848L10.848 13a1.25 1.25 0 0 1 1.768 0l3.241 3.24l.884-.883a1.25 1.25 0 0 1 1.768 0L20 16.848zm-2 3a1.5 1.5 0 1 1-3 0a1.5 1.5 0 0 1 3 0" />
+                        </svg>
+                    </button>
+                    <button
+                        type="button"
+                        class="ctool"
+                        title="语音输入即将上线"
+                        aria-label="语音"
+                        disabled
+                    >
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
+                            <path d="M14.185 5.302a7 7 0 0 1 1.529 6.656l3.401 4.372c.599.77.716 1.77.383 2.631a.83.83 0 0 0 .493-.014a1 1 0 0 1 .632 1.898a2.77 2.77 0 0 1-2.546-.39a2.7 2.7 0 0 1-2.75-.337l-4.373-3.4A7 7 0 0 1 4.3 15.19a21.4 21.4 0 0 0 5.766-4.117a21.4 21.4 0 0 0 4.119-5.77M4.044 5.047a7 7 0 0 1 8.548-1.055a19.4 19.4 0 0 1-3.94 5.667c-1.69 1.69-3.612 3-5.662 3.938a7 7 0 0 1 1.054-8.55" />
+                        </svg>
+                    </button>
+                    <button
+                        type="button"
+                        class="ctool"
+                        title="戳一戳"
+                        aria-label="戳一戳"
+                        @click="pokePet"
+                    >
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
+                            <path d="M6.68 3.422a1.1 1.1 0 0 1 1.828-.754l9.91 8.79c.733.65.315 1.861-.662 1.922l-3.088.19l2.283 5.456a1.5 1.5 0 0 1-.795 1.96l-1.787.76a1.5 1.5 0 0 1-1.97-.795l-2.42-5.724l-2.302 1.989c-.738.637-1.879.07-1.817-.903z" />
+                        </svg>
+                    </button>
+                </div>
+
+                <div v-if="showEmoji" class="emoji-pop">
+                    <button
+                        v-for="e in emojiList"
+                        :key="e"
+                        type="button"
+                        class="emoji-item"
+                        @click="insertEmoji(e)"
+                    >
+                        {{ e }}
+                    </button>
+                </div>
+
                 <form class="composer-bar" @submit.prevent="sendMessageLocal">
                     <input
                         ref="fileInput"
@@ -261,17 +362,6 @@ const statusState = computed(() => {
                         hidden
                         @change="onPickImages"
                     />
-                    <button
-                        type="button"
-                        class="composer-attach"
-                        title="发送图片"
-                        aria-label="发送图片"
-                        @click="fileInput?.click()"
-                    >
-                        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-                        </svg>
-                    </button>
                     <input
                         v-model="draft"
                         class="composer-input"
@@ -287,7 +377,7 @@ const statusState = computed(() => {
                         aria-label="发送"
                         title="发送"
                     >
-                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                             <line x1="22" y1="2" x2="11" y2="13" />
                             <polygon points="22 2 15 22 11 13 2 9 22 2" />
                         </svg>
@@ -332,6 +422,30 @@ const statusState = computed(() => {
     background: linear-gradient(135deg, var(--pet-accent-strong) 0%, var(--pet-accent) 100%);
     box-shadow: 0 4px 12px var(--pet-primary-shadow);
     user-select: none;
+}
+
+/* 戳一戳：头部宠物头像抖动反馈 */
+.chat-avatar.poking {
+    animation: pet-poke 0.55s ease;
+}
+
+@keyframes pet-poke {
+    0%,
+    100% {
+        transform: translateX(0) rotate(0deg);
+    }
+    20% {
+        transform: translateX(-4px) rotate(-8deg);
+    }
+    40% {
+        transform: translateX(4px) rotate(8deg);
+    }
+    60% {
+        transform: translateX(-3px) rotate(-5deg);
+    }
+    80% {
+        transform: translateX(3px) rotate(5deg);
+    }
 }
 
 .chat-peer-info {
@@ -424,7 +538,244 @@ const statusState = computed(() => {
     min-width: 0;
 }
 
-/* ===== 底部输入区：圆角工具栏 + 对齐修复 ===== */
+/* ===== 消息流：双栏头像 + 带尾气泡 ===== */
+.chat-thread {
+    gap: 16px;
+    padding: 18px 24px;
+}
+
+/* 系统消息居中提示 */
+.chat-sysnote {
+    align-self: center;
+    max-width: 82%;
+    text-align: center;
+    padding: 6px 14px;
+    border-radius: 999px;
+    background: rgba(120, 128, 140, 0.12);
+    color: var(--pet-muted);
+    font-size: 0.78rem;
+    line-height: 1.5;
+    user-select: none;
+}
+
+/* 消息行：头像 + 气泡列 */
+.msg-row {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+}
+
+.msg-row.is-pet {
+    align-self: flex-start;
+}
+
+.msg-row.is-user {
+    flex-direction: row-reverse;
+    align-self: flex-end;
+}
+
+.msg-avatar {
+    flex: 0 0 auto;
+    width: 40px;
+    height: 40px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    font-size: 16px;
+    font-weight: 800;
+    color: #fff;
+    margin-top: 1px;
+    user-select: none;
+    box-shadow: 0 3px 10px var(--pet-primary-shadow);
+}
+
+.msg-row.is-pet .msg-avatar {
+    background: linear-gradient(135deg, var(--pet-accent-strong), var(--pet-accent));
+}
+
+.msg-row.is-user .msg-avatar {
+    background: linear-gradient(135deg, #9aa3b5, #7c8597);
+}
+
+.msg-col {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    max-width: min(74%, 560px);
+}
+
+.msg-row.is-user .msg-col {
+    align-items: flex-end;
+}
+
+/* 带尾气泡 */
+.msg-bubble {
+    position: relative;
+    max-width: 100%;
+    padding: 11px 16px;
+    font-size: 15px;
+    line-height: 1.7;
+    color: var(--pet-ink);
+    border: 1px solid var(--pet-border);
+    box-shadow: 0 4px 14px rgba(57, 44, 76, 0.08);
+    transition:
+        transform 0.15s ease,
+        box-shadow 0.15s ease;
+}
+
+.msg-row:hover .msg-bubble {
+    transform: translateY(-1px);
+    box-shadow: 0 7px 20px rgba(57, 44, 76, 0.13);
+}
+
+/* pet 气泡：贴头像侧收紧圆角 + 左尾 */
+.msg-row.is-pet .msg-bubble {
+    background: var(--pet-surface-strong);
+    border-radius: 6px 20px 20px 20px;
+}
+
+.msg-row.is-pet .msg-bubble::before {
+    content: "";
+    position: absolute;
+    left: -7px;
+    top: 12px;
+    width: 13px;
+    height: 13px;
+    background: var(--pet-surface-strong);
+    border-left: 1px solid var(--pet-border);
+    border-top: 1px solid var(--pet-border);
+    border-top-left-radius: 4px;
+    transform: rotate(45deg);
+}
+
+/* user 气泡：贴头像侧收紧圆角 + 右尾（头像在右） */
+.msg-row.is-user .msg-bubble {
+    background: var(--pet-accent);
+    color: #fff;
+    border-color: var(--pet-accent-strong-border);
+    border-radius: 20px 6px 20px 20px;
+}
+
+.msg-row.is-user .msg-bubble::before {
+    content: "";
+    position: absolute;
+    right: -7px;
+    top: 12px;
+    width: 13px;
+    height: 13px;
+    background: var(--pet-accent);
+    border-right: 1px solid var(--pet-accent-strong-border);
+    border-top: 1px solid var(--pet-accent-strong-border);
+    border-top-right-radius: 4px;
+    transform: rotate(45deg);
+}
+
+/* user 气泡内 Markdown 适配（白字） */
+.msg-row.is-user .msg-bubble {
+    color: #fff;
+}
+
+.msg-row.is-user .msg-bubble a {
+    color: #ffe3ec;
+}
+
+.msg-row.is-user .msg-bubble code {
+    background: rgba(255, 255, 255, 0.22);
+    color: #fff;
+}
+
+.msg-row.is-user .msg-bubble pre {
+    background: rgba(0, 0, 0, 0.22);
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+.msg-row.is-user .msg-bubble blockquote {
+    border-left-color: rgba(255, 255, 255, 0.45);
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.msg-row.is-user .msg-bubble th,
+.msg-row.is-user .msg-bubble td {
+    border-color: rgba(255, 255, 255, 0.35);
+}
+
+.msg-row.is-user .msg-bubble th {
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.msg-row.is-user .msg-bubble hr {
+    border-top-color: rgba(255, 255, 255, 0.35);
+}
+
+.msg-time {
+    font-size: 11px;
+    color: var(--pet-muted);
+    font-weight: 600;
+    margin-top: 5px;
+    padding: 0 4px;
+}
+
+/* 消息内图片网格 */
+.msg-images {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+.msg-row.is-user .msg-images {
+    justify-content: flex-end;
+}
+
+.msg-image-wrap {
+    display: block;
+    max-width: 240px;
+}
+
+.msg-image {
+    width: 100%;
+    border-radius: 8px;
+    display: block;
+    cursor: zoom-in;
+}
+
+/* 思考中气泡 */
+.msg-waiting {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    align-self: flex-start;
+    padding: 9px 14px;
+    border-radius: 6px 20px 20px 20px;
+    color: var(--pet-muted);
+    background: var(--pet-surface-strong);
+    border: 1px solid var(--pet-border);
+    font-size: 0.82rem;
+}
+
+.msg-waiting-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--pet-accent);
+    box-shadow: 12px 0 0 var(--pet-dot-2), 24px 0 0 var(--pet-dot-3);
+    animation: chat-waiting-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes chat-waiting-pulse {
+    0%,
+    100% {
+        opacity: 0.45;
+        transform: translateX(0);
+    }
+    50% {
+        opacity: 1;
+        transform: translateX(4px);
+    }
+}
+
+/* ===== 底部输入区 ===== */
 .composer-area {
     display: flex;
     flex-direction: column;
@@ -434,6 +785,80 @@ const statusState = computed(() => {
     background: rgba(255, 255, 255, 0.42);
     backdrop-filter: blur(14px) saturate(140%);
     -webkit-backdrop-filter: blur(14px) saturate(140%);
+}
+
+/* 工具栏：MingCute 图标 */
+.compose-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 4px;
+}
+
+.ctool {
+    flex: 0 0 auto;
+    width: 34px;
+    height: 34px;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--pet-muted);
+    cursor: pointer;
+    transition:
+        background 140ms ease,
+        color 140ms ease,
+        transform 120ms ease;
+}
+
+.ctool:hover:not(:disabled) {
+    background: var(--pet-accent-soft);
+    color: var(--pet-accent);
+}
+
+.ctool:active:not(:disabled) {
+    transform: translateY(1px);
+}
+
+.ctool:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.ctool svg {
+    width: 20px;
+    height: 20px;
+    display: block;
+}
+
+/* 表情弹层 */
+.emoji-pop {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 8px;
+    margin: 0 2px;
+    background: var(--pet-surface-strong);
+    border: 1px solid var(--pet-border);
+    border-radius: 12px;
+    box-shadow: 0 6px 18px rgba(57, 44, 76, 0.12);
+}
+
+.emoji-item {
+    width: 32px;
+    height: 32px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 120ms ease;
+}
+
+.emoji-item:hover {
+    background: var(--pet-accent-soft);
 }
 
 .composer-bar {
@@ -477,7 +902,6 @@ const statusState = computed(() => {
     opacity: 0.75;
 }
 
-.composer-attach,
 .composer-send {
     flex: 0 0 auto;
     width: 40px;
@@ -487,26 +911,13 @@ const statusState = computed(() => {
     border: 0;
     border-radius: 50%;
     cursor: pointer;
+    color: #ffffff;
+    background: var(--pet-accent);
+    box-shadow: 0 4px 12px var(--pet-primary-shadow);
     transition:
         transform 140ms ease,
         filter 140ms ease,
         opacity 140ms ease;
-}
-
-.composer-attach {
-    color: var(--pet-muted);
-    background: transparent;
-}
-
-.composer-attach:hover {
-    color: var(--pet-accent);
-    background: var(--pet-accent-soft);
-}
-
-.composer-send {
-    color: #ffffff;
-    background: var(--pet-accent);
-    box-shadow: 0 4px 12px var(--pet-primary-shadow);
 }
 
 .composer-send:not(:disabled):hover {
@@ -566,25 +977,5 @@ const statusState = computed(() => {
 
 .pending-remove:hover {
     background: rgba(0, 0, 0, 0.8);
-}
-
-/* ===== 消息内图片网格 ===== */
-.msg-images {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 6px;
-}
-
-.msg-image-wrap {
-    display: block;
-    max-width: 240px;
-}
-
-.msg-image {
-    width: 100%;
-    border-radius: 8px;
-    display: block;
-    cursor: zoom-in;
 }
 </style>

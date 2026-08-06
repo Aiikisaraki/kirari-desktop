@@ -461,7 +461,10 @@ type SettingsApiRequest = {
 };
 
 const petWindowSize = { width: 360, height: 400 };
-const chatWindowSize = { width: 420, height: 620 };
+// 聊天窗口默认尺寸：QQ 桌面聊天区大小（920×680），
+// 配合方向⑤「双栏头像·带尾气泡」布局（头像常驻两侧 + 非对称圆角气泡 + 时间戳）。
+// minWidth/minHeight 锁到 720×520：保证双栏头像+工具栏+输入区不折叠。
+const chatWindowSize = { width: 920, height: 680 };
 // 桌面端默认 980×720：让用户首次打开就能进入桌面端双栏布局（侧栏 + 右栏卡片）
 // 并触发 ≥860px 的横版专属样式（padding 48px 等）。若给到 560 这种窄宽度，
 // SettingsPage 的 matchMedia("(max-width: 720px)") 会判定为窄窗、走移动端布局，
@@ -1342,8 +1345,8 @@ function createChatWindow() {
     title: `和 ${clientConfig.petName || "Kirari"} 聊天`,
     width: chatWindowSize.width,
     height: chatWindowSize.height,
-    minWidth: 360,
-    minHeight: 500,
+    minWidth: 720,
+    minHeight: 520,
     show: false,
     frame: false,
     transparent: true,
