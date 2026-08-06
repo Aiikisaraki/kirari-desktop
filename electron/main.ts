@@ -1341,10 +1341,18 @@ function createWindow() {
 }
 
 function createChatWindow() {
+  // 透明无边框窗口在 Windows 上若不给 x/y 会让系统默认坐标算错（常被甩到屏幕外被截断）。
+  // 这里按主显示器工作区（排除任务栏）显式居中，保证窗口完整可见。
+  const { workAreaSize } = screen.getPrimaryDisplay();
+  const x = Math.max(0, Math.round((workAreaSize.width - chatWindowSize.width) / 2));
+  const y = Math.max(0, Math.round((workAreaSize.height - chatWindowSize.height) / 2));
+
   const win = new BrowserWindow({
     title: `和 ${clientConfig.petName || "Kirari"} 聊天`,
     width: chatWindowSize.width,
     height: chatWindowSize.height,
+    x,
+    y,
     minWidth: 720,
     minHeight: 520,
     show: false,
