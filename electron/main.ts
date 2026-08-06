@@ -1707,6 +1707,10 @@ app.whenReady().then(async () => {
     }
   }
   await ensureChatSessionService().init(chatSessionStoragePath);
+  // 初始化机器人适配器管理器：连接已启用的适配器与后端 WS，使 QQ 等跨端消息可在启动时同步进桌宠。
+  // 之前仅在 deploy:set-server（远程改服务端地址）里调用，启动时漏掉会导致 adapter:* 处理器
+  // 全部抛「适配器管理器未初始化」。此时 backendUrl 与聊天服务均已就绪，调用安全。
+  initAdapterManager();
   createTray();
   ensurePetWindow();
 
