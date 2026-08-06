@@ -109,11 +109,12 @@ export class OneBotAdapter extends BotAdapter {
         this.pendingImages.delete(frame.echo);
         const d = frame.data || {};
         let res: string | null = null;
-        if (typeof d.base64 === "string" && d.base64.startsWith("base64://")) {
-          res = d.base64.slice("base64://".length);
+        // 优先取内联 base64（go-cqhttp 返回纯 base64 或 base64:// 前缀）
+        if (typeof d.base64 === "string") {
+          res = d.base64.startsWith("base64://") ? d.base64.slice("base64://".length) : d.base64;
         } else if (typeof d.file === "string" && d.file.startsWith("base64://")) {
           res = d.file.slice("base64://".length);
-        } else if (typeof d.url === "string" && /^https?:\/\//.test(d.url)) {
+        } else if (typeof d.url === "string" && /^https?:\/\//i.test(d.url)) {
           res = d.url;
         } else if (
           typeof d.file === "string" &&
@@ -318,19 +319,34 @@ export class OneBotAdapter extends BotAdapter {
   //   保证云模型也能用；拉取失败/超时返回 null（调用方丢弃该图，不阻塞消息）。
   private async resolveImage(raw: string): Promise<string | null> {
     if (!raw) return null;
-    if (raw.startsWith("base64://")) return `data:image/jpeg;base64,${raw.slice("base64://".length)}`;
-    if (raw.startsWith("base64:")) return `data:image/jpeg;base64,${raw.slice("base64:".length)}`;
-    if (raw.startsWith("data:image/")) {
-      const comma = raw.indexOf(",");
-      if (comma === -1) return null;
-      return `data:image/jpeg;base64,${raw.slice(comma + 1)}`;
+    const s = raw.trim();
+    // 1. 内联 base64 变体（部分客户端用单冒号 / 缺失 MIME 子类型）
+    if (s.startsWith("base64://")) return `data:image/jpeg;base64,${s.slice("base64://".length)}`;
+    if (s.startsWith("base64:")) {
+      const rest = s.slice("base64:".length);
+      // 防止 base64:data:image/... 双前缀：若 rest 本身就是 data URL 则直接返回
+      return rest.startsWith("data:image/") ? rest : `data:image/jpeg;base64,${rest}`;
     }
-    if (/^https?:\/\//.test(raw)) return raw;
-    // 裸 file_id / 缓存文件名：通过 get_image 拉回字节
+    // 2. 已是 data:image/... 形式：校验载荷真的是 base64，而非被塞进了真实 URL
+    if (s.startsWith("data:image/")) {
+      const comma = s.indexOf(",");
+      if (comma === -1) return null;
+      const payload = s.slice(comma + 1).trim();
+      // 部分客户端把真实 http 链接塞进 base64 载荷（形如 data:image/jpeg;base64,https://...），
+      // 应把真实链接提取出来当 http 图片用，而不是当成 base64 喂给模型导致 500
+      if (/^https?:\/\//i.test(payload)) return payload;
+      return s;
+    }
+    // 3. 真实 http(s) 链接
+    if (/^https?:\/\//i.test(s)) return s;
+    // 4. 裸 file_id / 缓存文件名：走 OneBot get_image 拉回字节
     if (this.ws && this.ws.readyState === 1) {
       try {
-        const b64 = await this.getImage(raw);
-        return b64 ? `data:image/jpeg;base64,${b64}` : null;
+        const b64 = await this.getImage(s);
+        if (!b64) return null;
+        // get_image 可能返回 base64（不带前缀）或真实 http URL
+        if (/^https?:\/\//i.test(b64)) return b64;
+        return `data:image/jpeg;base64,${b64}`;
       } catch (e) {
         console.warn("[onebot] get_image 失败，跳过该图片:", e instanceof Error ? e.message : String(e));
         return null;
