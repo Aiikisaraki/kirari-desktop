@@ -1,3 +1,4 @@
+import * as fs from "fs";
 import { BotAdapter } from "./bot-adapter";
 import type { BotIncoming, BotOutgoing, OneBotConfig, OneBotGroupReplyMode, OneBotGroupFilter } from "./types";
 
@@ -10,6 +11,8 @@ export class OneBotAdapter extends BotAdapter {
   private echoSeq = 0;
   private selfQQ = ""; // 机器人自身 QQ（get_login_info 获取），用于群 @ 判断
   private loginEcho = "";
+  // get_image 异步回调：echo → { resolve, timer }，用于把 OneBot 缓存文件名解析为真实图片字节。
+  private pendingImages = new Map<string, { resolve: (v: string | null) => void; timer: ReturnType<typeof setTimeout> }>();
 
   connect(): void {
     if (this.disposed || this.ws) return;
@@ -76,6 +79,9 @@ export class OneBotAdapter extends BotAdapter {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    // 清理未完成的 get_image 等待，避免泄漏/悬挂回调
+    for (const pend of this.pendingImages.values()) clearTimeout(pend.timer);
+    this.pendingImages.clear();
     if (this.ws) {
       try {
         this.ws.close();
@@ -87,15 +93,42 @@ export class OneBotAdapter extends BotAdapter {
     this.setConnected(false);
   }
 
-  private handleFrame(raw: string): void {
+  private async handleFrame(raw: string): Promise<void> {
     let frame: any;
     try {
       frame = JSON.parse(raw);
     } catch {
       return;
     }
-    // action 回包（带 echo）：用于 get_login_info，不当作消息处理
+    // action 回包（带 echo）：可能是 get_login_info，也可能是 get_image
     if (frame && frame.echo) {
+      // get_image 回包：把缓存文件名解析为真实图片字节（base64 / url / 本地路径）
+      if (this.pendingImages.has(frame.echo)) {
+        const pend = this.pendingImages.get(frame.echo)!;
+        clearTimeout(pend.timer);
+        this.pendingImages.delete(frame.echo);
+        const d = frame.data || {};
+        let res: string | null = null;
+        if (typeof d.base64 === "string" && d.base64.startsWith("base64://")) {
+          res = d.base64.slice("base64://".length);
+        } else if (typeof d.file === "string" && d.file.startsWith("base64://")) {
+          res = d.file.slice("base64://".length);
+        } else if (typeof d.url === "string" && /^https?:\/\//.test(d.url)) {
+          res = d.url;
+        } else if (
+          typeof d.file === "string" &&
+          (d.file.startsWith("/") || /^[A-Za-z]:[\\/]/.test(d.file) || d.file.startsWith("file://"))
+        ) {
+          try {
+            const b = fs.readFileSync(d.file.replace(/^file:\/\//, ""));
+            res = b.toString("base64");
+          } catch {
+            /* 读不到就放弃 */
+          }
+        }
+        pend.resolve(res);
+        return;
+      }
       if (frame.echo === this.loginEcho && frame.data && frame.data.user_id) {
         this.selfQQ = String(frame.data.user_id);
         console.log(`[onebot] 登录账号 QQ=${this.selfQQ}`);
@@ -150,7 +183,12 @@ export class OneBotAdapter extends BotAdapter {
     }
 
     console.log(`[onebot] 收到消息事件 type=${msgType} user=${userId} group=${frame.group_id ?? '-'}`);
-    let { text, images } = this.parseMessage(frame.message);
+    let { text, images: rawImages } = this.parseMessage(frame.message);
+    // 把图片候选归一化为可用串（内联 base64 / http URL / 经 get_image 取回字节）；
+    // 解析失败的（裸文件名拉不到字节等）直接丢弃，避免把坏串送进模型导致 500 卡死。
+    const images = (
+      await Promise.all(rawImages.map((r) => this.resolveImage(r)))
+    ).filter((x): x is string => typeof x === "string" && x.length > 0);
     // mention 模式下，去掉文本里对自己的 @，以及 @全体成员（避免把 @at 当成内容）
     if (msgType === "group" && this.selfQQ) {
       text = text.replace(new RegExp(`@${this.selfQQ}\\s*`, "g"), "").trim();
@@ -234,13 +272,9 @@ export class OneBotAdapter extends BotAdapter {
         if (segType === "image") {
           const file = this.cqParam(body, "file");
           const url = this.cqParam(body, "url");
-          if (file && file.startsWith("base64://")) {
-            images.push(`data:image/;base64,${file.slice("base64://".length)}`);
-          } else if (url) {
-            images.push(url);
-          } else if (file && /^https?:\/\//.test(file)) {
-            images.push(file);
-          }
+          // 仅记录候选（file 优先，退而求其次 url），真正的归一化在 resolveImage 完成。
+          const candidate = file || url;
+          if (candidate) images.push(candidate);
         } else if (segType === "at") {
           const qq = this.cqParam(body, "qq");
           text += `@${qq || "?"} `;
@@ -259,10 +293,12 @@ export class OneBotAdapter extends BotAdapter {
         else if (seg?.type === "at") {
           const qq: string = String(seg.data?.qq ?? "");
           text += `@${qq === "all" ? "all" : qq || "?"} `;
-        } else if (seg?.type === "image") {
+        }         else if (seg?.type === "image") {
+          // 仅记录候选（file 优先，退而求其次 url），真正的归一化在 resolveImage 完成。
           const file: string = seg.data?.file || "";
-          if (file.startsWith("base64://")) images.push(`data:image/;base64,${file.slice(9)}`);
-          else if (file) images.push(file);
+          const url: string = seg.data?.url || "";
+          const candidate = file || url;
+          if (candidate) images.push(candidate);
         }
       }
       return { text: text.trim(), images };
@@ -273,6 +309,54 @@ export class OneBotAdapter extends BotAdapter {
   private cqParam(body: string, key: string): string {
     const m = body.match(new RegExp(`${key}=([^,\\]]+)`));
     return m ? m[1].trim() : "";
+  }
+
+  // 把 OneBot 给出的图片候选归一化为可直接喂给模型的图片串：
+  // - base64:// / base64: / data:image/... → 统一为标准 data:image/jpeg;base64,...（修正缺失的 MIME 子类型）
+  // - http(s) URL → 原样（模型自行拉取）
+  // - 裸 file_id / 缓存文件名（如 FF3C422A....jpg）→ 走 OneBot get_image 取回真实字节内联为 base64，
+  //   保证云模型也能用；拉取失败/超时返回 null（调用方丢弃该图，不阻塞消息）。
+  private async resolveImage(raw: string): Promise<string | null> {
+    if (!raw) return null;
+    if (raw.startsWith("base64://")) return `data:image/jpeg;base64,${raw.slice("base64://".length)}`;
+    if (raw.startsWith("base64:")) return `data:image/jpeg;base64,${raw.slice("base64:".length)}`;
+    if (raw.startsWith("data:image/")) {
+      const comma = raw.indexOf(",");
+      if (comma === -1) return null;
+      return `data:image/jpeg;base64,${raw.slice(comma + 1)}`;
+    }
+    if (/^https?:\/\//.test(raw)) return raw;
+    // 裸 file_id / 缓存文件名：通过 get_image 拉回字节
+    if (this.ws && this.ws.readyState === 1) {
+      try {
+        const b64 = await this.getImage(raw);
+        return b64 ? `data:image/jpeg;base64,${b64}` : null;
+      } catch (e) {
+        console.warn("[onebot] get_image 失败，跳过该图片:", e instanceof Error ? e.message : String(e));
+        return null;
+      }
+    }
+    return null;
+  }
+
+  // 通过 OneBot get_image action 拉取图片字节，返回 base64（不带前缀）；超时/失败返回 null。
+  private getImage(file: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      if (!this.ws || this.ws.readyState !== 1) return resolve(null);
+      const echo = `kirari-getimg-${++this.echoSeq}`;
+      const timer = setTimeout(() => {
+        this.pendingImages.delete(echo);
+        resolve(null);
+      }, 8000);
+      this.pendingImages.set(echo, { resolve, timer });
+      try {
+        this.ws.send(JSON.stringify({ action: "get_image", params: { file }, echo }));
+      } catch {
+        clearTimeout(timer);
+        this.pendingImages.delete(echo);
+        resolve(null);
+      }
+    });
   }
 
   async sendMessage(target: BotIncoming, outgoing: BotOutgoing): Promise<void> {
