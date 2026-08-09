@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useChatSocket } from "../../composables/useChatSocket";
 import { renderMarkdownMath } from "../../utils/renderMarkdownMath";
 import WindowChrome from "../common/WindowChrome.vue";
+import ChatContextMenu from "./ChatContextMenu.vue";
 import type { ChatMessage } from "../../stores/chat";
 
 const { connected, messages, lastError, waitingForReply, requestState, sendMessage } =
@@ -193,6 +194,120 @@ const statusState = computed(() => {
     }
     return { label: "连接中", className: "is-connecting", dot: true };
 });
+
+/* ===== 右键菜单：复制文字 / 复制图片 / 图片另存为 ===== */
+type ChatWindowApi = {
+    saveImageAs: (src: string) => Promise<{ ok: boolean; error?: string; canceled?: boolean }>;
+    copyImage: (src: string) => Promise<{ ok: boolean; error?: string }>;
+};
+
+function getWindowApi(): ChatWindowApi | undefined {
+    return (window as unknown as { windowApi?: ChatWindowApi }).windowApi;
+}
+
+interface CtxMenuItem {
+    label: string;
+    onClick: () => void;
+    disabled?: boolean;
+    danger?: boolean;
+}
+
+const ctxMenu = ref<{ x: number; y: number; items: CtxMenuItem[] } | null>(null);
+
+const toast = ref<{ text: string; id: number } | null>(null);
+let toastTimer: number | null = null;
+
+function flashToast(text: string) {
+    toast.value = { text, id: Date.now() };
+    if (toastTimer) window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(() => {
+        toast.value = null;
+    }, 1800);
+}
+
+function openCtxMenu(e: MouseEvent, items: CtxMenuItem[]) {
+    if (!items.length) return;
+    e.preventDefault();
+    const MENU_W = 200;
+    const ITEM_H = 38;
+    const x = Math.min(e.clientX, window.innerWidth - MENU_W - 8);
+    const y = Math.min(e.clientY, window.innerHeight - items.length * ITEM_H - 16);
+    ctxMenu.value = { x, y, items };
+}
+
+/** 右击气泡或图片：按消息内容组装统一的右键菜单（有文字给复制文字，有图片给复制/另存为）。 */
+function onBubbleContextMenu(e: MouseEvent, msg: ChatMessage) {
+    const items: CtxMenuItem[] = [];
+    const text = (msg.text || "").trim();
+    if (text) {
+        items.push({ label: "复制文字", onClick: () => void copyText(text) });
+    }
+    const imgs = (msg.images || []).filter((s) => typeof s === "string" && s.trim());
+    if (imgs.length === 1) {
+        items.push({ label: "复制图片", onClick: () => void copyImage(imgs[0]) });
+        items.push({ label: "图片另存为…", onClick: () => void saveImage(imgs[0]) });
+    } else if (imgs.length > 1) {
+        items.push({ label: "复制图片", onClick: () => void copyImage(imgs[0]) });
+        imgs.forEach((img, i) => {
+            items.push({ label: `图片 ${i + 1} 另存为…`, onClick: () => void saveImage(img) });
+        });
+    }
+    openCtxMenu(e, items);
+}
+
+async function copyText(text: string) {
+    try {
+        await navigator.clipboard.writeText(text);
+        flashToast("已复制文字");
+        return;
+    } catch {
+        // 退化方案：execCommand 在部分环境可用
+    }
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+        document.execCommand("copy");
+        flashToast("已复制文字");
+    } catch {
+        flashToast("复制失败");
+    } finally {
+        document.body.removeChild(ta);
+    }
+}
+
+async function copyImage(src: string) {
+    const api = getWindowApi();
+    if (!api?.copyImage) {
+        flashToast("当前环境不支持复制图片");
+        return;
+    }
+    try {
+        const res = await api.copyImage(src);
+        if (res.ok) flashToast("已复制图片");
+        else flashToast(res.error || "复制图片失败");
+    } catch {
+        flashToast("复制图片失败");
+    }
+}
+
+async function saveImage(src: string) {
+    const api = getWindowApi();
+    if (!api?.saveImageAs) {
+        flashToast("当前环境不支持保存图片");
+        return;
+    }
+    try {
+        const res = await api.saveImageAs(src);
+        if (res.ok) flashToast("图片已保存");
+        else if (!res.canceled) flashToast(res.error || "保存失败");
+    } catch {
+        flashToast("保存失败");
+    }
+}
 </script>
 
 <template>
@@ -246,6 +361,7 @@ const statusState = computed(() => {
                             <div
                                 class="msg-bubble markdown-body"
                                 v-html="renderMarkdownMath(item.message!.text)"
+                                @contextmenu="onBubbleContextMenu($event, item.message!)"
                             ></div>
                             <div
                                 v-if="item.message!.images && item.message!.images!.length"
@@ -257,6 +373,7 @@ const statusState = computed(() => {
                                     :href="img"
                                     target="_blank"
                                     class="msg-image-wrap"
+                                    @contextmenu="onBubbleContextMenu($event, item.message!)"
                                 >
                                     <img :src="img" alt="图片" class="msg-image" loading="lazy" />
                                 </a>
@@ -377,6 +494,15 @@ const statusState = computed(() => {
                 </form>
             </div>
         </main>
+
+        <ChatContextMenu
+            v-if="ctxMenu"
+            :x="ctxMenu.x"
+            :y="ctxMenu.y"
+            :items="ctxMenu.items"
+            @close="ctxMenu = null"
+        />
+        <div v-if="toast" class="chat-toast" role="status">{{ toast.text }}</div>
     </div>
 </template>
 
@@ -991,5 +1117,36 @@ const statusState = computed(() => {
 /* 公式中的链接/编号在 user 气泡内也保持可读 */
 .msg-row.is-user .msg-bubble :deep(.katex .katex-html) {
     color: #ffffff;
+}
+
+/* 轻提示 toast：复制 / 保存成功或失败后的瞬时反馈 */
+.chat-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 92px;
+    transform: translateX(-50%);
+    z-index: 10000;
+    padding: 8px 16px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+    background: rgba(43, 36, 56, 0.86);
+    box-shadow: 0 8px 22px rgba(57, 44, 76, 0.28);
+    backdrop-filter: blur(10px) saturate(140%);
+    -webkit-backdrop-filter: blur(10px) saturate(140%);
+    pointer-events: none;
+    animation: toast-in 0.14s ease-out;
+}
+
+@keyframes toast-in {
+    from {
+        opacity: 0;
+        transform: translateX(-50%) translateY(6px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+    }
 }
 </style>

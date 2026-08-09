@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, screen, shell, Tray } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, protocol, screen, shell, Tray } from "electron";
 import fs from "fs";
 import path from "path";
 import { createHash } from "crypto";
@@ -530,6 +530,9 @@ async function readApiResponse(response: Response) {
   }
 }
 
+// 统一「带超时」的 HTTP 请求封装（避免后端无响应时无限挂起）。实现见 ./http。
+import { fetchWithTimeout } from "./http";
+
 // 设置/账号类请求：本地模式带内置账户令牌，远程模式带登录后的会话令牌。
 // 不再使用 ed25519 客户端签名，配置读写由账户凭证驱动，对前端无感。
 async function requestSettingsApi(request: SettingsApiRequest) {
@@ -543,7 +546,7 @@ async function requestSettingsApi(request: SettingsApiRequest) {
   } else if (settingsSessionToken) {
     headers["Authorization"] = `Bearer ${settingsSessionToken}`;
   }
-  const response = await fetch(`${backendHttpUrl}${request.path}`, {
+  const response = await fetchWithTimeout(`${backendHttpUrl}${request.path}`, {
     method: request.method,
     headers,
     body: request.method === "GET" ? undefined : JSON.stringify(request.body),
@@ -844,6 +847,88 @@ ipcMain.handle("app:set-auto-launch", (_event, enabled: unknown) => {
   console.log(`[autostart] 开机自启动已${open ? "开启" : "关闭"}`);
 });
 
+// ===== 聊天内图片：复制 / 另存为 =====
+// 渲染进程右键菜单的「复制图片」「图片另存为」走主进程执行，好处是下载图片不经过渲染进程
+// 的 CORS 限制（<img> 能显示不代表 fetch 能跨域拿到字节），且原生能力更稳。
+// source 支持三种形式：data URL、http(s) URL、本地路径（或 file://）。
+
+function mimeToExt(mime: string): string {
+  const map: Record<string, string> = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/bmp": "bmp",
+    "image/svg+xml": "svg",
+  };
+  return map[mime.toLowerCase()] || "";
+}
+
+async function readImageSource(source: string): Promise<Buffer> {
+  if (source.startsWith("data:")) {
+    const m = /^data:([^;]+);base64,(.*)$/s.exec(source);
+    if (!m) throw new Error("无法解析的图片数据");
+    return Buffer.from(m[2], "base64");
+  }
+  if (/^https?:\/\//i.test(source)) {
+    const res = await fetchWithTimeout(source, { method: "GET" });
+    if (!res.ok) throw new Error(`下载图片失败（HTTP ${res.status}）`);
+    return Buffer.from(await res.arrayBuffer());
+  }
+  // 本地路径 / file://
+  const filePath = source.startsWith("file://") ? source.slice(7) : source;
+  return fs.readFileSync(filePath);
+}
+
+// 「图片另存为」：读取字节 → 系统保存对话框 → 写入用户选定路径。
+// 任何一环失败都返回 { ok:false, error }，由前端轻提示，绝不静默吞掉。
+ipcMain.handle("chat:save-image-as", async (_event, source: unknown) => {
+  if (typeof source !== "string" || !source) {
+    return { ok: false, error: "图片来源无效" };
+  }
+  try {
+    const buffer = await readImageSource(source);
+    const ext = mimeToExt(
+      source.startsWith("data:")
+        ? (/^data:([^;]+)/.exec(source)?.[1] || "image/png")
+        : source.startsWith("http")
+          ? "png"
+          : (path.extname(source).replace(/^\./, "").toLowerCase() || "png"),
+    );
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    const { canceled, filePath: dest } = await dialog.showSaveDialog({
+      title: "图片另存为",
+      defaultPath: `kirari-${stamp}.${ext || "png"}`,
+      filters: [
+        { name: "图片", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] },
+        { name: "所有文件", extensions: ["*"] },
+      ],
+    });
+    if (canceled || !dest) return { ok: false, canceled: true };
+    fs.writeFileSync(dest, buffer);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: `保存失败：${(e as Error).message || e}` };
+  }
+});
+
+// 「复制图片」：把图片字节写入系统剪贴板，写入前先探测真实尺寸避免 0×0。
+ipcMain.handle("chat:copy-image", async (_event, source: unknown) => {
+  if (typeof source !== "string" || !source) {
+    return { ok: false, error: "图片来源无效" };
+  }
+  try {
+    const buffer = await readImageSource(source);
+    const img = nativeImage.createFromBuffer(buffer);
+    if (img.isEmpty()) throw new Error("图片内容为空或格式无法识别");
+    clipboard.writeImage(img);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: `复制失败：${(e as Error).message || e}` };
+  }
+});
+
 // 重新扫描 userData/avatars：把新增的（含 frames.json 的）子目录注册为自定义形象并广播。
 ipcMain.handle("avatar:rescan", () => {
   scanAvatarsIntoConfig();
@@ -981,7 +1066,7 @@ ipcMain.handle("deploy:set-session", (_event, token: string | null) => {
 });
 ipcMain.handle("token:login", async (_event, credentials: { username: string; password: string }) => {
   try {
-    const response = await fetch(`${backendHttpUrl}/api/auth/login`, {
+    const response = await fetchWithTimeout(`${backendHttpUrl}/api/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(credentials),
@@ -1004,7 +1089,7 @@ ipcMain.handle("token:login", async (_event, credentials: { username: string; pa
 });
 ipcMain.handle("token:register", async (_event, credentials: { username: string; password: string }) => {
   try {
-    const response = await fetch(`${backendHttpUrl}/api/auth/register`, {
+    const response = await fetchWithTimeout(`${backendHttpUrl}/api/auth/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(credentials),
@@ -1548,7 +1633,7 @@ ipcMain.on("desktop-pet:show-context-menu", (event) => {
 
 async function checkBackendHealth() {
   try {
-    const res = await fetch(backendHealthUrl);
+    const res = await fetchWithTimeout(backendHealthUrl);
     if (!res.ok) throw new Error("后端服务未正常启动");
   } catch (e) {
     console.log("联调提示", `请先启动后端服务（${backendHealthUrl}）`);
@@ -1659,7 +1744,7 @@ app.whenReady().then(async () => {
   // 去反复重连 WS，而是立即清除并通知前端回到「未登录」状态，由用户在设置页重新登录。
   if (clientConfig.mode === "remote" && settingsSessionToken) {
     try {
-      const verifyRes = await fetch(`${backendHttpUrl}/api/profile`, {
+      const verifyRes = await fetchWithTimeout(`${backendHttpUrl}/api/profile`, {
         method: "GET",
         headers: { Authorization: `Bearer ${settingsSessionToken}` },
       });

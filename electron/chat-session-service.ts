@@ -50,6 +50,11 @@ type ChatSessionOptions = {
 const WELCOME_MESSAGE = "今天也一起加油吧。";
 const LONG_REPLY_PROMPT = "回复较长，点我看详情";
 
+// 单条消息的回复超时（毫秒）：后端收下消息却迟迟不回（大模型推理卡死、后端崩溃、
+// 连接中途断开）时，不能让前端永远停在“思考中”且禁用发送按钮。到点后兜底清除等待态
+// 并给出可见提示，用户可重试。此前完全没有任何超时，这正是“一直硬卡着”的根因。
+const REPLY_TIMEOUT_MS = 60000;
+
 // 发送前图片压缩阈值：在客户端就从源头把图压小，桌面→pet-api→模型的整条链路都受益，
 // 避免超大图直接喂给视觉模型导致推理失败或白白吃带宽/ token。
 const MAX_IMAGE_LONG_EDGE = 1280; // 最长边像素上限（多数视觉模型甜区 512–1024，留点余量）
@@ -97,6 +102,8 @@ export class ChatSessionService {
     private disposed = false;
     // 凭证错误（4401/401）时置 true，停止自动重连，避免无限刷后端日志。
     private stopReconnect = false;
+    // 发送消息后的回复超时定时器：到点仍未收到后端回应则兜底结束等待态。
+    private replyTimeout: ReturnType<typeof setTimeout> | null = null;
     private state: ChatStateSnapshot = {
         sessionId: crypto.randomUUID(),
         connected: false,
@@ -167,6 +174,7 @@ export class ChatSessionService {
         this.state.messages.push(this.createMessage("user", text, undefined, images));
         this.persist();
         this.emit();
+        this.armReplyTimeout();
         return true;
     }
 
@@ -194,6 +202,7 @@ export class ChatSessionService {
             this.state.lastError = "";
             this.persist();
             this.emit();
+            this.armReplyTimeout();
             return;
         }
 
@@ -216,6 +225,7 @@ export class ChatSessionService {
     dispose() {
         this.disposed = true;
         this.clearReconnectTimer();
+        this.clearReplyTimeout();
         if (this.socket) {
             try {
                 this.socket.close();
@@ -331,10 +341,21 @@ export class ChatSessionService {
                 return;
             }
 
+            // 收到任意「用户可见的回复」（pet_response / error）即视为本轮等待结束，清除超时定时器。
+            const isReply =
+                (payload.type === "pet_response" && typeof payload.speech === "string") ||
+                (payload.type === "error" && typeof payload.message === "string");
+            if (isReply) {
+                this.clearReplyTimeout();
+            }
+
             if (payload.type === "pet_response" && typeof payload.speech === "string") {
                 const speech = payload.speech.trim();
-                // 连续相同消息去重：后端可能在 WS 重连时重复发送欢迎/问候消息
+                // 连续相同消息去重：后端可能在 WS 重连时重复发送欢迎/问候消息。
+                // 注意：去重也要结束等待态，否则重复消息会让前端一直卡在“思考中”。
                 if (speech === this.lastPetSpeech) {
+                    this.state.waitingForReply = false;
+                    this.emit();
                     return;
                 }
                 this.lastPetSpeech = speech;
@@ -362,6 +383,7 @@ export class ChatSessionService {
                 this.emit();
             }
         } catch {
+            this.clearReplyTimeout();
             this.state.waitingForReply = false;
             this.state.lastError = "消息解析失败";
             this.emit();
@@ -427,6 +449,9 @@ export class ChatSessionService {
     private setConnectionError(message: string) {
         this.state.connected = false;
         this.state.lastError = message;
+        // 断线/出错时也结束等待态：否则正在“思考中”的消息会让发送按钮被永久禁用，必须重启才恢复。
+        this.state.waitingForReply = false;
+        this.clearReplyTimeout();
         this.emit();
         // 凭证错误（401 / 4401 / 未授权）属于不可恢复错误：后端明确拒绝了令牌，
         // 不应无限重连反复刷后端日志。停止重连，等待用户在设置页重新登录 / 修正内置令牌。
@@ -448,6 +473,30 @@ export class ChatSessionService {
             this.reconnectTimer = null;
             this.connect();
         }, 3000);
+    }
+
+    // 启动回复超时：发送消息后置 waitingForReply 时调用，给后端一个最迟回应期限。
+    private armReplyTimeout() {
+        this.clearReplyTimeout();
+        this.replyTimeout = setTimeout(() => this.onReplyTimeout(), REPLY_TIMEOUT_MS);
+    }
+
+    private clearReplyTimeout() {
+        if (this.replyTimeout) {
+            clearTimeout(this.replyTimeout);
+            this.replyTimeout = null;
+        }
+    }
+
+    // 超时兜底：后端未在规定时间内回应。清除等待态并给出可见错误，避免 UI 永久卡在“思考中”。
+    private onReplyTimeout() {
+        this.replyTimeout = null;
+        if (!this.state.waitingForReply) {
+            return;
+        }
+        this.state.waitingForReply = false;
+        this.state.lastError = "后端未在规定时间内回应（可能模型推理超时或连接中断），请稍后重试。";
+        this.emit();
     }
 
     private clearReconnectTimer() {

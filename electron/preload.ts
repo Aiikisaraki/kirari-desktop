@@ -80,6 +80,13 @@ contextBridge.exposeInMainWorld("windowApi", {
   onPetNameChanged: (cb: (name: string) => void): void => {
     ipcRenderer.on("pet-name:changed", (_event, name: string) => cb(name));
   },
+  // 聊天图片：复制 / 另存为（由主进程执行，绕过渲染进程 CORS 限制）
+  copyImage: (source: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("chat:copy-image", source),
+  saveImageAs: (
+    source: string,
+  ): Promise<{ ok: boolean; error?: string; canceled?: boolean }> =>
+    ipcRenderer.invoke("chat:save-image-as", source),
 });
 
 // 机器人适配器（OneBot / QQ 官方机器人）管理接口

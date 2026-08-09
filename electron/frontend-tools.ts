@@ -1,3 +1,5 @@
+import { fetchWithTimeout } from "./http";
+
 /**
  * frontend-tools.ts
  *
@@ -198,11 +200,11 @@ async function mcpRawPost(
     Accept: "application/json, text/event-stream",
   };
   if (sessionId) headers["Mcp-Session-Id"] = sessionId;
-  const resp = await fetch(url, {
+  const resp = await fetchWithTimeout(url, {
     method: "POST",
     headers,
     body: JSON.stringify(payload),
-  });
+  }, 30000);
   const text = await resp.text();
   const hdr: Record<string, string> = {};
   resp.headers.forEach((v, k) => (hdr[k.toLowerCase()] = v));
@@ -354,11 +356,11 @@ export async function executeTool(frontendName: string, args: Record<string, unk
       }
       if (t.exec.kind === "http") {
         const method = t.exec.method || "POST";
-        const resp = await fetch(t.exec.url, {
+        const resp = await fetchWithTimeout(t.exec.url, {
           method,
           headers: { "Content-Type": "application/json", ...(t.exec.headers || {}) },
           body: method === "GET" ? undefined : JSON.stringify(args || {}),
-        });
+        }, 30000);
         const text = await resp.text();
         return text || `HTTP ${resp.status}`;
       }

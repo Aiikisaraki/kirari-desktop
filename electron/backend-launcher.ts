@@ -7,6 +7,7 @@ import { app } from "electron";
 import fs from "fs";
 import net from "net";
 import path from "path";
+import { fetchWithTimeout } from "./http";
 
 // 本地模式默认端口（仅当无法动态分配空闲端口时的兜底）。
 const DEFAULT_BACKEND_PORT = 9089;
@@ -104,7 +105,7 @@ async function waitForHealth(timeoutMs = 15000): Promise<{ ok: boolean; reason?:
   let lastError: string | undefined;
   while (Date.now() - start < timeoutMs) {
     try {
-      const res = await fetch(url);
+      const res = await fetchWithTimeout(url, {}, 3000);
       if (res.ok) {
         console.log("[backend] 健康检查通过");
         return { ok: true };
@@ -163,7 +164,7 @@ export async function applyConfigToBackend(builtinToken?: string): Promise<void>
     if (searchEndpoint) patch.search_endpoint = searchEndpoint;
     if (searchProvider) patch.search_provider = searchProvider;
 
-    const res = await fetch(`http://127.0.0.1:${getBackendPort()}/api/profile`, {
+    const res = await fetchWithTimeout(`http://127.0.0.1:${getBackendPort()}/api/profile`, {
       method: "PUT",
       headers,
       body: JSON.stringify(patch),
@@ -268,7 +269,7 @@ export async function startBackendIfLocal(opts: { isLocal: boolean; builtinToken
   // 若此处用 builtinToken 访问 /api/profile 失败，说明内置令牌与后端不一致，
   // 必须立即报错（而非让前端一直用错误凭证重连）。
   try {
-    const verifyRes = await fetch(`http://127.0.0.1:${getBackendPort()}/api/profile`, {
+    const verifyRes = await fetchWithTimeout(`http://127.0.0.1:${getBackendPort()}/api/profile`, {
       method: "GET",
       headers: { "x-builtin-token": builtinToken },
     });
