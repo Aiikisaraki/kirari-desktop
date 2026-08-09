@@ -1,17 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useChatSocket } from "../../composables/useChatSocket";
-import { marked } from "marked";
-import DOMPurify from "dompurify";
+import { renderMarkdownMath } from "../../utils/renderMarkdownMath";
 import WindowChrome from "../common/WindowChrome.vue";
 import type { ChatMessage } from "../../stores/chat";
-
-marked.setOptions({ gfm: true, breaks: true });
-
-function renderMarkdown(text: string): string {
-    const rawHtml = marked.parse(text, { async: false }) as string;
-    return DOMPurify.sanitize(rawHtml);
-}
 
 const { connected, messages, lastError, waitingForReply, requestState, sendMessage } =
     useChatSocket();
@@ -253,7 +245,7 @@ const statusState = computed(() => {
                         <div class="msg-col">
                             <div
                                 class="msg-bubble markdown-body"
-                                v-html="renderMarkdown(item.message!.text)"
+                                v-html="renderMarkdownMath(item.message!.text)"
                             ></div>
                             <div
                                 v-if="item.message!.images && item.message!.images!.length"
@@ -977,5 +969,27 @@ const statusState = computed(() => {
 
 .pending-remove:hover {
     background: rgba(0, 0, 0, 0.8);
+}
+
+/* ===== KaTeX 公式渲染适配 ===== */
+:deep(.markdown-body .katex) {
+    color: inherit;
+    font-size: 1.05em;
+}
+
+:deep(.markdown-body .katex-display) {
+    margin: 0.6em 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+
+/* user 气泡白字：公式也跟随白色 */
+.msg-row.is-user .msg-bubble :deep(.katex) {
+    color: #ffffff;
+}
+
+/* 公式中的链接/编号在 user 气泡内也保持可读 */
+.msg-row.is-user .msg-bubble :deep(.katex .katex-html) {
+    color: #ffffff;
 }
 </style>

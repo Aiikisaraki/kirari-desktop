@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 import './style.css'
 import './components/settings/settings.css'
+import 'katex/dist/katex.min.css'
 import App from './App.vue'
 import { useThemeStore } from './stores/theme'
 

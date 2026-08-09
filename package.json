@@ -1,7 +1,7 @@
 {
     "name": "akisaki-kirari",
     "private": true,
-    "version": "0.5.5",
+    "version": "0.5.6",
     "main": "dist-electron/main.js",
     "scripts": {
         "dev": "chcp 65001 && vite",
@@ -21,6 +21,7 @@
         "pack:full": "node scripts/write-edition-nsh.cjs full && electron-builder --config electron-builder.full.yml --publish=never"
     },
     "dependencies": {
+        "@types/katex": "^0.16.8",
         "@vue/devtools-api": "^8.1.5",
         "@vue/devtools-kit": "^8.2.1",
         "@vue/devtools-shared": "^8.2.1",
@@ -28,6 +29,7 @@
         "dompurify": "^3.4.12",
         "extract-zip": "^2.0.1",
         "hookable": "^5.5.3",
+        "katex": "^0.18.1",
         "marked": "^18.0.7",
         "nostics": "^1.1.4",
         "perfect-debounce": "^2.0.0",
