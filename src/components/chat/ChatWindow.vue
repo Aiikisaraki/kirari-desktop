@@ -2,8 +2,10 @@
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useChatSocket } from "../../composables/useChatSocket";
 import { renderMarkdownMath } from "../../utils/renderMarkdownMath";
+import { toMediaList } from "../../utils/media";
 import WindowChrome from "../common/WindowChrome.vue";
 import ChatContextMenu from "./ChatContextMenu.vue";
+import MediaViewer from "./MediaViewer.vue";
 import type { ChatMessage } from "../../stores/chat";
 
 const { connected, messages, lastError, waitingForReply, requestState, sendMessage } =
@@ -225,6 +227,17 @@ function flashToast(text: string) {
     }, 1800);
 }
 
+/* ===== 媒体查看器：图片点击后在应用内预览，不再 target=_blank 弹原生窗口 ===== */
+const mediaViewer = ref<{ src: string; kind: "image" | "video" } | null>(null);
+
+function openMedia(src: string, kind: "image" | "video") {
+    mediaViewer.value = { src, kind };
+}
+
+function closeMedia() {
+    mediaViewer.value = null;
+}
+
 function openCtxMenu(e: MouseEvent, items: CtxMenuItem[]) {
     if (!items.length) return;
     e.preventDefault();
@@ -380,7 +393,7 @@ async function saveImage(src: string) {
                         {{ item.message!.text }}
                     </div>
 
-                    <!-- 消息行：头像常驻 + 带尾气泡 -->
+                    <!-- 消息行：头像常驻 + 带尾气泡（文字/媒体/时间都在气泡内） -->
                     <article
                         v-else
                         class="msg-row"
@@ -391,26 +404,48 @@ async function saveImage(src: string) {
                         </div>
                         <div class="msg-col">
                             <div
-                                class="msg-bubble markdown-body"
-                                v-html="renderMarkdownMath(item.message!.text)"
+                                class="msg-bubble"
+                                :class="{ 'media-only': !item.message!.text?.trim() }"
                                 @contextmenu="onBubbleContextMenu($event, item.message!)"
-                            ></div>
-                            <div
-                                v-if="item.message!.images && item.message!.images!.length"
-                                class="msg-images"
                             >
-                                <a
-                                    v-for="(img, i) in item.message!.images"
-                                    :key="i"
-                                    :href="img"
-                                    target="_blank"
-                                    class="msg-image-wrap"
-                                    @contextmenu="onBubbleContextMenu($event, item.message!)"
+                                <div
+                                    v-if="item.message!.text?.trim()"
+                                    class="msg-text markdown-body"
+                                    v-html="renderMarkdownMath(item.message!.text)"
+                                ></div>
+                                <div
+                                    v-if="toMediaList(item.message!.images).length"
+                                    class="msg-media"
                                 >
-                                    <img :src="img" alt="图片" class="msg-image" loading="lazy" />
-                                </a>
+                                    <template
+                                        v-for="(m, i) in toMediaList(item.message!.images)"
+                                        :key="i"
+                                    >
+                                        <!-- 视频：气泡内直接给播放器 -->
+                                        <video
+                                            v-if="m.kind === 'video'"
+                                            class="msg-video"
+                                            :src="m.src"
+                                            controls
+                                            preload="metadata"
+                                            playsinline
+                                            @contextmenu="onBubbleContextMenu($event, item.message!)"
+                                        ></video>
+                                        <!-- 图片：点击打开应用内查看器 -->
+                                        <button
+                                            v-else
+                                            type="button"
+                                            class="msg-media-btn"
+                                            :aria-label="`查看图片 ${i + 1}`"
+                                            @click="openMedia(m.src, m.kind)"
+                                            @contextmenu="onBubbleContextMenu($event, item.message!)"
+                                        >
+                                            <img :src="m.src" alt="图片" class="msg-image" loading="lazy" />
+                                        </button>
+                                    </template>
+                                </div>
+                                <div class="msg-time">{{ formatTime(item.message!.timestamp) }}</div>
                             </div>
-                            <div class="msg-time">{{ formatTime(item.message!.timestamp) }}</div>
                         </div>
                     </article>
                 </template>
@@ -533,6 +568,14 @@ async function saveImage(src: string) {
             :y="ctxMenu.y"
             :items="ctxMenu.items"
             @close="ctxMenu = null"
+        />
+        <!-- 统一媒体查看器：图片预览 / 视频播放（应用内覆盖层） -->
+        <MediaViewer
+            v-if="mediaViewer"
+            :src="mediaViewer.src"
+            :kind="mediaViewer.kind"
+            @close="closeMedia"
+            @save="saveImage"
         />
         <div v-if="toast" class="chat-toast" role="status">{{ toast.text }}</div>
     </div>
@@ -708,11 +751,11 @@ async function saveImage(src: string) {
     user-select: none;
 }
 
-/* 消息行：头像 + 气泡列 */
+/* 消息行：头像 + 气泡列（头像与气泡底部对齐，配合底部气泡尾巴） */
 .msg-row {
     display: flex;
-    gap: 12px;
-    align-items: flex-start;
+    gap: 10px;
+    align-items: flex-end;
 }
 
 .msg-row.is-pet {
@@ -734,7 +777,6 @@ async function saveImage(src: string) {
     font-size: 16px;
     font-weight: 800;
     color: #fff;
-    margin-top: 1px;
     user-select: none;
     box-shadow: 0 3px 10px var(--pet-primary-shadow);
 }
@@ -759,15 +801,14 @@ async function saveImage(src: string) {
     align-items: flex-end;
 }
 
-/* 带尾气泡 */
+/* 带尾气泡：无描边、靠投影区分（参考样式的形状，配色仍走主题变量） */
 .msg-bubble {
     position: relative;
     max-width: 100%;
-    padding: 11px 16px;
+    padding: 10px 14px;
     font-size: 15px;
-    line-height: 1.7;
+    line-height: 1.6;
     color: var(--pet-ink);
-    border: 1px solid var(--pet-border);
     box-shadow: 0 4px 14px rgba(57, 44, 76, 0.08);
     transition:
         transform 0.15s ease,
@@ -779,46 +820,39 @@ async function saveImage(src: string) {
     box-shadow: 0 7px 20px rgba(57, 44, 76, 0.13);
 }
 
-/* pet 气泡：贴头像侧收紧圆角 + 左尾 */
+/* pet 气泡：贴头像侧收紧圆角 + 左下三角尾 */
 .msg-row.is-pet .msg-bubble {
     background: var(--pet-surface-strong);
     border-radius: 6px 20px 20px 20px;
 }
 
-.msg-row.is-pet .msg-bubble::before {
+.msg-row.is-pet .msg-bubble::after {
     content: "";
     position: absolute;
-    left: -7px;
-    top: 12px;
-    width: 13px;
-    height: 13px;
-    background: var(--pet-surface-strong);
-    border-left: 1px solid var(--pet-border);
-    border-top: 1px solid var(--pet-border);
-    border-top-left-radius: 4px;
-    transform: rotate(45deg);
+    left: -6px;
+    bottom: 10px;
+    border: 7px solid transparent;
+    border-right-color: var(--pet-surface-strong);
+    border-left: 0;
+    border-bottom: 0;
 }
 
-/* user 气泡：贴头像侧收紧圆角 + 右尾（头像在右） */
+/* user 气泡：贴头像侧收紧圆角 + 右下三角尾（头像在右） */
 .msg-row.is-user .msg-bubble {
     background: var(--pet-accent);
     color: #fff;
-    border-color: var(--pet-accent-strong-border);
     border-radius: 20px 6px 20px 20px;
 }
 
-.msg-row.is-user .msg-bubble::before {
+.msg-row.is-user .msg-bubble::after {
     content: "";
     position: absolute;
-    right: -7px;
-    top: 12px;
-    width: 13px;
-    height: 13px;
-    background: var(--pet-accent);
-    border-right: 1px solid var(--pet-accent-strong-border);
-    border-top: 1px solid var(--pet-accent-strong-border);
-    border-top-right-radius: 4px;
-    transform: rotate(45deg);
+    right: -6px;
+    bottom: 10px;
+    border: 7px solid transparent;
+    border-left-color: var(--pet-accent);
+    border-right: 0;
+    border-bottom: 0;
 }
 
 /* user 气泡内 Markdown 适配（白字） */
@@ -858,36 +892,80 @@ async function saveImage(src: string) {
     border-top-color: rgba(255, 255, 255, 0.35);
 }
 
+/* 时间：在气泡内部，接收左对齐 / 发送右对齐 */
 .msg-time {
     font-size: 11px;
     color: var(--pet-muted);
     font-weight: 600;
-    margin-top: 5px;
-    padding: 0 4px;
+    margin-top: 4px;
+    text-align: left;
+    user-select: none;
 }
 
-/* 消息内图片网格 */
-.msg-images {
+.msg-row.is-user .msg-time {
+    color: rgba(255, 255, 255, 0.78);
+    text-align: right;
+}
+
+/* ===== 气泡内媒体：图片 + 视频 ===== */
+.msg-media {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-    margin-top: 6px;
+    margin-top: 8px;
 }
 
-.msg-row.is-user .msg-images {
+/* 纯媒体消息：收紧气泡内边距，让媒体本身成为视觉主体 */
+.msg-bubble.media-only {
+    padding: 5px;
+}
+
+.msg-bubble.media-only .msg-media {
+    margin-top: 0;
+}
+
+.msg-bubble.media-only .msg-time {
+    padding: 2px 8px 2px;
+}
+
+.msg-row.is-user .msg-media {
     justify-content: flex-end;
 }
 
-.msg-image-wrap {
+/* 图片：点击查看器 */
+.msg-media-btn {
     display: block;
     max-width: 240px;
+    padding: 0;
+    border: 0;
+    border-radius: 12px;
+    overflow: hidden;
+    background: rgba(0, 0, 0, 0.04);
+    cursor: zoom-in;
+    transition: transform 0.15s ease;
+}
+
+.msg-media-btn:hover {
+    transform: scale(1.02);
+}
+
+.msg-media-btn:focus-visible {
+    outline: 2px solid var(--pet-focus-border);
+    outline-offset: 2px;
 }
 
 .msg-image {
-    width: 100%;
-    border-radius: 8px;
     display: block;
-    cursor: zoom-in;
+    width: 100%;
+    border-radius: 12px;
+}
+
+/* 视频：气泡内直接播放 */
+.msg-video {
+    display: block;
+    max-width: 280px;
+    border-radius: 12px;
+    background: #000;
 }
 
 /* 思考中气泡 */
@@ -900,7 +978,6 @@ async function saveImage(src: string) {
     border-radius: 6px 20px 20px 20px;
     color: var(--pet-muted);
     background: var(--pet-surface-strong);
-    border: 1px solid var(--pet-border);
     font-size: 0.82rem;
 }
 
