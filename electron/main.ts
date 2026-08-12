@@ -567,6 +567,11 @@ ipcMain.on("window:control", (event, action: string) => {
   }
 });
 
+ipcMain.handle("window:is-maximized", (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  return !!win && !win.isDestroyed() && win.isMaximized();
+});
+
 function createSettingsWindow() {
   if (settingsWindow && !settingsWindow.isDestroyed()) {
     settingsWindow.show();
@@ -596,6 +601,7 @@ function createSettingsWindow() {
   if (process.env.VITE_DEV_SERVER_URL) settingsWindow.loadURL(new URL(`?window=settings&theme=${settingsTheme}`, process.env.VITE_DEV_SERVER_URL).toString());
   else settingsWindow.loadFile(path.resolve(__dirname, "../dist/index.html"), { query: { window: "settings", theme: settingsTheme } });
   settingsWindow.once("ready-to-show", () => settingsWindow?.show());
+  hardenWindowLinks(settingsWindow);
   return settingsWindow;
 }
 
@@ -1004,16 +1010,85 @@ function createImageViewerWindow(src: string, kind?: string): BrowserWindow {
     win.loadFile(path.resolve(__dirname, "../dist/index.html"), { query });
   }
   win.once("ready-to-show", () => {
+    const viewerTitle = kind === "video" ? "视频查看器" : "图片查看器";
+    win.setTitle(viewerTitle);
     win.show();
     if (isDebugMode()) win.webContents.openDevTools({ mode: "detach" });
   });
+  hardenWindowLinks(win);
   return win;
 }
 
+// viewer 窗口已打开时，推送新媒体（更新内容而非再开窗口）。
 ipcMain.handle("viewer:open", (_event, src: unknown, kind?: unknown) => {
   if (typeof src !== "string" || !src) return;
+  if (viewerWindow && !viewerWindow.isDestroyed()) {
+    viewerWindow.show();
+    viewerWindow.focus();
+    viewerWindow.webContents.send("viewer:update", src, typeof kind === "string" ? kind : undefined);
+    return;
+  }
   createImageViewerWindow(src, typeof kind === "string" ? kind : undefined);
 });
+
+// 渲染进程判断 URL 是否为媒体（图片/视频），用于 setWindowOpenHandler 与 markdown 链接分流。
+function isMediaUrl(url: string): boolean {
+  if (url.startsWith("data:image/") || url.startsWith("data:video/")) return true;
+  if (url.startsWith("avatar://") || url.startsWith("pet://")) return true;
+  return /\.(png|jpe?g|gif|webp|bmp|svg|ico|mp4|webm|mov|mkv|avi|m4v)(\?.*)?$/i.test(url);
+}
+function isVideoUrl(url: string): boolean {
+  if (url.startsWith("data:video/")) return true;
+  return /\.(mp4|webm|mov|mkv|avi|m4v)(\?.*)?$/i.test(url);
+}
+
+/**
+ * 窗口链接加固：应用内所有窗口统一拦截「打开新窗口」与「页面内导航」。
+ *
+ * 背景：渲染进程里任何 <a target="_blank"> / window.open / 裸 <a> 点击，
+ * 默认会让 Electron 创建一个带菜单栏 + 系统标题栏的裸 Chromium 窗口
+ * （对图片 URL 就是 Chromium 默认图片查看页），完全脱离应用窗口体系。
+ * 这里统一分流：
+ *   - 媒体 URL（图片/视频/data:/avatar://pet://）→ 自定义 MediaViewer 窗口
+ *   - http(s) 普通链接 → 系统默认浏览器
+ *   - 其他协议（file://、cmd: 等）→ 直接拒绝
+ * 同时阻止页面内导航：所有窗口都是单页应用，<a> 无 target 点击不应把当前窗口导航走。
+ */
+function hardenWindowLinks(win: BrowserWindow): void {
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (isMediaUrl(url)) {
+      if (viewerWindow && !viewerWindow.isDestroyed()) {
+        viewerWindow.show();
+        viewerWindow.focus();
+        viewerWindow.webContents.send("viewer:update", url, isVideoUrl(url) ? "video" : "image");
+      } else {
+        createImageViewerWindow(url, isVideoUrl(url) ? "video" : "image");
+      }
+      return { action: "deny" };
+    }
+    if (/^https?:\/\//i.test(url)) {
+      void shell.openExternal(url);
+    }
+    return { action: "deny" };
+  });
+  win.webContents.on("will-navigate", (event, url) => {
+    // 放行初始 loadURL/loadFile（dev server / 本地 index.html），拦截运行时被 <a> 导航走。
+    const current = win.webContents.getURL();
+    if (url === current) return;
+    event.preventDefault();
+    if (isMediaUrl(url)) {
+      if (viewerWindow && !viewerWindow.isDestroyed()) {
+        viewerWindow.show();
+        viewerWindow.focus();
+        viewerWindow.webContents.send("viewer:update", url, isVideoUrl(url) ? "video" : "image");
+      } else {
+        createImageViewerWindow(url, isVideoUrl(url) ? "video" : "image");
+      }
+    } else if (/^https?:\/\//i.test(url)) {
+      void shell.openExternal(url);
+    }
+  });
+}
 
 // viewer 保存媒体：接收渲染进程已 fetch 到的字节，只负责弹保存对话框 + 写文件。
 // 对图片和视频通用——主进程只写字节，不解析内容；ext 由渲染进程从 blob.type / URL 推断。
@@ -1561,6 +1636,8 @@ function createWindow() {
     win.loadFile(path.resolve(__dirname, "../dist/index.html"), { query: { theme: petTheme } });
   }
 
+  hardenWindowLinks(win);
+
   return win;
 }
 
@@ -1624,6 +1701,8 @@ function createChatWindow() {
       query: { window: "chat", theme: chatTheme },
     });
   }
+
+  hardenWindowLinks(win);
 
   return win;
 }

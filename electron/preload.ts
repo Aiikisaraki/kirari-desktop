@@ -52,6 +52,7 @@ contextBridge.exposeInMainWorld("windowApi", {
   minimize: (): void => ipcRenderer.send("window:control", "minimize"),
   close: (): void => ipcRenderer.send("window:control", "close"),
   toggleMaximize: (): void => ipcRenderer.send("window:control", "toggle-maximize"),
+  isMaximized: (): Promise<boolean> => ipcRenderer.invoke("window:is-maximized"),
   // 主题：读取 / 设置 / 订阅跨窗口变更广播
   getTheme: (): Promise<string> => ipcRenderer.invoke("theme:get"),
   setTheme: (name: string): Promise<string> => ipcRenderer.invoke("theme:set", name),
@@ -141,4 +142,9 @@ contextBridge.exposeInMainWorld("viewerApi", {
   // 仅图片：写入系统剪贴板（视频字节无法 createFromBuffer）。
   copyImage: (bytes: ArrayBuffer): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke("viewer:copy-image-bytes", bytes),
+  // viewer 窗口已打开时再点新媒体：主进程通过此事件推送 src/kind 让当前窗口更新内容，
+  // 而不是再开一个窗口。
+  onUpdate: (cb: (src: string, kind?: string) => void): void => {
+    ipcRenderer.on("viewer:update", (_event, src: string, kind?: string) => cb(src, kind));
+  },
 });

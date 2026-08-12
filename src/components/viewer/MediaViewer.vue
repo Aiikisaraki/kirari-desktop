@@ -9,8 +9,10 @@ import { detectMediaKind } from "../../utils/media";
  *   - 图片：滚轮缩放、双击放大/还原、拖拽平移、缩放按钮、复制到剪贴板、另存为
  *   - 视频：HTML5 播放器（controls + autoplay）、另存为（复制不适用）
  *
- * 顶部工具栏 position: fixed，滚轮只作用于 <img>（视频不缩放），
- * 工具栏始终在原位可点击——解决 overlay 时代滚轮后按钮难触发的问题。
+ * 布局参考 QQ / TIM 图片查看器：
+ *   - 顶部可拖拽标题栏（解决无边框窗口无法拖动）
+ *   - 底部居中胶囊工具栏，纯图标按钮，避免文字导致换行
+ *   - 媒体操作集中到底部，视觉重心下移，不再挤在顶部
  *
  * 保存逻辑：渲染进程 fetch(src) 拿字节 → IPC 传 ArrayBuffer → 主进程只做
  * dialog.showSaveDialog + fs.writeFile。主进程不关心 src 是什么协议，
@@ -19,8 +21,25 @@ import { detectMediaKind } from "../../utils/media";
 
 const props = defineProps<{ src: string; kind?: "image" | "video" }>();
 
-const kind = computed(() => props.kind ?? detectMediaKind(props.src));
+// 当前展示的媒体：初始取 props，之后可被主进程 viewer:update 推送覆盖
+// （viewer 窗口已打开时再点新媒体，主进程 send 此事件让当前窗口更新内容，而非再开窗口）。
+const currentSrc = ref(props.src);
+const currentKind = ref<"image" | "video" | undefined>(props.kind);
+
+const kind = computed(() => currentKind.value ?? detectMediaKind(currentSrc.value));
 const isVideo = computed(() => kind.value === "video");
+
+// 顶部标题显示文件名（从 URL pathname 或完整 URL 取最后一段）
+const fileName = computed(() => {
+    try {
+        const u = new URL(currentSrc.value);
+        const seg = u.pathname.split("/").pop();
+        if (seg) return decodeURIComponent(seg);
+        return u.hostname || currentSrc.value;
+    } catch {
+        return currentSrc.value.slice(0, 60);
+    }
+});
 
 /* ===== 图片缩放 / 平移 ===== */
 const MIN_SCALE = 0.5;
@@ -79,7 +98,7 @@ function onPointerUp() {
     dragging.value = false;
 }
 
-watch(() => props.src, () => resetView());
+watch(currentSrc, () => resetView());
 
 /* ===== 键盘操作 ===== */
 function onKeydown(e: KeyboardEvent) {
@@ -98,11 +117,12 @@ function onKeydown(e: KeyboardEvent) {
     else if (e.key === "0") resetView();
 }
 
-/* ===== 窗口操作：close 走 windowApi；save/copy 走 viewerApi（fetch 字节后传主进程） ===== */
+/* ===== 窗口操作：close/minimize/maximize 走 windowApi；save/copy 走 viewerApi ===== */
 interface WindowApiBridge {
     close?: () => void;
     minimize?: () => void;
     toggleMaximize?: () => void;
+    isMaximized?: () => Promise<boolean>;
 }
 interface ViewerApiBridge {
     open?: (src: string, kind?: "image" | "video") => Promise<void>;
@@ -111,6 +131,7 @@ interface ViewerApiBridge {
         ext: string,
     ) => Promise<{ ok: boolean; path?: string; error?: string; canceled?: boolean }>;
     copyImage?: (bytes: ArrayBuffer) => Promise<{ ok: boolean; error?: string }>;
+    onUpdate?: (cb: (src: string, kind?: string) => void) => void;
 }
 function getWindowApi(): WindowApiBridge | undefined {
     return (window as unknown as { windowApi?: WindowApiBridge }).windowApi;
@@ -119,8 +140,24 @@ function getViewerApi(): ViewerApiBridge | undefined {
     return (window as unknown as { viewerApi?: ViewerApiBridge }).viewerApi;
 }
 
+const isMaximized = ref(false);
+
+async function updateMaximizedState() {
+    isMaximized.value = (await getWindowApi()?.isMaximized?.()) ?? false;
+}
+
 function close() {
     getWindowApi()?.close?.();
+}
+
+function minimize() {
+    getWindowApi()?.minimize?.();
+}
+
+async function toggleMaximize() {
+    getWindowApi()?.toggleMaximize?.();
+    // 切换后稍等渲染，更新图标状态
+    setTimeout(() => void updateMaximizedState(), 80);
 }
 
 // 把 blob.type / URL 推断成不带点号的扩展名。
@@ -171,7 +208,7 @@ async function save() {
         return;
     }
     try {
-        const { bytes, ext } = await fetchBytes(props.src);
+        const { bytes, ext } = await fetchBytes(currentSrc.value);
         const res = await api.saveMedia(bytes, ext);
         if (!res.ok && !res.canceled && res.error) {
             alert(res.error);
@@ -189,7 +226,7 @@ async function copyImage() {
         return;
     }
     try {
-        const { bytes } = await fetchBytes(props.src);
+        const { bytes } = await fetchBytes(currentSrc.value);
         const res = await api.copyImage(bytes);
         if (!res.ok && res.error) {
             alert(res.error);
@@ -199,17 +236,26 @@ async function copyImage() {
     }
 }
 
-const closeBtn = ref<HTMLButtonElement | null>(null);
-
 onMounted(() => {
+    document.title = isVideo.value ? `视频查看器 - ${fileName.value}` : `图片查看器 - ${fileName.value}`;
     window.addEventListener("keydown", onKeydown);
     window.addEventListener("wheel", onWheel, { passive: false });
-    closeBtn.value?.focus();
+    window.addEventListener("resize", updateMaximizedState);
+    void updateMaximizedState();
+    // viewer 窗口已打开时再点新媒体：主进程推送 viewer:update，更新当前窗口内容。
+    getViewerApi()?.onUpdate?.((src, k) => {
+        if (src) {
+            currentSrc.value = src;
+            currentKind.value = k === "video" ? "video" : k === "image" ? "image" : undefined;
+            document.title = isVideo.value ? `视频查看器 - ${fileName.value}` : `图片查看器 - ${fileName.value}`;
+        }
+    });
 });
 
 onBeforeUnmount(() => {
     window.removeEventListener("keydown", onKeydown);
     window.removeEventListener("wheel", onWheel);
+    window.removeEventListener("resize", updateMaximizedState);
 });
 </script>
 
@@ -220,11 +266,56 @@ onBeforeUnmount(() => {
         aria-modal="true"
         :aria-label="isVideo ? '视频播放器' : '图片查看器'"
     >
+        <!-- 顶部可拖拽标题栏：解决无边框窗口无法拖动的问题 -->
+        <div class="mv-drag-bar" @dblclick="toggleMaximize">
+            <span class="mv-drag-title">{{ fileName }}</span>
+            <div class="mv-win-controls" @dblclick.stop>
+                <button
+                    type="button"
+                    class="mv-win-btn"
+                    aria-label="最小化"
+                    title="最小化"
+                    @click="minimize"
+                >
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                        <line x1="5" y1="12" x2="19" y2="12" />
+                    </svg>
+                </button>
+                <button
+                    type="button"
+                    class="mv-win-btn"
+                    :aria-label="isMaximized ? '还原' : '最大化'"
+                    :title="isMaximized ? '还原' : '最大化'"
+                    @click="toggleMaximize"
+                >
+                    <svg v-if="isMaximized" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                        <rect x="5" y="9" width="10" height="10" rx="1" />
+                        <path d="M9 5a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v8" />
+                    </svg>
+                    <svg v-else viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                        <rect x="4" y="4" width="16" height="16" rx="1" />
+                    </svg>
+                </button>
+                <button
+                    type="button"
+                    class="mv-win-btn mv-win-btn--close"
+                    aria-label="关闭"
+                    title="关闭 (Esc)"
+                    @click="close"
+                >
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                </button>
+            </div>
+        </div>
+
         <div class="mv-stage" :class="{ 'is-dragging': dragging }">
             <video
                 v-if="isVideo"
                 class="mv-video"
-                :src="src"
+                :src="currentSrc"
                 controls
                 autoplay
                 playsinline
@@ -233,7 +324,7 @@ onBeforeUnmount(() => {
                 v-else
                 class="mv-image"
                 :class="{ zoomed: scale > 1 }"
-                :src="src"
+                :src="currentSrc"
                 alt="图片预览"
                 :style="imgStyle"
                 draggable="false"
@@ -245,85 +336,79 @@ onBeforeUnmount(() => {
             />
         </div>
 
-        <!-- 顶部工具栏：固定，不随滚轮消失 -->
+        <!-- 底部胶囊工具栏：参考 QQ / TIM 图片查看器，纯图标避免换行 -->
         <div class="mv-toolbar" role="toolbar" aria-label="媒体操作">
             <template v-if="!isVideo">
-                <button
-                    type="button"
-                    class="mv-btn"
-                    aria-label="缩小"
-                    title="缩小 (-)"
-                    @click="zoomTo(scale / 1.25)"
-                >
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
-                        <line x1="5" y1="12" x2="19" y2="12" />
-                    </svg>
-                </button>
-                <span class="mv-scale-label">{{ Math.round(scale * 100) }}%</span>
-                <button
-                    type="button"
-                    class="mv-btn"
-                    aria-label="放大"
-                    title="放大 (+)"
-                    @click="zoomTo(scale * 1.25)"
-                >
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
-                        <line x1="12" y1="5" x2="12" y2="19" />
-                        <line x1="5" y1="12" x2="19" y2="12" />
-                    </svg>
-                </button>
-                <button
-                    type="button"
-                    class="mv-btn"
-                    aria-label="重置缩放"
-                    title="重置 (0)"
-                    @click="resetView"
-                >
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <path d="M3 12a9 9 0 1 0 3-6.7" />
-                        <polyline points="3 4 3 9 8 9" />
-                    </svg>
-                </button>
-                <button
-                    type="button"
-                    class="mv-btn"
-                    aria-label="复制图片"
-                    title="复制到剪贴板"
-                    @click="copyImage"
-                >
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <rect x="9" y="9" width="11" height="11" rx="2" />
-                        <path d="M5 15V5a2 2 0 0 1 2-2h10" />
-                    </svg>
-                </button>
+                <div class="mv-toolbar-group">
+                    <button
+                        type="button"
+                        class="mv-btn"
+                        aria-label="缩小"
+                        title="缩小 (-)"
+                        @click="zoomTo(scale / 1.25)"
+                    >
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+                            <line x1="5" y1="12" x2="19" y2="12" />
+                        </svg>
+                    </button>
+                    <span class="mv-scale-label">{{ Math.round(scale * 100) }}%</span>
+                    <button
+                        type="button"
+                        class="mv-btn"
+                        aria-label="放大"
+                        title="放大 (+)"
+                        @click="zoomTo(scale * 1.25)"
+                    >
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+                            <line x1="12" y1="5" x2="12" y2="19" />
+                            <line x1="5" y1="12" x2="19" y2="12" />
+                        </svg>
+                    </button>
+                    <button
+                        type="button"
+                        class="mv-btn"
+                        aria-label="重置缩放"
+                        title="重置 (0)"
+                        @click="resetView"
+                    >
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M3 12a9 9 0 1 0 3-6.7" />
+                            <polyline points="3 4 3 9 8 9" />
+                        </svg>
+                    </button>
+                </div>
+                <div class="mv-toolbar-divider" aria-hidden="true"></div>
+                <div class="mv-toolbar-group">
+                    <button
+                        type="button"
+                        class="mv-btn"
+                        aria-label="复制图片"
+                        title="复制到剪贴板"
+                        @click="copyImage"
+                    >
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <rect x="9" y="9" width="11" height="11" rx="2" />
+                            <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+                        </svg>
+                    </button>
+                </div>
+                <div class="mv-toolbar-divider" aria-hidden="true"></div>
             </template>
-            <button
-                type="button"
-                class="mv-btn mv-btn--save"
-                :aria-label="isVideo ? '保存视频' : '另存为'"
-                :title="isVideo ? '保存视频 (Ctrl+S)' : '另存为 (Ctrl+S)'"
-                @click="save"
-            >
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="7 10 12 15 17 10" />
-                    <line x1="12" y1="15" x2="12" y2="3" />
-                </svg>
-                <span class="mv-btn-text">保存</span>
-            </button>
-            <button
-                ref="closeBtn"
-                type="button"
-                class="mv-btn mv-btn--close"
-                aria-label="关闭"
-                title="关闭 (Esc)"
-                @click="close"
-            >
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
-                    <line x1="18" y1="6" x2="6" y2="18" />
-                    <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-            </button>
+            <div class="mv-toolbar-group">
+                <button
+                    type="button"
+                    class="mv-btn mv-btn--accent"
+                    :aria-label="isVideo ? '保存视频' : '另存为'"
+                    :title="isVideo ? '保存视频 (Ctrl+S)' : '另存为 (Ctrl+S)'"
+                    @click="save"
+                >
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                </button>
+            </div>
         </div>
 
         <div class="mv-hint" aria-hidden="true">
@@ -351,10 +436,94 @@ onBeforeUnmount(() => {
     user-select: none;
 }
 
+/* 底部暗角遮罩：高亮图片时也能衬出底部工具栏与提示 */
+.mv-root::after {
+    content: "";
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 220px;
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.62), rgba(0, 0, 0, 0.25) 40%, transparent);
+    pointer-events: none;
+    z-index: 1;
+}
+
+/* ===== 顶部可拖拽标题栏 ===== */
+.mv-drag-bar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 36px;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* Electron 无边框窗口拖动关键：整个标题栏是拖拽区 */
+    -webkit-app-region: drag;
+    app-region: drag;
+    background: linear-gradient(to bottom, rgba(0, 0, 0, 0.65), rgba(0, 0, 0, 0.2) 60%, transparent);
+}
+
+.mv-drag-title {
+    max-width: 60%;
+    font-size: 12px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.82);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
+}
+
+/* ===== 窗口控制按钮：必须显式取消拖拽，否则无法点击 ===== */
+.mv-win-controls {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+}
+
+.mv-win-btn {
+    width: 28px;
+    height: 28px;
+    display: grid;
+    place-items: center;
+    border: none;
+    border-radius: 6px;
+    color: rgba(255, 255, 255, 0.75);
+    background: transparent;
+    cursor: pointer;
+    transition: background 140ms ease, color 140ms ease;
+}
+
+.mv-win-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+}
+
+.mv-win-btn--close:hover {
+    background: #e35d6a;
+    color: #fff;
+}
+
+.mv-win-btn:focus-visible {
+    outline: 2px solid rgba(255, 255, 255, 0.8);
+    outline-offset: 1px;
+}
+
+/* ===== 媒体舞台：顶部给拖拽栏留安全边距 ===== */
 .mv-stage {
-    max-width: 92vw;
-    max-height: calc(100vh - 100px);
-    margin-top: 56px; /* 给固定工具栏留位置 */
+    max-width: 96vw;
+    max-height: calc(100vh - 130px);
+    margin-top: 24px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -362,8 +531,8 @@ onBeforeUnmount(() => {
 }
 
 .mv-image {
-    max-width: 92vw;
-    max-height: calc(100vh - 120px);
+    max-width: 96vw;
+    max-height: calc(100vh - 150px);
     object-fit: contain;
     border-radius: 8px;
     box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45);
@@ -383,111 +552,116 @@ onBeforeUnmount(() => {
 }
 
 .mv-video {
-    max-width: 92vw;
-    max-height: calc(100vh - 120px);
+    max-width: 96vw;
+    max-height: calc(100vh - 150px);
     border-radius: 8px;
     box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45);
     background: #000;
     outline: none;
 }
 
-/* ===== 顶部工具栏：position: fixed，滚轮事件被 onWheel preventDefault，按钮始终可点 ===== */
+/* ===== 底部胶囊工具栏：参考 QQ / TIM 图片查看器 ===== */
 .mv-toolbar {
     position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
     z-index: 10;
     display: flex;
     align-items: center;
-    justify-content: center;
-    gap: 8px;
-    padding: 8px 12px;
-    background: rgba(20, 20, 28, 0.78);
-    backdrop-filter: blur(14px) saturate(140%);
-    -webkit-backdrop-filter: blur(14px) saturate(140%);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    gap: 4px;
+    padding: 6px;
+    border-radius: 999px;
+    background: rgba(18, 18, 26, 0.95);
+    backdrop-filter: blur(18px) saturate(160%);
+    -webkit-backdrop-filter: blur(18px) saturate(160%);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    box-shadow:
+        0 0 0 1px rgba(0, 0, 0, 0.25) inset,
+        0 12px 44px rgba(0, 0, 0, 0.45);
+}
+
+.mv-toolbar-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.mv-toolbar-divider {
+    width: 1px;
+    height: 22px;
+    background: rgba(255, 255, 255, 0.22);
+    margin: 0 2px;
 }
 
 .mv-btn {
-    width: 36px;
-    height: 36px;
+    width: 40px;
+    height: 40px;
     display: grid;
     place-items: center;
-    border: 1px solid rgba(255, 255, 255, 0.18);
-    border-radius: 8px;
-    color: #e7e7ea;
-    background: rgba(255, 255, 255, 0.06);
+    border: none;
+    border-radius: 999px;
+    color: #ffffff;
+    background: transparent;
     cursor: pointer;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
     transition:
         background 140ms ease,
         transform 140ms ease;
 }
 
 .mv-btn:hover {
-    background: rgba(255, 255, 255, 0.16);
+    background: rgba(255, 255, 255, 0.18);
     transform: translateY(-1px);
 }
 
 .mv-btn:focus-visible {
-    outline: 2px solid rgba(255, 255, 255, 0.85);
+    outline: 2px solid rgba(255, 255, 255, 0.9);
     outline-offset: 2px;
 }
 
-.mv-btn--save {
-    width: auto;
-    padding: 0 12px;
-    gap: 6px;
-    background: rgba(255, 107, 157, 0.32);
-    border-color: rgba(255, 107, 157, 0.45);
-}
-
-.mv-btn--save:hover {
-    background: rgba(255, 107, 157, 0.5);
-}
-
-.mv-btn--close {
-    background: rgba(227, 93, 106, 0.32);
-    border-color: rgba(227, 93, 106, 0.45);
-}
-
-.mv-btn--close:hover {
-    background: rgba(227, 93, 106, 0.5);
-}
-
-.mv-btn-text {
-    font-size: 13px;
-    font-weight: 600;
+.mv-btn--accent:hover {
+    background: rgba(255, 107, 157, 0.42);
 }
 
 .mv-scale-label {
-    min-width: 48px;
+    min-width: 44px;
     text-align: center;
     font-size: 12px;
-    color: #b5b5be;
+    font-weight: 600;
+    color: #ffffff;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
     font-variant-numeric: tabular-nums;
+    user-select: none;
 }
 
 /* ===== 底部操作提示 ===== */
 .mv-hint {
     position: fixed;
-    bottom: 16px;
+    bottom: 86px;
     left: 50%;
     transform: translateX(-50%);
+    z-index: 10;
     padding: 6px 14px;
     border-radius: 999px;
     font-size: 12px;
-    color: rgba(255, 255, 255, 0.7);
-    background: rgba(255, 255, 255, 0.06);
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.92);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+    background: rgba(18, 18, 26, 0.88);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
     user-select: none;
     white-space: nowrap;
+    pointer-events: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
     .mv-image {
         transition: none;
     }
-    .mv-btn {
+    .mv-btn,
+    .mv-win-btn {
         transition: none;
     }
 }

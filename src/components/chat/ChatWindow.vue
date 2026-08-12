@@ -227,8 +227,11 @@ function flashToast(text: string) {
 }
 
 /* ===== 媒体查看器：在独立窗口中预览（替代应用内 overlay）=====
- * viewerApi 由 preload 注入（viewer:open IPC → 主进程创建独立 BrowserWindow）。
- * 老环境（无 viewerApi）回退到 window.open，由 setWindowOpenHandler 兜底。 */
+ * 优先 preload contextBridge 注入的 viewerApi（contextIsolation:true 的窗口）；
+ * 聊天窗口 nodeIntegration:true + contextIsolation:false 下 contextBridge 不生效，
+ * 退化到 window.require('electron').ipcRenderer（与 getImageIpc 同一兜底策略）。
+ * 最后兜底 window.open——主进程 hardenWindowLinks 的 setWindowOpenHandler 会把
+ * 裸 Chromium 窗口拦截改走自定义 MediaViewer 窗口。 */
 interface ViewerApiBridge {
     open?: (src: string, kind?: "image" | "video") => Promise<void>;
 }
@@ -236,8 +239,47 @@ function openMedia(src: string, kind: "image" | "video") {
     const api = (window as unknown as { viewerApi?: ViewerApiBridge }).viewerApi;
     if (api?.open) {
         void api.open(src, kind);
-    } else {
-        window.open(src, "_blank");
+        return;
+    }
+    const w = window as unknown as {
+        require?: (mod: string) => {
+            ipcRenderer: { invoke: (channel: string, ...args: unknown[]) => Promise<unknown> };
+        };
+    };
+    if (w.require) {
+        void w.require("electron").ipcRenderer.invoke("viewer:open", src, kind);
+        return;
+    }
+    window.open(src, "_blank");
+}
+
+/* ===== markdown 渲染内容中的链接点击拦截 =====
+ * v-html 渲染的 <a>（GFM autolink 裸 URL、显式 [text](url) 等）点击默认行为：
+ *   - 无 target → 把当前聊天窗口导航走（灾难）
+ *   - target=_blank → Electron 裸 Chromium 窗口（脱离窗口体系）
+ * 这里在冒泡阶段统一接管：媒体 URL 走 MediaViewer 窗口，http(s) 走系统浏览器。 */
+function onBubbleContentClick(e: MouseEvent) {
+    const anchor = (e.target as HTMLElement).closest?.("a");
+    if (!anchor) return;
+    const href = anchor.getAttribute("href");
+    if (!href) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const kind = /\.(mp4|webm|mov|mkv|avi|m4v)(\?.*)?$/i.test(href) ? "video" : "image";
+    if (
+        /^data:image\//i.test(href) ||
+        /^data:video\//i.test(href) ||
+        /\.(png|jpe?g|gif|webp|bmp|svg|ico|mp4|webm|mov|mkv|avi|m4v)(\?.*)?$/i.test(href)
+    ) {
+        openMedia(href, kind);
+        return;
+    }
+    if (/^https?:\/\//i.test(href)) {
+        const w = window as unknown as {
+            windowApi?: { openExternal?: (url: string) => Promise<void> };
+        };
+        if (w.windowApi?.openExternal) void w.windowApi.openExternal(href);
+        else window.open(href, "_blank");
     }
 }
 
@@ -415,6 +457,7 @@ async function saveImage(src: string) {
                                     v-if="item.message!.text?.trim()"
                                     class="msg-text markdown-body"
                                     v-html="renderMarkdownMath(item.message!.text)"
+                                    @click="onBubbleContentClick"
                                 ></div>
                                 <div
                                     v-if="toMediaList(item.message!.images).length"
