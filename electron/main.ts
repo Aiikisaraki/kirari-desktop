@@ -1451,6 +1451,9 @@ function createChatWindow() {
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.resolve(__dirname, "preload.js"),
+      // 聊天窗口渲染进程用 window.require('electron').ipcRenderer 收发消息（见
+      // useChatSocket.ts），故保留 nodeIntegration、关闭 contextIsolation。此时
+      // contextBridge 不生效，图片操作在 ChatWindow.vue 里走 ipcRenderer 兜底。
       nodeIntegration: true,
       contextIsolation: false,
     },

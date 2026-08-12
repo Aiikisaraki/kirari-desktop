@@ -279,14 +279,46 @@ async function copyText(text: string) {
     }
 }
 
-async function copyImage(src: string) {
+/** 取得图片操作 IPC。
+ *  优先 preload 经 contextBridge 注入的 windowApi（contextIsolation:true 的窗口）；
+ *  退化到 nodeIntegration 下的 window.require('electron').ipcRenderer（聊天窗口）。
+ *  与 WindowChrome.control / loadPetName 的兜底策略一致。 */
+function getImageIpc(): {
+    saveImageAs: (src: string) => Promise<{ ok: boolean; error?: string; canceled?: boolean }>;
+    copyImage: (src: string) => Promise<{ ok: boolean; error?: string }>;
+} | null {
     const api = getWindowApi();
-    if (!api?.copyImage) {
+    if (api?.saveImageAs && api?.copyImage) {
+        return {
+            saveImageAs: (src) => api.saveImageAs(src),
+            copyImage: (src) => api.copyImage(src),
+        };
+    }
+    const w = window as unknown as {
+        require?: (mod: string) => {
+            ipcRenderer: {
+                invoke: (channel: string, ...args: unknown[]) => Promise<{ ok: boolean; error?: string; canceled?: boolean }>;
+            };
+        };
+    };
+    if (w.require) {
+        const { ipcRenderer } = w.require("electron");
+        return {
+            saveImageAs: (src) => ipcRenderer.invoke("chat:save-image-as", src),
+            copyImage: (src) => ipcRenderer.invoke("chat:copy-image", src),
+        };
+    }
+    return null;
+}
+
+async function copyImage(src: string) {
+    const ipc = getImageIpc();
+    if (!ipc) {
         flashToast("当前环境不支持复制图片");
         return;
     }
     try {
-        const res = await api.copyImage(src);
+        const res = await ipc.copyImage(src);
         if (res.ok) flashToast("已复制图片");
         else flashToast(res.error || "复制图片失败");
     } catch {
@@ -295,13 +327,13 @@ async function copyImage(src: string) {
 }
 
 async function saveImage(src: string) {
-    const api = getWindowApi();
-    if (!api?.saveImageAs) {
+    const ipc = getImageIpc();
+    if (!ipc) {
         flashToast("当前环境不支持保存图片");
         return;
     }
     try {
-        const res = await api.saveImageAs(src);
+        const res = await ipc.saveImageAs(src);
         if (res.ok) flashToast("图片已保存");
         else if (!res.canceled) flashToast(res.error || "保存失败");
     } catch {
