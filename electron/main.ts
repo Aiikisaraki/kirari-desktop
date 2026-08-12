@@ -872,9 +872,29 @@ async function readImageSource(source: string): Promise<Buffer> {
     return Buffer.from(m[2], "base64");
   }
   if (/^https?:\/\//i.test(source)) {
-    const res = await fetchWithTimeout(source, { method: "GET" });
+    // 某些图片服务器（如模型生成的 URL、带防盗链的资源）会拒绝无 UA 的请求，返回 400/403。
+    // 带上常见浏览器 UA 规避。后端鉴权 URL 的 token 已在 query string 里，无需额外头。
+    const res = await fetchWithTimeout(source, {
+      method: "GET",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+      },
+    });
     if (!res.ok) throw new Error(`下载图片失败（HTTP ${res.status}）`);
     return Buffer.from(await res.arrayBuffer());
+  }
+  // avatar:// / pet:// 自定义协议：映射到本地文件路径
+  // （与 protocol.registerFileProtocol 同一套路径解析逻辑）
+  if (source.startsWith("avatar://")) {
+    const rel = decodeURIComponent(source.replace("avatar://", ""));
+    const filePath = path.join(app.getPath("userData"), "avatars", rel);
+    return fs.readFileSync(filePath);
+  }
+  if (source.startsWith("pet://")) {
+    const rel = decodeURIComponent(source.replace("pet://", ""));
+    const filePath = path.join(getOfficialAvatarsSource(), rel);
+    return fs.readFileSync(filePath);
   }
   // 本地路径 / file://
   const filePath = source.startsWith("file://") ? source.slice(7) : source;
@@ -928,6 +948,125 @@ ipcMain.handle("chat:copy-image", async (_event, source: unknown) => {
     return { ok: false, error: `复制失败：${(e as Error).message || e}` };
   }
 });
+
+// ===== 媒体查看器：独立窗口（替代应用内 overlay）=====
+// 解决 overlay 形式的三个问题：
+//   1) 不是独立窗口，无法最小化/独立切换
+//   2) 滚轮缩放后顶部按钮难触发（overlay 在 chat 窗口内，受滚动影响）
+//   3) chromium 默认下载对 data: URL 返回 400
+// 路由：?window=viewer&src=<encodeURIComponent(src)>&kind=image|video
+const viewerSize = { width: 960, height: 720 };
+let viewerWindow: BrowserWindow | null = null;
+
+function createImageViewerWindow(src: string, kind?: string): BrowserWindow {
+  if (viewerWindow && !viewerWindow.isDestroyed()) {
+    viewerWindow.show();
+    viewerWindow.focus();
+    return viewerWindow;
+  }
+  const { workAreaSize } = screen.getPrimaryDisplay();
+  const x = Math.max(0, Math.round((workAreaSize.width - viewerSize.width) / 2));
+  const y = Math.max(0, Math.round((workAreaSize.height - viewerSize.height) / 2));
+
+  const win = new BrowserWindow({
+    title: "媒体查看器",
+    width: viewerSize.width,
+    height: viewerSize.height,
+    minWidth: 480,
+    minHeight: 360,
+    x,
+    y,
+    show: false,
+    frame: false,
+    backgroundColor: "#0e0e12",
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.resolve(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  viewerWindow = win;
+  win.on("closed", () => {
+    if (viewerWindow === win) viewerWindow = null;
+  });
+
+  const theme = clientConfig.theme || DEFAULT_THEME;
+  const query: Record<string, string> = { window: "viewer", theme, src };
+  if (kind) query.kind = kind;
+  if (process.env.VITE_DEV_SERVER_URL) {
+    const url = new URL(`?window=viewer&theme=${theme}`, process.env.VITE_DEV_SERVER_URL);
+    url.searchParams.set("src", src);
+    if (kind) url.searchParams.set("kind", kind);
+    win.loadURL(url.toString());
+  } else {
+    win.loadFile(path.resolve(__dirname, "../dist/index.html"), { query });
+  }
+  win.once("ready-to-show", () => {
+    win.show();
+    if (isDebugMode()) win.webContents.openDevTools({ mode: "detach" });
+  });
+  return win;
+}
+
+ipcMain.handle("viewer:open", (_event, src: unknown, kind?: unknown) => {
+  if (typeof src !== "string" || !src) return;
+  createImageViewerWindow(src, typeof kind === "string" ? kind : undefined);
+});
+
+// viewer 保存媒体：接收渲染进程已 fetch 到的字节，只负责弹保存对话框 + 写文件。
+// 对图片和视频通用——主进程只写字节，不解析内容；ext 由渲染进程从 blob.type / URL 推断。
+// 这样无论 src 是 data: / http(s) / avatar:// / pet:// / file://，只要 viewer 能显示就能保存。
+ipcMain.handle(
+  "viewer:save-media-bytes",
+  async (_event, bytes: unknown, suggestedExt: unknown): Promise<{ ok: boolean; path?: string; error?: string; canceled?: boolean }> => {
+    if (!(bytes instanceof ArrayBuffer) || bytes.byteLength === 0) {
+      return { ok: false, error: "媒体数据为空" };
+    }
+    const ext = typeof suggestedExt === "string" ? suggestedExt.replace(/^\./, "").toLowerCase() : "png";
+    // 图片 + 视频扩展名白名单
+    const safeExt = [
+      "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico",
+      "mp4", "webm", "mov", "mkv", "avi", "m4v",
+    ].includes(ext) ? ext : "png";
+    const isVideo = ["mp4", "webm", "mov", "mkv", "avi", "m4v"].includes(safeExt);
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    try {
+      const { canceled, filePath: dest } = await dialog.showSaveDialog({
+        title: isVideo ? "视频另存为" : "图片另存为",
+        defaultPath: `kirari-${stamp}.${safeExt}`,
+        filters: [
+          { name: isVideo ? "视频" : "图片", extensions: [safeExt] },
+          { name: "所有文件", extensions: ["*"] },
+        ],
+      });
+      if (canceled || !dest) return { ok: false, canceled: true };
+      await fs.promises.writeFile(dest, Buffer.from(bytes));
+      return { ok: true, path: dest };
+    } catch (e) {
+      return { ok: false, error: `保存失败：${(e as Error).message || e}` };
+    }
+  },
+);
+
+// viewer 复制图片：接收渲染进程已 fetch 到的字节，写入系统剪贴板。
+ipcMain.handle(
+  "viewer:copy-image-bytes",
+  async (_event, bytes: unknown): Promise<{ ok: boolean; error?: string }> => {
+    if (!(bytes instanceof ArrayBuffer) || bytes.byteLength === 0) {
+      return { ok: false, error: "图片数据为空" };
+    }
+    try {
+      const img = nativeImage.createFromBuffer(Buffer.from(bytes));
+      if (img.isEmpty()) throw new Error("图片内容为空或格式无法识别");
+      clipboard.writeImage(img);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: `复制失败：${(e as Error).message || e}` };
+    }
+  },
+);
 
 // 重新扫描 userData/avatars：把新增的（含 frames.json 的）子目录注册为自定义形象并广播。
 ipcMain.handle("avatar:rescan", () => {

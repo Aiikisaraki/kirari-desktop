@@ -5,7 +5,6 @@ import { renderMarkdownMath } from "../../utils/renderMarkdownMath";
 import { toMediaList } from "../../utils/media";
 import WindowChrome from "../common/WindowChrome.vue";
 import ChatContextMenu from "./ChatContextMenu.vue";
-import MediaViewer from "./MediaViewer.vue";
 import type { ChatMessage } from "../../stores/chat";
 
 const { connected, messages, lastError, waitingForReply, requestState, sendMessage } =
@@ -227,15 +226,19 @@ function flashToast(text: string) {
     }, 1800);
 }
 
-/* ===== 媒体查看器：图片点击后在应用内预览，不再 target=_blank 弹原生窗口 ===== */
-const mediaViewer = ref<{ src: string; kind: "image" | "video" } | null>(null);
-
-function openMedia(src: string, kind: "image" | "video") {
-    mediaViewer.value = { src, kind };
+/* ===== 媒体查看器：在独立窗口中预览（替代应用内 overlay）=====
+ * viewerApi 由 preload 注入（viewer:open IPC → 主进程创建独立 BrowserWindow）。
+ * 老环境（无 viewerApi）回退到 window.open，由 setWindowOpenHandler 兜底。 */
+interface ViewerApiBridge {
+    open?: (src: string, kind?: "image" | "video") => Promise<void>;
 }
-
-function closeMedia() {
-    mediaViewer.value = null;
+function openMedia(src: string, kind: "image" | "video") {
+    const api = (window as unknown as { viewerApi?: ViewerApiBridge }).viewerApi;
+    if (api?.open) {
+        void api.open(src, kind);
+    } else {
+        window.open(src, "_blank");
+    }
 }
 
 function openCtxMenu(e: MouseEvent, items: CtxMenuItem[]) {
@@ -569,14 +572,7 @@ async function saveImage(src: string) {
             :items="ctxMenu.items"
             @close="ctxMenu = null"
         />
-        <!-- 统一媒体查看器：图片预览 / 视频播放（应用内覆盖层） -->
-        <MediaViewer
-            v-if="mediaViewer"
-            :src="mediaViewer.src"
-            :kind="mediaViewer.kind"
-            @close="closeMedia"
-            @save="saveImage"
-        />
+        <!-- 媒体查看器已改为独立窗口（viewerApi.open），不再使用应用内 overlay -->
         <div v-if="toast" class="chat-toast" role="status">{{ toast.text }}</div>
     </div>
 </template>
@@ -820,39 +816,17 @@ async function saveImage(src: string) {
     box-shadow: 0 7px 20px rgba(57, 44, 76, 0.13);
 }
 
-/* pet 气泡：贴头像侧收紧圆角 + 左下三角尾 */
+/* pet 气泡：贴头像侧收紧圆角 */
 .msg-row.is-pet .msg-bubble {
     background: var(--pet-surface-strong);
     border-radius: 6px 20px 20px 20px;
 }
 
-.msg-row.is-pet .msg-bubble::after {
-    content: "";
-    position: absolute;
-    left: -6px;
-    bottom: 10px;
-    border: 7px solid transparent;
-    border-right-color: var(--pet-surface-strong);
-    border-left: 0;
-    border-bottom: 0;
-}
-
-/* user 气泡：贴头像侧收紧圆角 + 右下三角尾（头像在右） */
+/* user 气泡：贴头像侧收紧圆角（头像在右） */
 .msg-row.is-user .msg-bubble {
     background: var(--pet-accent);
     color: #fff;
     border-radius: 20px 6px 20px 20px;
-}
-
-.msg-row.is-user .msg-bubble::after {
-    content: "";
-    position: absolute;
-    right: -6px;
-    bottom: 10px;
-    border: 7px solid transparent;
-    border-left-color: var(--pet-accent);
-    border-right: 0;
-    border-bottom: 0;
 }
 
 /* user 气泡内 Markdown 适配（白字） */

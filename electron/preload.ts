@@ -116,3 +116,29 @@ contextBridge.exposeInMainWorld("skillApi", {
   list: (): Promise<unknown[]> => ipcRenderer.invoke("skill:list"),
   save: (list: unknown[]): Promise<{ ok: boolean }> => ipcRenderer.invoke("skill:save", list),
 });
+
+// 媒体查看器：在独立 BrowserWindow 中打开媒体（替代应用内 overlay）。
+// src 可为 data: URL / http(s) URL / avatar:// / pet:// / 本地路径；kind 可选 image|video。
+//
+// 保存与复制采用「渲染进程 fetch 字节 + 主进程写文件/剪贴板」模式：
+// 既然 viewer 里的 <img>/<video> 已经能渲染 src，浏览器一定已经把字节加载到内存，
+// 渲染进程用 fetch(src) 就能拿到 Blob → ArrayBuffer，再通过 IPC 传给主进程。
+// 主进程完全不关心 src 是什么协议，只负责 dialog.showSaveDialog + fs.writeFile
+// 或 nativeImage.createFromBuffer + clipboard.writeImage。
+// 这样「能显示就能保存」成立，规避主进程对 avatar:// / pet:// / 鉴权 URL 重新拉取失败的问题。
+//
+// saveMedia 对图片和视频通用（主进程只写字节，不解析内容）；
+// copyImage 仅图片可用（nativeImage 无法处理视频字节）。
+contextBridge.exposeInMainWorld("viewerApi", {
+  open: (src: string, kind?: "image" | "video"): Promise<void> =>
+    ipcRenderer.invoke("viewer:open", src, kind),
+  // bytes 必须是 ArrayBuffer（主进程会 Buffer.from(bytes)）。ext 不含点号，如 "png" / "mp4"。
+  saveMedia: (
+    bytes: ArrayBuffer,
+    ext: string,
+  ): Promise<{ ok: boolean; path?: string; error?: string; canceled?: boolean }> =>
+    ipcRenderer.invoke("viewer:save-media-bytes", bytes, ext),
+  // 仅图片：写入系统剪贴板（视频字节无法 createFromBuffer）。
+  copyImage: (bytes: ArrayBuffer): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("viewer:copy-image-bytes", bytes),
+});
