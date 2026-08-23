@@ -59,8 +59,7 @@ onMounted(() => {
       <span>基础人格</span>
     </h3>
     <p class="settings-card__desc">
-      设定桌宠的「基础人格」。所有回答（包括换模型、工具润色、降级兜底）都会基于它，
-      因此更换模型不会导致人格漂移。留空则使用内置预设人格。
+      设定桌宠的性格与说话方式。无论之后怎么切换模型，它都会保持这个性格。留空则使用内置默认性格。
     </p>
 
     <div class="field">
@@ -73,8 +72,7 @@ onMounted(() => {
         :disabled="isLoading"
       />
       <p class="settings-hint">
-        自由描述桌宠的名字、物种、对主人的称呼、口吻与性格。后端会自动在末尾拼接固定的
-        JSON 输出格式要求，不会被你的描述破坏。
+        随便描述它的名字、身份、对你的称呼、语气和性格就好，不需要考虑格式。
       </p>
       <div class="persona-actions">
         <button

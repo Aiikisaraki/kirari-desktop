@@ -2,15 +2,16 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import type { AvatarConfig, AvatarMeta, AvatarState, AvatarType } from "../pet/avatar/types";
 
-// 形象列表不再由前端写死：默认皮肤在运行时由主进程安装到 userData/avatars/kirari
-// 并经扫描注册，与用户自定义形象走完全相同的流程。前端仅保留一个兜底默认值
-// （当主进程未返回任何形象时使用），且同样指向 avatar:// 协议地址。
-// 形象渲染类型（sprite / live2d）以皮肤配置文件 frames.json 的 `type` 字段为准。
+// 兜底默认值：内置 Kirari 精灵皮肤。其聊天头像（一套皮肤一个头像）用
+// public/avatars/kirari.jpg；主进程安装的真实形象经扫描注册后覆盖此值。
 const DEFAULT_AVATAR: AvatarConfig = {
   id: "custom-kirari",
-  name: "Aki Kirari（精灵帧）",
+  name: "Aki Kirari",
+  author: "Aki",
+  version: "1.0.0",
   type: "sprite",
   src: "avatar://kirari/frames.json",
+  chatAvatar: "/avatars/kirari.jpg",
 };
 
 type ElectronApi = {
@@ -51,6 +52,7 @@ function normalizeConfig(v: unknown): AvatarConfig {
       version: typeof raw.version === "string" ? raw.version : undefined,
       type: raw.type as AvatarType,
       src: raw.src as string,
+      chatAvatar: typeof raw.chatAvatar === "string" ? raw.chatAvatar : undefined,
       scale: typeof raw.scale === "number" ? raw.scale : undefined,
     };
   }
@@ -108,12 +110,13 @@ export const useAvatarStore = defineStore("avatar", () => {
     }
 
     // 3) 校验当前形象是否仍在列表中：若持久化的 id 已失效（旧数据/皮肤被删），
-    // 回退到默认形象（custom-kirari）或列表第一个，避免设置页下拉框显示空白。
-    const validIds = new Set(customAvatars.value.map((a) => a.id));
-    if (customAvatars.value.length > 0 && !validIds.has(current.value.id)) {
+    // 回退到默认形象或列表第一个，避免设置页下拉框显示空白。
+    const allAvatars = list.value;
+    const validIds = new Set(allAvatars.map((a) => a.id));
+    if (allAvatars.length > 0 && !validIds.has(current.value.id)) {
       const fallback =
-        customAvatars.value.find((a) => a.id === DEFAULT_AVATAR.id) ||
-        customAvatars.value[0] ||
+        allAvatars.find((a) => a.id === DEFAULT_AVATAR.id) ||
+        allAvatars[0] ||
         { ...DEFAULT_AVATAR };
       console.warn(
         "[avatar] 当前形象 id",

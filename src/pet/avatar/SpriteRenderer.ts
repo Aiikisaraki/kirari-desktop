@@ -6,6 +6,7 @@ import type {
     SpriteManifest,
     SpriteStateDef,
 } from "./types";
+import { getActiveRenderer, setActiveRenderer } from "./types";
 
 // 基础态：任何一次性（非 loop）动作播完后都平滑回到这个站姿，
 // 保证本段动画既能自循环也能与其他动作无缝衔接。
@@ -50,14 +51,6 @@ function normalizeState(raw: unknown): SpriteStateDef | null {
         return { loop: r.loop === true, clips: [clip] };
     }
     return null;
-}
-
-// 当前活跃的精灵渲染器实例（供 PetStage 的命中测试调用，避免跨组件传递实例）。
-let activeInstance: SpriteRenderer | null = null;
-
-/** 获取当前正在渲染的精灵实例，用于逐像素命中测试 */
-export function getActiveSpriteRenderer(): SpriteRenderer | null {
-    return activeInstance;
 }
 
 // 精灵帧渲染器：用 2D canvas 按 fps 切帧播放。
@@ -262,7 +255,7 @@ export class SpriteRenderer implements AvatarRenderer {
             canvas.width = base.clips[0].frameW;
             canvas.height = base.clips[0].frameH;
         }
-        activeInstance = this;
+        setActiveRenderer(this);
         this.start();
         this.draw();
     }
@@ -316,7 +309,7 @@ export class SpriteRenderer implements AvatarRenderer {
         this.canvas = null;
         this.sheets = {};
         this.manifest = null;
-        if (activeInstance === this) activeInstance = null;
+        if (getActiveRenderer() === this) setActiveRenderer(null);
     }
 
     // 命中测试：画布内部像素坐标 (x, y) 处是否"实心"（alpha >= 阈值）。

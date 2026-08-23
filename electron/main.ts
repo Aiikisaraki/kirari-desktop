@@ -30,8 +30,11 @@ const DEFAULT_THEME: ThemeName = "aurora-glass";
 
 // 桌宠形象配置（与前端 AvatarConfig 对应，主进程独立定义以避免依赖前端运行时模块）
 type AvatarConfig = {
-  type: "sprite" | "live2d";
+  type: "sprite" | "live2d" | "image";
   src: string;
+  // 这套皮肤对应的聊天头像图（「一套皮肤一个头像」）。
+  // 内置皮肤指向打包进 dist 的 /avatars/<name>.jpg；自定义皮肤为 avatar://<皮肤目录>/<文件名>。
+  chatAvatar?: string;
   scale?: number;
   id?: string;
   name?: string;
@@ -48,14 +51,19 @@ const DEFAULT_AVATAR: AvatarConfig = {
   version: "1.0.0",
   type: "sprite",
   src: `avatar://${encodeURIComponent(DEFAULT_SKIN_DIR)}/frames.json`,
+  // 默认皮肤的聊天头像：浅蓝发 Kirari 立绘（public/avatars/kirari.jpg）
+  chatAvatar: "/avatars/kirari.jpg",
 };
 
-// 兼容旧版持久化：把旧默认形象（id=kirari-sprite / src=pet://frames.json）
-// 迁移到新的 avatar:// 流程，避免下拉框选不中当前形象。
+// 兼容旧版持久化：把旧默认形象（id=kirari-sprite / src=pet://frames.json，
+// 以及历史上误把默认形象写成 image 型 aurora-kirari 的版本）
+// 迁移到当前默认形象（Kirari 精灵皮肤），避免下拉框选不中当前形象。
 function migrateLegacyAvatar(saved: AvatarConfig): AvatarConfig {
   if (
     saved.id === "kirari-sprite" ||
     saved.src === "pet://frames.json" ||
+    saved.id === "aurora-kirari" ||
+    saved.src === "/avatars/aurora-kirari.jpg" ||
     (saved.src === DEFAULT_AVATAR.src && saved.id !== DEFAULT_AVATAR.id)
   ) {
     return { ...DEFAULT_AVATAR };
@@ -72,6 +80,9 @@ type DeployConfig = {
   customAvatars?: AvatarMeta[];
   // 桌宠备注名（显示在聊天窗口顶部），缺省 Kirari。
   petName?: string;
+  // 用户（聊天中与桌宠对话的一方）自己的头像。仅存于本机 userData/user-avatar/，
+  // 不上传任何服务器；值为 useravatar:// 协议地址（指向本地文件），未设置则为 undefined。
+  userAvatar?: string;
   // 桌宠窗口位置（全局坐标）。由主进程在拖动结束/重置时持久化，启动时优先应用。
   window?: { x: number; y: number };
   // 机器人适配器配置（OneBot / QQ 官方机器人）。连接信息含令牌，仅存于本机 userData 配置。
@@ -115,6 +126,8 @@ function loadClientConfig(): DeployConfig {
         ),
         customAvatars: Array.isArray(raw.customAvatars) ? raw.customAvatars : [],
         petName: typeof raw.petName === "string" && raw.petName.trim() ? raw.petName.trim() : "Kirari",
+        // 用户头像：仅当是合法字符串时才采用，空值回退 undefined（回退到渐变占位头像）。
+        userAvatar: typeof raw.userAvatar === "string" && raw.userAvatar.trim() ? raw.userAvatar.trim() : undefined,
         adapters: Array.isArray(raw.adapters)
           ? raw.adapters.filter(
               (a: AdapterConfig) => a && typeof a.id === "string" && typeof a.type === "string",
@@ -326,19 +339,22 @@ const DEFAULT_SKIN_DIR = "kirari";
 // 主进程自动重新扫描并广播 avatar:changed，设置页无需手动刷新即可看到新形象。
 let avatarFolderWatcher: fs.FSWatcher | null = null;
 
-// 读取皮肤配置（frames.json）的元信息：渲染类型、显示名、作者、版本。
+// 读取皮肤配置（frames.json）的元信息：渲染类型、显示名、作者、版本、聊天头像。
 // 显示名优先取配置里的 `name`，缺省回退为文件夹名（fallbackName）。
+// chatAvatar 为皮肤文件夹内的图片文件名（如 "avatar.jpg"），由扫描方转成 avatar:// URL。
 type AvatarMetaInfo = {
-  type: "sprite" | "live2d";
+  type: "sprite" | "live2d" | "image";
   name: string;
   author?: string;
   version?: string;
+  chatAvatar?: string;
 };
 function readAvatarMeta(framesPath: string, fallbackName: string): AvatarMetaInfo {
   let name = fallbackName;
   let author: string | undefined;
   let version: string | undefined;
-  let type: "sprite" | "live2d" = "sprite";
+  let type: "sprite" | "live2d" | "image" = "sprite";
+  let chatAvatar: string | undefined;
   try {
     const parsed = JSON.parse(fs.readFileSync(framesPath, "utf8"));
     if (parsed && typeof parsed === "object") {
@@ -346,11 +362,20 @@ function readAvatarMeta(framesPath: string, fallbackName: string): AvatarMetaInf
       if (typeof parsed.author === "string" && parsed.author.trim()) author = parsed.author;
       if (typeof parsed.version === "string" && parsed.version.trim()) version = parsed.version;
       if (parsed.type === "live2d") type = "live2d";
+      if (parsed.type === "image") type = "image";
+      // 仅接受简单文件名（不允许路径分隔符，防止越权指向皮肤目录之外）
+      if (
+        typeof parsed.chatAvatar === "string" &&
+        parsed.chatAvatar.trim() &&
+        !/[\\/]/.test(parsed.chatAvatar)
+      ) {
+        chatAvatar = parsed.chatAvatar.trim();
+      }
     }
   } catch {
     /* 读取/解析失败则用默认值 */
   }
-  return { type, name, author, version };
+  return { type, name, author, version, chatAvatar };
 }
 
 // 官方皮肤资源源目录（打包进安装包的 resources/official-avatars，或开发期项目目录）。
@@ -690,6 +715,73 @@ ipcMain.handle("avatar:set", (_event, cfg: AvatarConfig) => {
   broadcastAvatar();
 });
 
+// ---- 用户（聊天中对话方）自己的头像：仅本地存储，不上传服务器 ----
+// 取当前头像（useravatar:// 协议地址或 null）。
+ipcMain.handle("user-avatar:get", () => clientConfig.userAvatar || null);
+
+// 选择图片 → 复制到 userData/user-avatar/ → 持久化 → 广播。返回协议地址或 null。
+ipcMain.handle("user-avatar:pick", async () => {
+  const result = await dialog.showOpenDialog(BrowserWindow.getFocusedWindow() ?? undefined, {
+    title: "选择你的头像",
+    properties: ["openFile"],
+    filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] }],
+  });
+  if (result.canceled || !result.filePaths[0]) return null;
+  const src = result.filePaths[0];
+  const dir = path.join(app.getPath("userData"), "user-avatar");
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    // 先清空旧文件，避免不同扩展名的残留图被误引用。
+    for (const f of fs.readdirSync(dir)) {
+      try {
+        fs.rmSync(path.join(dir, f), { force: true });
+      } catch {
+        /* 忽略单文件清理失败 */
+      }
+    }
+    const ext = path.extname(src).toLowerCase() || ".png";
+    const dest = path.join(dir, "avatar" + ext);
+    fs.copyFileSync(src, dest);
+    const url = "useravatar://avatar" + ext;
+    clientConfig.userAvatar = url;
+    saveClientConfig();
+    broadcastUserAvatar();
+    return url;
+  } catch (e) {
+    console.error("[main] user-avatar:pick 失败:", e);
+    return null;
+  }
+});
+
+// 移除头像：删除本地文件 + 清空配置 + 广播。返回 null。
+ipcMain.handle("user-avatar:clear", () => {
+  const dir = path.join(app.getPath("userData"), "user-avatar");
+  try {
+    if (fs.existsSync(dir)) {
+      for (const f of fs.readdirSync(dir)) {
+        try {
+          fs.rmSync(path.join(dir, f), { force: true });
+        } catch {
+          /* 忽略 */
+        }
+      }
+    }
+  } catch {
+    /* 目录清理失败不阻塞配置清除 */
+  }
+  clientConfig.userAvatar = undefined;
+  saveClientConfig();
+  broadcastUserAvatar();
+  return null;
+});
+
+// 广播用户头像变更给所有窗口（设置页与聊天窗口同步）。
+function broadcastUserAvatar() {
+  const url = clientConfig.userAvatar || null;
+  petWindow?.webContents?.send("user-avatar:changed", url);
+  chatWindow?.webContents?.send("user-avatar:changed", url);
+}
+
 // 递归确认 dir 内所有解压文件都落在 dir 之内（防止恶意压缩包 zip slip 路径穿越）。
 function allExtractedUnder(dir: string): boolean {
   let real: string;
@@ -794,6 +886,10 @@ function scanAvatarsIntoConfig(): void {
         version: meta.version,
         type: meta.type,
         src: `avatar://${encodeURIComponent(e.name)}/frames.json`,
+        // 「一套皮肤一个头像」：皮肤文件夹内的头像图经 avatar:// 协议对外服务
+        chatAvatar: meta.chatAvatar
+          ? `avatar://${encodeURIComponent(e.name)}/${encodeURIComponent(meta.chatAvatar)}`
+          : undefined,
         builtin: false,
       };
       const old = existingById.get(id);
@@ -803,7 +899,8 @@ function scanAvatarsIntoConfig(): void {
         old.author !== fresh.author ||
         old.version !== fresh.version ||
         old.type !== fresh.type ||
-        old.src !== fresh.src
+        old.src !== fresh.src ||
+        old.chatAvatar !== fresh.chatAvatar
       ) {
         changed = true;
       }
@@ -1911,6 +2008,18 @@ app.whenReady().then(async () => {
     try {
       const rel = decodeURIComponent(request.url.replace("avatar://", ""));
       callback({ filePath: path.join(app.getPath("userData"), "avatars", rel) });
+    } catch {
+      callback({ error: -100 });
+    }
+  });
+
+  // 注册 useravatar:// 协议，使存储在 userData/user-avatar/ 的「用户自己头像」
+  // 可被渲染进程（聊天窗口 user 侧）加载。图片完全在本地，不上传服务器。
+  protocol.registerFileProtocol("useravatar", (request, callback) => {
+    try {
+      const rel = decodeURIComponent(request.url.replace("useravatar://", ""));
+      const safe = rel.replace(/^(\.\.[/\\])+/, ""); // 防目录穿越
+      callback({ filePath: path.join(app.getPath("userData"), "user-avatar", safe) });
     } catch {
       callback({ error: -100 });
     }

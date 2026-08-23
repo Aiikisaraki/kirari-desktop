@@ -28,7 +28,7 @@ const emit = defineEmits<{
     "update:activeId": [id: string];
 }>();
 
-const versionTag = "0.3.1"; // 与 package.json 同步，发布时一齐改
+const versionTag = "0.6.0"; // 与 package.json 同步，发布时一齐改
 
 function resolveCount(c: Section["count"]): number | undefined {
     if (typeof c === "function") return c();
@@ -55,7 +55,7 @@ function go(id: string) {
             >
                 {{ greeting }}
             </p>
-            <p v-else class="settings-sidebar__title">⚙️ 分区导航</p>
+            <p v-else class="settings-sidebar__title">⚙️ 设置</p>
         </div>
         <div
             class="settings-sidebar__list"

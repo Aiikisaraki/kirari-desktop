@@ -3,7 +3,15 @@ import { ref } from "vue";
 
 export type ThemeName = "aurora-glass" | "pet-pink" | "mint-soft" | "lavender-mist";
 
-export const THEMES: { id: ThemeName; label: string; sub: string }[] = [
+export interface ThemeDef {
+  id: ThemeName;
+  label: string;
+  sub: string;
+}
+
+// 主题 = 外观风格（配色/毛玻璃质感），与角色皮肤（形象）完全解耦。
+// 「一套皮肤一个头像」的绑定在形象配置（AvatarConfig.chatAvatar）上，见 pet/avatar/builtins。
+export const THEMES: ThemeDef[] = [
   { id: "aurora-glass", label: "极光玻璃", sub: "Aurora Glass" },
   { id: "pet-pink", label: "樱粉", sub: "Pet Pink" },
   { id: "mint-soft", label: "薄荷嫩芽", sub: "Mint Soft" },
@@ -82,6 +90,7 @@ export const useThemeStore = defineStore("theme", () => {
 
   async function setTheme(name: ThemeName) {
     apply(name);
+
     const w = getWindow();
     try {
       if (w.windowApi?.setTheme) await w.windowApi.setTheme(name);

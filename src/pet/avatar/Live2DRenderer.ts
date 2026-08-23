@@ -1,4 +1,5 @@
 import type { AvatarConfig, AvatarRenderer, AvatarState } from "./types";
+import { getActiveRenderer, setActiveRenderer } from "./types";
 
 // Live2D 渲染器 —— 当前为占位实现（路线已规划、后期接入 Cubism Web SDK）。
 // 实现 AvatarRenderer 接口以保证框架一致性：切换 Live2D 形象时不会崩溃，
@@ -17,6 +18,7 @@ export class Live2DRenderer implements AvatarRenderer {
     canvas.width = 360;
     canvas.height = 480;
     this.ctx = canvas.getContext("2d");
+    setActiveRenderer(this);
     this.drawPlaceholder();
   }
 
@@ -29,11 +31,16 @@ export class Live2DRenderer implements AvatarRenderer {
     this.drawPlaceholder();
   }
 
+  getStateDurations(): Partial<Record<AvatarState, number>> {
+    return {};
+  }
+
   destroy(): void {
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
     this.ctx = null;
     this.canvas = null;
+    if (getActiveRenderer() === this) setActiveRenderer(null);
   }
 
   // 占位实现：Live2D 暂不做逐像素采样，整体按"实心"处理（不影响点穿逻辑，

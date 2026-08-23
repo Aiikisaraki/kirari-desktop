@@ -98,8 +98,8 @@ onMounted(load);
             <span>技能</span>
         </h3>
         <p class="settings-card__desc">
-            技能既可以是「行为模板」（注入模型系统指令，调整桌宠的语气/人设），也可以绑定「可调用工具」
-            （如 HTTP 接口）。启用中的技能会在对话时生效，其工具会被注册到后端供模型调用。
+            技能可以是「行为模板」（用来设定桌宠的语气和人设），也可以绑定「可调用工具」
+            （如 HTTP 接口）。启用后，技能会在对话中生效，它关联的工具也会被桌宠使用。
         </p>
 
         <div v-if="loading" class="settings-card__group">
@@ -176,7 +176,7 @@ onMounted(load);
                     />
                 </label>
                 <label class="field">
-                    <span class="field-label">行为模板（注入系统指令）</span>
+                    <span class="field-label">行为模板（设定桌宠的语气与人设）</span>
                     <textarea
                         v-model="editing.prompt"
                         class="text-input"
@@ -190,8 +190,7 @@ onMounted(load);
                     <span>启用该技能</span>
                 </label>
                 <p class="settings-hint">
-                    工具（可选）：当前内置示例技能已包含一个「回显」工具。如需自定义 HTTP
-                    工具，可在 <code>skills.json</code> 中手动添加 <code>tools</code> 字段。
+                    工具（可选）：内置示例已包含一个「回显」工具。如需自定义 HTTP 工具，可在技能配置文件中手动扩展。
                 </p>
                 <div class="btn-row">
                     <button

@@ -232,7 +232,7 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
           </label>
           <label class="provider-option">
             <input type="radio" value="qqofficial" v-model="formType" />
-            <span>QQ 官方机器人（第二阶段）</span>
+            <span>QQ 官方机器人（即将支持）</span>
           </label>
         </div>
       </div>
@@ -261,7 +261,7 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
           <label class="field-label" for="ad-secret">Client Secret</label>
           <input id="ad-secret" v-model="formSecret" class="text-input" type="password" placeholder="QQ 开放平台密钥" />
         </div>
-        <p class="settings-hint">QQ 官方机器人收发逻辑将在第二阶段接入，此处仅登记配置。</p>
+        <p class="settings-hint">QQ 官方机器人功能即将上线，此处可先登记配置。</p>
       </template>
 
       <div v-if="formError" class="settings-error">{{ formError }}</div>

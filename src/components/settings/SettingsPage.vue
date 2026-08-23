@@ -11,6 +11,8 @@ import ModelConfigSettings from "./ModelConfigSettings.vue";
 import BotAdapterSettings from "./BotAdapterSettings.vue";
 import McpSettings from "./McpSettings.vue";
 import SkillSettings from "./SkillSettings.vue";
+import KnowledgeSettings from "./KnowledgeSettings.vue";
+import ProfileSettings from "./ProfileSettings.vue";
 import { useApiToken } from "../../composables/useApiToken";
 import { SETTINGS_CONTEXT, type SettingsContext } from "./settingsContext";
 
@@ -41,12 +43,16 @@ const activeComponent = computed(() => {
             return PersonaSettings;
         case "account":
             return AccountSettings;
+        case "profile":
+            return ProfileSettings;
         case "model":
             return ModelConfigSettings;
         case "mcp":
             return McpSettings;
         case "skill":
             return SkillSettings;
+        case "knowledge":
+            return KnowledgeSettings;
         case "bot":
             return BotAdapterSettings;
         default:
@@ -158,6 +164,7 @@ const sections = computed(() => {
         { id: "appearance", label: "外观", emoji: "🎨", hint: "主题与视觉风格" },
         { id: "general", label: "通用", emoji: "✨", hint: "备注名与开机自启" },
         { id: "avatar", label: "形象", emoji: "🐾", hint: "桌宠精灵" },
+        { id: "profile", label: "个人", emoji: "👤", hint: "我的头像" },
         { id: "persona", label: "人格", emoji: "🎭", hint: "自定义基础人格" },
     ];
     if (mode.value === "remote")
@@ -166,6 +173,7 @@ const sections = computed(() => {
         { id: "model", label: "模型", emoji: "🧠", hint: "大模型与联网搜索" },
         { id: "mcp", label: "MCP", emoji: "🔌", hint: "MCP 服务器" },
         { id: "skill", label: "技能", emoji: "🧩", hint: "行为模板与工具" },
+        { id: "knowledge", label: "知识库", emoji: "📚", hint: "私人知识库（每日补充）" },
         { id: "bot", label: "机器人", emoji: "🤖", hint: "QQ / OneBot 接入" },
     );
     return list;

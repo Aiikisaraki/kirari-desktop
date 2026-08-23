@@ -7,7 +7,7 @@ import type { AvatarState } from '../../pet/avatar/types'
 import PetAvatar from './PetAvatar.vue'
 import PetBubble from './PetBubble.vue'
 import PetQuickMenu from './PetQuickMenu.vue'
-import { getActiveSpriteRenderer } from '../../pet/avatar/SpriteRenderer'
+import { getActiveRenderer } from '../../pet/avatar/types'
 type DesktopPetChannel =
   | 'desktop-pet:drag-start'
   | 'desktop-pet:drag-move'
@@ -367,7 +367,7 @@ function evaluateClickThrough(clientX: number, clientY: number) {
   if (!ipcRenderer) return
   // 提前取到画布 / 渲染器 / 布局，命中测试与诊断日志共用同一份计算结果。
   const canvas = document.querySelector(".pet-canvas") as HTMLCanvasElement | null
-  const r = getActiveSpriteRenderer()
+  const r = getActiveRenderer()
   const rect = canvas ? canvas.getBoundingClientRect() : null
   let lx = 0
   let ly = 0

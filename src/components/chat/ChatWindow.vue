@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useChatSocket } from "../../composables/useChatSocket";
+import { useAvatarStore } from "../../stores/avatar";
+import { useUserProfileStore } from "../../stores/userProfile";
+import { resolveChatAvatar } from "../../pet/avatar/builtins";
 import { renderMarkdownMath } from "../../utils/renderMarkdownMath";
 import { toMediaList } from "../../utils/media";
 import WindowChrome from "../common/WindowChrome.vue";
@@ -9,6 +12,15 @@ import type { ChatMessage } from "../../stores/chat";
 
 const { connected, messages, lastError, waitingForReply, requestState, sendMessage } =
     useChatSocket();
+
+// 形象（皮肤）：「一套皮肤一个头像」——当前皮肤携带 chatAvatar 时，
+// 聊天头部与消息流的 pet 头像渲染该图片；否则回退为首字母占位。
+const avatarStore = useAvatarStore();
+const petAvatarSrc = computed(() => resolveChatAvatar(avatarStore.current));
+
+// 用户（对话方）自己的头像：设置后聊天窗口 user 侧渲染该图，否则回退渐变占位。
+const userProfileStore = useUserProfileStore();
+const userAvatarSrc = computed(() => userProfileStore.avatar);
 
 const draft = ref("");
 const fileInput = ref<HTMLInputElement | null>(null);
@@ -76,6 +88,8 @@ function formatTime(ts: number): string {
 onMounted(() => {
     void requestState();
     void loadPetName();
+    void avatarStore.init();
+    void userProfileStore.init();
 });
 
 const windowTitle = computed(() => `和 ${petName.value || "Kirari"} 聊天`);
@@ -407,7 +421,8 @@ async function saveImage(src: string) {
             <header class="chat-header">
                 <div class="chat-peer">
                     <div class="chat-avatar" :class="{ poking: petPoked }" aria-hidden="true">
-                        {{ petNameInitial }}
+                        <img v-if="petAvatarSrc" class="chat-avatar-img" :src="petAvatarSrc" alt="" />
+                        <template v-else>{{ petNameInitial }}</template>
                     </div>
                     <div class="chat-peer-info">
                         <div class="chat-peer-name">{{ petName || "Kirari" }}</div>
@@ -445,7 +460,17 @@ async function saveImage(src: string) {
                         :class="`is-${item.message!.author}`"
                     >
                         <div class="msg-avatar" aria-hidden="true">
-                            {{ item.message!.author === "user" ? "你" : petNameInitial }}
+                            <img
+                                v-if="item.message!.author === 'user' && userAvatarSrc"
+                                class="msg-avatar-img"
+                                :src="userAvatarSrc"
+                                alt=""
+                            />
+                            <template v-else-if="item.message!.author === 'user'">你</template>
+                            <template v-else-if="petAvatarSrc">
+                                <img class="msg-avatar-img" :src="petAvatarSrc" alt="" />
+                            </template>
+                            <template v-else>{{ petNameInitial }}</template>
                         </div>
                         <div class="msg-col">
                             <div
@@ -498,7 +523,10 @@ async function saveImage(src: string) {
 
                 <!-- 思考中：以 pet 行呈现，头像 + 气泡 -->
                 <div v-if="waitingForReply" class="msg-row is-pet">
-                    <div class="msg-avatar" aria-hidden="true">{{ petNameInitial }}</div>
+                    <div class="msg-avatar" aria-hidden="true">
+                        <img v-if="petAvatarSrc" class="msg-avatar-img" :src="petAvatarSrc" alt="" />
+                        <template v-else>{{ petNameInitial }}</template>
+                    </div>
                     <div class="msg-col">
                         <div class="msg-bubble msg-waiting" role="status" aria-live="polite">
                             <span class="msg-waiting-dot" aria-hidden="true"></span>
@@ -826,6 +854,16 @@ async function saveImage(src: string) {
 
 .msg-row.is-user .msg-avatar {
     background: linear-gradient(135deg, #9aa3b5, #7c8597);
+}
+
+/* 「一套皮肤一个头像」：皮肤携带 chatAvatar 时渲染图片（圆形裁切、覆盖渐变底色） */
+.chat-avatar-img,
+.msg-avatar-img {
+    width: 100%;
+    height: 100%;
+    display: block;
+    border-radius: 50%;
+    object-fit: cover;
 }
 
 .msg-col {

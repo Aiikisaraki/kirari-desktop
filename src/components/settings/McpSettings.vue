@@ -80,7 +80,7 @@ async function toggle(s: McpServer) {
 async function persist() {
     try {
         await (window as any).mcpApi.save(servers.value);
-        toast.success("MCP 配置已保存，工具已重新注册到后端");
+        toast.success("MCP 配置已保存，工具已更新");
     } catch (e) {
         toast.error("保存失败");
     }
@@ -96,8 +96,8 @@ onMounted(load);
             <span>MCP 服务器</span>
         </h3>
         <p class="settings-card__desc">
-            连接 MCP（Model Context Protocol）服务器，把它们的工具暴露给后端模型调用。支持 HTTP
-            (streamable) 与 stdio 两种传输方式。启用中的服务器会在连接时自动把工具注册到桌宠。
+            连接 MCP（Model Context Protocol）服务器，使用它们提供的工具。支持 HTTP
+            与本地命令（stdio）两种接入方式。启用后，服务器提供的工具会在桌宠对话中可用。
         </p>
 
         <div v-if="loading" class="settings-card__group">

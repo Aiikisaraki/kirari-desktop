@@ -88,6 +88,14 @@ contextBridge.exposeInMainWorld("windowApi", {
     source: string,
   ): Promise<{ ok: boolean; error?: string; canceled?: boolean }> =>
     ipcRenderer.invoke("chat:save-image-as", source),
+  // 用户（聊天对话方）头像：仅本地存储，不上传服务器。
+  // 选择图片 / 读取当前 / 移除 / 订阅变更广播。
+  getUserAvatar: (): Promise<string | null> => ipcRenderer.invoke("user-avatar:get"),
+  pickUserAvatar: (): Promise<string | null> => ipcRenderer.invoke("user-avatar:pick"),
+  clearUserAvatar: (): Promise<void> => ipcRenderer.invoke("user-avatar:clear"),
+  onUserAvatarChanged: (cb: (url: string | null) => void): void => {
+    ipcRenderer.on("user-avatar:changed", (_event, url: string | null) => cb(url));
+  },
 });
 
 // 机器人适配器（OneBot / QQ 官方机器人）管理接口
