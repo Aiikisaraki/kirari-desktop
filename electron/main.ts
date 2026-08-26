@@ -1890,13 +1890,15 @@ setInterval(() => {
   if (!petWindow || petWindow.isDestroyed()) return;
   const cursor = screen.getCursorScreenPoint();
   const b = petWindow.getBounds();
-  // 关键修复：screen.getCursorScreenPoint() 返回物理像素，getBounds() 返回逻辑像素。
-  // 必须按光标所在显示器的 scaleFactor 把光标换算成逻辑像素，再与 getBounds 相减，
-  // 否则高 DPI 下坐标被放大，命中测试整片错位/越界 → 永久点穿。
-  const disp = screen.getDisplayNearestPoint(cursor);
-  const scale = disp?.scaleFactor || 1;
-  const lx = cursor.x / scale - b.x;
-  const ly = cursor.y / scale - b.y;
+  // Electron 官方文档明确：screen.getCursorScreenPoint() 返回的是 DIP（逻辑像素），
+  // 与 getBounds() 同坐标系，可直接相减得到「光标相对窗口的逻辑偏移」，供渲染进程
+  // 配合 getBoundingClientRect 做命中测试（渲染端坐标同为 DIP）。原实现误以为它返回
+  // 物理像素而对坐标除以 scaleFactor，导致任意非 100% 缩放（125%/150%/200%…）时把坐标
+  // 错误缩小：命中测试采样点偏移、落到角色透明留白 → 窗口被永久设为鼠标穿透
+  // （点不到、拖不动）。不同角色皮肤的留白布局不同，有的机器坐标偏移后仍落在实心区会
+  // 「碰巧正常」，有的机器则暴露此 bug。这里去掉多余的 /scale，直接相减即可。
+  const lx = cursor.x - b.x;
+  const ly = cursor.y - b.y;
   // 坐标无变化则跳过，避免无谓 IPC 抖动
   if (lx === lastCursorSent.x && ly === lastCursorSent.y) return;
   lastCursorSent = { x: lx, y: ly };
