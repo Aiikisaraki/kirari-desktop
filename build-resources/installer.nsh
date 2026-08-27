@@ -135,21 +135,21 @@ Function ModelConfigShow
 
   ; ── API Endpoint（标签与输入框同行，节省垂直空间） ────────
   ${NSD_CreateLabel}   0 40u   75u 12u "API Endpoint："
-  ${NSD_CreateText}    78u 38u  180u 14u "https://api.chatanywhere.tech/v1"
+  ${NSD_CreateText}    78u 38u  180u 16u "https://api.chatanywhere.tech/v1"
   Pop $ModelCfgEndpointBox
 
   ; ── 模型名称 ─────────────────────────────────────────────────
-  ${NSD_CreateLabel}   0 58u   75u 12u "模型名称："
-  ${NSD_CreateText}    78u 56u  180u 14u "gpt-5.4-mini"
+  ${NSD_CreateLabel}   0 60u   75u 12u "模型名称："
+  ${NSD_CreateText}    78u 58u  180u 16u "gpt-5.4-mini"
   Pop $ModelCfgModelBox
 
-  ; ── API Key（显式宽度 180u，避免 100% 宽度在部分 DPI/主题下溢出导致不可见） ──
-  ${NSD_CreateLabel}   0 76u   75u 12u "API Key："
-  ${NSD_CreatePassword}78u 74u  180u 14u ""
+  ; ── API Key（明文文本框；NSD_CreatePassword 在部分环境下不可见，安装时仅本人可见） ──
+  ${NSD_CreateLabel}   0 80u   75u 12u "API Key："
+  ${NSD_CreateText}    78u 78u  180u 16u ""
   Pop $ModelCfgKeyBox
 
-  ; ── 跳过勾选框（压缩纵向间距，确保密钥框与勾选框均在可见区域内） ──
-  ${NSD_CreateCheckBox} 0 96u   100% 12u "跳过，稍后再配置"
+  ; ── 跳过勾选框（拉大纵向间距，确保所有控件在可见区域内） ──
+  ${NSD_CreateCheckBox} 0 104u   100% 12u "跳过，稍后再配置"
   Pop $ModelCfgSkipBox
 
   nsDialogs::Show
