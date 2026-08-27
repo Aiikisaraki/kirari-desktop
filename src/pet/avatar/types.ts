@@ -3,7 +3,23 @@
 // 不关心底层是精灵帧（SpriteRenderer）还是 Live2D（Live2DRenderer）。
 // 这样即可在同一套框架下支持多种形象，并允许用户上传自定义精灵形象。
 
-export type AvatarState = "idle" | "blink" | "speak" | "wave" | "happy" | "sleepy";
+export type AvatarState =
+  | "idle"
+  | "blink"
+  | "speak"
+  | "wave"
+  | "happy"
+  | "sleepy"
+  // —— 以下为新增情绪/动作动画（对应 frames.json 中新增的精灵表）——
+  | "bow" // 鞠躬
+  | "excited" // 兴奋
+  | "nod" // 点头
+  | "sad" // 伤心
+  | "shake" // 摇头
+  | "shy" // 害羞
+  | "stretch" // 伸懒腰
+  | "surprised" // 惊讶
+  | "thinking"; // 思考
 
 export type AvatarType = "sprite" | "live2d" | "image";
 
