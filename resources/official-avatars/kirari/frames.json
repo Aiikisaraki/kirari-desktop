@@ -3,6 +3,7 @@
   "name": "Aki Kirari",
   "author": "Aki",
   "version": "1.1.0",
+  "chatAvatar": "kirari.jpg",
   "idle": {
     "sheet": "idle.png",
     "frameW": 360,

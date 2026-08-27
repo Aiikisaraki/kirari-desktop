@@ -33,7 +33,9 @@ type AvatarConfig = {
   type: "sprite" | "live2d" | "image";
   src: string;
   // 这套皮肤对应的聊天头像图（「一套皮肤一个头像」）。
-  // 内置皮肤指向打包进 dist 的 /avatars/<name>.jpg；自定义皮肤为 avatar://<皮肤目录>/<文件名>。
+  // 由皮肤的 frames.json 顶层 "chatAvatar" 字段声明（皮肤目录内的图片文件名，
+  // 如 "kirari.jpg"），运行时经 avatar://<皮肤目录>/<文件名> 协议对外服务。
+  // 因此换一套皮肤，头像随之变化；此处不硬编码任何图片路径。
   chatAvatar?: string;
   scale?: number;
   id?: string;
@@ -51,13 +53,15 @@ const DEFAULT_AVATAR: AvatarConfig = {
   version: "1.0.0",
   type: "sprite",
   src: `avatar://${encodeURIComponent(DEFAULT_SKIN_DIR)}/frames.json`,
-  // 默认皮肤的聊天头像：浅蓝发 Kirari 立绘（public/avatars/kirari.jpg）
-  chatAvatar: "/avatars/kirari.jpg",
+  // 不再硬编码聊天头像：头像图随皮肤打包进 userData/avatars/<皮肤>/，由 frames.json 的
+  // chatAvatar 字段声明，启动时经扫描同步到当前形象（见 syncCurrentAvatarFromScan）。
 };
 
 // 兼容旧版持久化：把旧默认形象（id=kirari-sprite / src=pet://frames.json，
 // 以及历史上误把默认形象写成 image 型 aurora-kirari 的版本）
 // 迁移到当前默认形象（Kirari 精灵皮肤），避免下拉框选不中当前形象。
+// 注意：聊天头像不再硬编码，旧值（/avatars/xxx.jpg、avatars/xxx.jpg）会被
+// syncCurrentAvatarFromScan 用皮肤目录里的真实头像覆盖。
 function migrateLegacyAvatar(saved: AvatarConfig): AvatarConfig {
   if (
     saved.id === "kirari-sprite" ||
@@ -388,18 +392,18 @@ function getOfficialAvatarsSource(): string {
   return candidates.find((p) => fs.existsSync(p)) ?? candidates[0];
 }
 
-// 默认（官方）皮肤兜底：扫描 userData/avatars，若没有任何含 frames.json 的皮肤目录，
-// 则从「打包进来的官方皮肤源」复制一次。生产环境源为 process.resourcesPath/official-avatars
-// （extraResources 打包进安装包）；开发环境源为项目 resources/official-avatars。
-// 仅当目标缺失时复制一次，绝不覆盖用户已存在的皮肤 —— 满足「只复制一次、不每次替换」。
+// 默认（官方）皮肤兜底：把「打包进来的官方皮肤源」同步到 userData/avatars。
+// 生产环境源为 process.resourcesPath/official-avatars（extraResources 打包进安装包）；
+// 开发环境源为项目 resources/official-avatars。
+// 策略：
+//   - 目标皮肤目录不存在 → 整目录复制（首次安装）。
+//   - 目标已存在（升级/重装场景）→ 增量合并：补官方源新增的动画字段（如本次新增的
+//     bow/excited/... 9 个状态、chatAvatar 等）与缺失的图片文件，绝不删除用户自定义文件
+//     或覆盖用户已修改的 frames.json 字段，满足「升级也能拿到新内容、且不破坏自定义」。
 function ensureDefaultAvatars(): void {
   try {
     const destRoot = getAvatarsRoot();
     fs.mkdirSync(destRoot, { recursive: true });
-    const hasAnySkin = fs
-      .readdirSync(destRoot, { withFileTypes: true })
-      .some((e) => e.isDirectory() && fs.existsSync(path.join(destRoot, e.name, "frames.json")));
-    if (hasAnySkin) return; // 已有皮肤则不复制，避免覆盖用户自定义
     const srcRoot = getOfficialAvatarsSource();
     if (!fs.existsSync(srcRoot)) {
       console.warn("[avatar] 未找到官方皮肤源，跳过默认皮肤复制:", srcRoot);
@@ -408,12 +412,55 @@ function ensureDefaultAvatars(): void {
     for (const e of fs.readdirSync(srcRoot, { withFileTypes: true })) {
       if (!e.isDirectory()) continue;
       const srcDir = path.join(srcRoot, e.name);
-      if (!fs.existsSync(path.join(srcDir, "frames.json"))) continue;
-      fs.cpSync(srcDir, path.join(destRoot, e.name), { recursive: true });
-      console.log("[avatar] 已复制默认皮肤到:", path.join(destRoot, e.name));
+      const srcFrames = path.join(srcDir, "frames.json");
+      if (!fs.existsSync(srcFrames)) continue;
+      const destDir = path.join(destRoot, e.name);
+      const destFrames = path.join(destDir, "frames.json");
+      if (!fs.existsSync(destFrames)) {
+        fs.cpSync(srcDir, destDir, { recursive: true });
+        console.log("[avatar] 已复制默认皮肤到:", destDir);
+      } else {
+        // 已存在 → 增量合并（补缺失图片 + 补 frames.json 新增顶层字段）
+        mergeBuiltinSkin(srcDir, destDir, srcFrames, destFrames);
+      }
     }
   } catch (e) {
     console.error("[avatar] 默认皮肤复制失败:", e);
+  }
+}
+
+// 增量合并内置皮肤：把官方源里目标缺失的图片文件复制过去，并把官方 frames.json 中
+// 目标 frames.json 没有的顶层字段（动画声明、chatAvatar 等）补进去；不覆盖不删除既有内容。
+function mergeBuiltinSkin(srcDir: string, destDir: string, srcFrames: string, destFrames: string): void {
+  try {
+    // 1) 复制官方源有、但目标缺失的资源文件（图片/子目录）。已存在的文件不覆盖。
+    for (const f of fs.readdirSync(srcDir)) {
+      if (f.toLowerCase() === "frames.json") continue; // 单独合并
+      const srcFile = path.join(srcDir, f);
+      const destFile = path.join(destDir, f);
+      if (fs.existsSync(destFile)) continue;
+      try {
+        fs.cpSync(srcFile, destFile, { recursive: true });
+      } catch {
+        /* 忽略单个文件复制失败 */
+      }
+    }
+    // 2) 合并 frames.json 顶层字段：官方源有、目标没有的字段补进去。
+    const srcMeta = JSON.parse(fs.readFileSync(srcFrames, "utf8"));
+    const destMeta = JSON.parse(fs.readFileSync(destFrames, "utf8"));
+    let changed = false;
+    for (const key of Object.keys(srcMeta)) {
+      if (!(key in destMeta)) {
+        destMeta[key] = srcMeta[key];
+        changed = true;
+      }
+    }
+    if (changed) {
+      fs.writeFileSync(destFrames, JSON.stringify(destMeta, null, 2));
+      console.log("[avatar] 已为默认皮肤合并新增字段:", destFrames);
+    }
+  } catch (e) {
+    console.error("[avatar] 默认皮肤增量合并失败:", e);
   }
 }
 
@@ -915,6 +962,52 @@ function scanAvatarsIntoConfig(): void {
     }
   } catch (e) {
     console.error("[avatar] 启动扫描失败:", e);
+  }
+}
+
+// 把「当前形象」的动态字段（头像、渲染类型、显示名等）与扫描到的皮肤元信息对齐。
+// 头像由皮肤的 frames.json.chatAvatar 声明，经 avatar:// 协议对外服务；换一套皮肤时，
+// clientConfig.avatar 的 id 随之变化、这里同步出新头像，从而「换皮肤 → 头像变化」生效。
+// 旧持久化里残留的硬编码头像路径（/avatars/ 或 avatars/ 开头）视为无效，强制用皮肤真实值覆盖。
+function syncCurrentAvatarFromScan(): void {
+  try {
+    const cur = clientConfig.avatar;
+    if (!cur || !cur.id) return;
+    const match = (clientConfig.customAvatars || []).find((a) => a.id === cur.id);
+    if (!match) return;
+    const isLegacyHardcoded =
+      typeof cur.chatAvatar === "string" && /^\/?avatars\/[^/]+$/i.test(cur.chatAvatar);
+    const next: AvatarConfig = { ...cur };
+    let changed = false;
+    const keys: (keyof AvatarMeta)[] = ["chatAvatar", "src", "name", "type", "author", "version"];
+    for (const key of keys) {
+      const freshVal = match[key];
+      if (key === "chatAvatar") {
+        // 旧硬编码值直接丢弃；否则以皮肤声明为准（缺省则沿用当前值）
+        if (isLegacyHardcoded) {
+          if (freshVal !== cur.chatAvatar) {
+            next.chatAvatar = freshVal;
+            changed = true;
+          }
+          continue;
+        }
+        if (typeof freshVal === "string" && freshVal !== cur.chatAvatar) {
+          next.chatAvatar = freshVal;
+          changed = true;
+        }
+        continue;
+      }
+      if (freshVal !== undefined && freshVal !== (cur as Record<string, unknown>)[key as string]) {
+        (next as Record<string, unknown>)[key as string] = freshVal;
+        changed = true;
+      }
+    }
+    if (changed) {
+      clientConfig.avatar = next;
+      saveClientConfig();
+    }
+  } catch (e) {
+    console.error("[avatar] 当前形象与扫描同步失败:", e);
   }
 }
 
@@ -2118,6 +2211,10 @@ app.whenReady().then(async () => {
     clientConfig.avatar = { ...DEFAULT_AVATAR };
     saveClientConfig();
   }
+
+  // 把当前形象的动态字段（含聊天头像）与扫描到的皮肤配置对齐：
+  // 头像由 skin 目录的 frames.json.chatAvatar 声明，换皮肤即换头像。
+  syncCurrentAvatarFromScan();
 
   let res = await checkBackendHealth();
   chatSessionStoragePath = resolveChatStoragePath();

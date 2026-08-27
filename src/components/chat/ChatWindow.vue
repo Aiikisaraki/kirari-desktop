@@ -16,7 +16,22 @@ const { connected, messages, lastError, waitingForReply, requestState, sendMessa
 // 形象（皮肤）：「一套皮肤一个头像」——当前皮肤携带 chatAvatar 时，
 // 聊天头部与消息流的 pet 头像渲染该图片；否则回退为首字母占位。
 const avatarStore = useAvatarStore();
-const petAvatarSrc = computed(() => resolveChatAvatar(avatarStore.current));
+// 头像回退标记：皮肤声明了 chatAvatar 但图片加载失败（文件缺失/404）时置位，
+// 让 petAvatarSrc 退化为 undefined，渲染层据此显示首字母而不是破图。
+const petAvatarBroken = ref(false);
+const petAvatarSrc = computed(() =>
+  petAvatarBroken.value ? undefined : resolveChatAvatar(avatarStore.current),
+);
+// 切换皮肤时重置「加载失败」标记，否则旧皮肤的失败状态会污染新皮肤。
+watch(
+  () => avatarStore.current,
+  () => {
+    petAvatarBroken.value = false;
+  },
+);
+function onPetAvatarError() {
+  petAvatarBroken.value = true;
+}
 
 // 用户（对话方）自己的头像：设置后聊天窗口 user 侧渲染该图，否则回退渐变占位。
 const userProfileStore = useUserProfileStore();
@@ -421,7 +436,7 @@ async function saveImage(src: string) {
             <header class="chat-header">
                 <div class="chat-peer">
                     <div class="chat-avatar" :class="{ poking: petPoked }" aria-hidden="true">
-                        <img v-if="petAvatarSrc" class="chat-avatar-img" :src="petAvatarSrc" alt="" />
+                        <img v-if="petAvatarSrc" class="chat-avatar-img" :src="petAvatarSrc" alt="" @error="onPetAvatarError" />
                         <template v-else>{{ petNameInitial }}</template>
                     </div>
                     <div class="chat-peer-info">
@@ -468,7 +483,7 @@ async function saveImage(src: string) {
                             />
                             <template v-else-if="item.message!.author === 'user'">你</template>
                             <template v-else-if="petAvatarSrc">
-                                <img class="msg-avatar-img" :src="petAvatarSrc" alt="" />
+                                <img class="msg-avatar-img" :src="petAvatarSrc" alt="" @error="onPetAvatarError" />
                             </template>
                             <template v-else>{{ petNameInitial }}</template>
                         </div>
@@ -524,7 +539,7 @@ async function saveImage(src: string) {
                 <!-- 思考中：以 pet 行呈现，头像 + 气泡 -->
                 <div v-if="waitingForReply" class="msg-row is-pet">
                     <div class="msg-avatar" aria-hidden="true">
-                        <img v-if="petAvatarSrc" class="msg-avatar-img" :src="petAvatarSrc" alt="" />
+                        <img v-if="petAvatarSrc" class="msg-avatar-img" :src="petAvatarSrc" alt="" @error="onPetAvatarError" />
                         <template v-else>{{ petNameInitial }}</template>
                     </div>
                     <div class="msg-col">

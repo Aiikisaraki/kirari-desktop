@@ -64,7 +64,8 @@ export interface AvatarConfig {
   // image: 静态图片的 URL
   src: string;
   // 这套皮肤对应的聊天头像图（聊天窗口头部与消息流里显示的小头像）。
-  // 内置皮肤指向 /avatars/<name>.jpg；自定义皮肤为 avatar://<皮肤目录>/<文件名>。
+  // 由皮肤的 frames.json 顶层 "chatAvatar" 字段声明（皮肤目录内的图片文件名），
+  // 运行时经 avatar://<皮肤目录>/<文件名> 协议对外服务；换皮肤即换头像。
   chatAvatar?: string;
   scale?: number;
   // 仅用于列表展示 / 持久化（以下字段不参与渲染）
