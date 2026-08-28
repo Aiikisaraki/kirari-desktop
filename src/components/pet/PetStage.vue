@@ -398,6 +398,12 @@ onMounted(() => {
   // 主进程每 20ms 轮询一次光标位置并广播到本窗口；这里注册接收器做判定。
   // 不依赖渲染进程能否读取 screen / 能否接收鼠标事件，彻底规避死锁。
   ipcRenderer?.on('desktop-pet:cursor', onCursorPos)
+  // 上报视口尺寸 / dpr 供主进程诊断坐标空间（见 main.ts 的 [renderer-diag]）。
+  ipcRenderer?.send('desktop-pet:diag', {
+    innerW: window.innerWidth,
+    innerH: window.innerHeight,
+    dpr: window.devicePixelRatio,
+  })
 })
 
 onBeforeUnmount(() => {

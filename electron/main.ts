@@ -1788,6 +1788,19 @@ function createWindow() {
   });
 
   petWindow = win;
+  // 关键修复：透明无边框窗口在 Windows 高 DPI 下，DWM 会在 setPosition 时错误地放大窗口。
+  // setMinimumSize/setMaximumSize 在透明窗口上被 DWM 忽略（Electron 已知 bug），所以
+  // 改用 resize 事件兜底：一旦窗口被撑大，立即用 setBounds 拉回目标尺寸。
+  const targetSize = { width: petWindowSize.width, height: petWindowSize.height };
+  
+  win.on("resize", () => {
+    const b = win.getBounds();
+    // 只要尺寸偏离目标（容忍 ±0px，因为 DWM 每帧都在尝试放大），立即强制拉回。
+    // 用 setBounds 同时改位置+尺寸，避免单独 setSize 又触发 DWM 坐标重算。
+    if (b.width !== targetSize.width || b.height !== targetSize.height) {
+      win.setBounds({ x: b.x, y: b.y, width: targetSize.width, height: targetSize.height }, false);
+    }
+  });
   // 优先恢复持久化位置；坐标无效（如屏幕外）则回退默认右下角。
   const saved = clientConfig.window;
   if (saved && isPositionOnScreen(saved.x, saved.y, petWindowSize.width, petWindowSize.height)) {
@@ -1937,6 +1950,8 @@ ipcMain.on("desktop-pet:drag-start", (event) => {
   if (!win) return;
 
   const [x, y] = win.getPosition();
+  // screen.getCursorScreenPoint() 与 win.getPosition()/getBounds() 同为 DIP（逻辑像素），
+  // 直接相减即可，不要按 scaleFactor 换算。下方点穿轮询同此坐标系。
   const pointerStart = screen.getCursorScreenPoint();
   dragState = {
     windowId: win.id,
@@ -1950,10 +1965,10 @@ ipcMain.on("desktop-pet:drag-move", (event) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win || !dragState || dragState.windowId !== win.id) return;
 
-  const pointer = screen.getCursorScreenPoint();
-  const nextX = Math.round(dragState.windowStart.x + pointer.x - dragState.pointerStart.x);
-  const nextY = Math.round(dragState.windowStart.y + pointer.y - dragState.pointerStart.y);
-
+  // 光标与窗口位置同为 DIP，直接相减（不除 scaleFactor）。
+  const cursor = screen.getCursorScreenPoint();
+  const nextX = Math.round(dragState.windowStart.x + cursor.x - dragState.pointerStart.x);
+  const nextY = Math.round(dragState.windowStart.y + cursor.y - dragState.pointerStart.y);
   win.setPosition(nextX, nextY, false);
 });
 
@@ -1962,6 +1977,11 @@ ipcMain.on("desktop-pet:drag-end", (event) => {
   dragState = null;
   // 拖动结束：把最终位置持久化，下次启动恢复。
   if (win) persistWindowPosition(win);
+});
+
+// 渲染进程上报视口尺寸 / dpr，用于坐实「窗口内坐标」与「光标坐标」是否同一坐标系。
+ipcMain.on("desktop-pet:diag", (_event, d) => {
+  console.log("[renderer-diag] innerW=", d?.innerW, "innerH=", d?.innerH, "dpr=", d?.dpr);
 });
 
 // 逐像素点穿：渲染进程按光标处像素 alpha 判定后，通知主进程切换窗口的鼠标穿透。
@@ -1983,13 +2003,10 @@ setInterval(() => {
   if (!petWindow || petWindow.isDestroyed()) return;
   const cursor = screen.getCursorScreenPoint();
   const b = petWindow.getBounds();
-  // Electron 官方文档明确：screen.getCursorScreenPoint() 返回的是 DIP（逻辑像素），
-  // 与 getBounds() 同坐标系，可直接相减得到「光标相对窗口的逻辑偏移」，供渲染进程
-  // 配合 getBoundingClientRect 做命中测试（渲染端坐标同为 DIP）。原实现误以为它返回
-  // 物理像素而对坐标除以 scaleFactor，导致任意非 100% 缩放（125%/150%/200%…）时把坐标
-  // 错误缩小：命中测试采样点偏移、落到角色透明留白 → 窗口被永久设为鼠标穿透
-  // （点不到、拖不动）。不同角色皮肤的留白布局不同，有的机器坐标偏移后仍落在实心区会
-  // 「碰巧正常」，有的机器则暴露此 bug。这里去掉多余的 /scale，直接相减即可。
+  // screen.getCursorScreenPoint() 与 getBounds() 同为 DIP（逻辑像素），同坐标系直接相减，
+  // 得到「光标相对窗口的逻辑偏移」，供渲染进程配合 getBoundingClientRect 做命中测试。
+  // 注意：不要按 scaleFactor 换算——二者本就在同一坐标系，多除一次 scale 会让高 DPI 下
+  // 坐标被错误缩小/缩放，命中测试整片错位/越界 → 窗口被永久点穿（点不到、拖不动）。
   const lx = cursor.x - b.x;
   const ly = cursor.y - b.y;
   // 坐标无变化则跳过，避免无谓 IPC 抖动
