@@ -2254,11 +2254,13 @@ app.whenReady().then(async () => {
   // 启动形象目录监听：用户直接向形象文件夹增删皮肤时自动刷新设置页与桌宠窗口。
   startAvatarFolderWatch();
 
-  // 兼容旧版持久化 + 兜底校验：默认形象若指向旧 pet:// 协议、旧 id，或当前形象
-  // 已不在扫描后的形象列表中，则回退到默认形象，避免下拉框选不中。
+  // 兼容旧版持久化 + 兜底校验：默认形象若指向旧 pet:// 协议、旧 id、当前形象
+  // 已不在扫描后的形象列表中、或 config.json 里根本没存过形象（首次启动/卸载重装），
+  // 则初始化/回退到默认形象，避免下拉框选不中或 syncCurrentAvatarFromScan 因 undefined 跳过。
   const registeredIds = new Set((clientConfig.customAvatars || []).map((a) => a.id));
   const current = clientConfig.avatar || DEFAULT_AVATAR;
   if (
+    !clientConfig.avatar ||  // ← 新增：首次启动/卸载重装，config.json 里无 avatar 字段
     current.id === "kirari-sprite" ||
     current.src === "pet://frames.json" ||
     (current.src?.startsWith("avatar://kirari/") && current.id !== "custom-kirari") ||
