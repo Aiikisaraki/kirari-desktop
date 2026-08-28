@@ -429,8 +429,10 @@ function ensureDefaultAvatars(): void {
   }
 }
 
-// 增量合并内置皮肤：把官方源里目标缺失的图片文件复制过去，并把官方 frames.json 中
-// 目标 frames.json 没有的顶层字段（动画声明、chatAvatar 等）补进去；不覆盖不删除既有内容。
+// 增量合并内置皮肤：把官方源里目标缺失的图片文件复制过去，并根据版本号决定合并策略：
+//   - 官方源版本号 > 用户目录版本号：强制覆盖元信息字段（version/name/author/type/chatAvatar），
+//     并补齐用户目录缺失的动画声明（bow/excited 等新状态），但不删除用户自定义的动画。
+//   - 官方源版本号 <= 用户目录版本号：仅补缺失字段，不覆盖既有内容（用户可能自定义了皮肤）。
 function mergeBuiltinSkin(srcDir: string, destDir: string, srcFrames: string, destFrames: string): void {
   try {
     // 1) 复制官方源有、但目标缺失的资源文件（图片/子目录）。已存在的文件不覆盖。
@@ -445,19 +447,45 @@ function mergeBuiltinSkin(srcDir: string, destDir: string, srcFrames: string, de
         /* 忽略单个文件复制失败 */
       }
     }
-    // 2) 合并 frames.json 顶层字段：官方源有、目标没有的字段补进去。
+    // 2) 合并 frames.json：比对版本号决定策略。
     const srcMeta = JSON.parse(fs.readFileSync(srcFrames, "utf8"));
     const destMeta = JSON.parse(fs.readFileSync(destFrames, "utf8"));
     let changed = false;
+    
+    // 版本号比对（semver 简化比较：split('.') 逐段对比数值）
+    const parseVer = (v: unknown) => {
+      if (typeof v !== "string") return [0, 0, 0];
+      return v.split(".").map((s) => parseInt(s, 10) || 0);
+    };
+    const srcVer = parseVer(srcMeta.version);
+    const destVer = parseVer(destMeta.version);
+    const srcNewer =
+      srcVer[0] > destVer[0] ||
+      (srcVer[0] === destVer[0] && srcVer[1] > destVer[1]) ||
+      (srcVer[0] === destVer[0] && srcVer[1] === destVer[1] && srcVer[2] > destVer[2]);
+
+    if (srcNewer) {
+      // 官方源版本更高：强制覆盖元信息字段（确保用户拿到新头像/新版本号）
+      const metaKeys = ["version", "name", "author", "type", "chatAvatar"];
+      for (const key of metaKeys) {
+        if (key in srcMeta && srcMeta[key] !== destMeta[key]) {
+          destMeta[key] = srcMeta[key];
+          changed = true;
+        }
+      }
+    }
+    
+    // 无论版本高低，都补齐用户目录缺失的动画声明（新增的 bow/excited 等状态）
     for (const key of Object.keys(srcMeta)) {
       if (!(key in destMeta)) {
         destMeta[key] = srcMeta[key];
         changed = true;
       }
     }
+    
     if (changed) {
       fs.writeFileSync(destFrames, JSON.stringify(destMeta, null, 2));
-      console.log("[avatar] 已为默认皮肤合并新增字段:", destFrames);
+      console.log(`[avatar] 已为默认皮肤合并${srcNewer ? "（官方源更新，已覆盖元信息）" : "新增字段"}:`, destFrames);
     }
   } catch (e) {
     console.error("[avatar] 默认皮肤增量合并失败:", e);
