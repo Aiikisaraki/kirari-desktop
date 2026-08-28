@@ -471,11 +471,48 @@ function broadcastTheme(name: ThemeName) {
   }
 }
 
+// 把 avatar:// 协议地址指向的皮肤目录内图片读取为 base64 data URL。
+// 这样渲染进程的 <img> 无需依赖自定义协议 handler，避免打包后 / 部分机器上
+// avatar:// 加载失败导致头像不显示的问题；若文件缺失则返回 undefined。
+function readAvatarImageAsDataUrl(url: string): string | undefined {
+  if (!url.startsWith("avatar://")) return url;
+  try {
+    const rel = decodeURIComponent(url.replace("avatar://", ""));
+    const filePath = path.join(app.getPath("userData"), "avatars", rel);
+    if (!fs.existsSync(filePath)) {
+      console.warn("[avatar] 聊天头像图片不存在:", filePath);
+      return undefined;
+    }
+    const ext = path.extname(filePath).toLowerCase();
+    const mime =
+      ext === ".png"
+        ? "image/png"
+        : ext === ".jpg" || ext === ".jpeg"
+          ? "image/jpeg"
+          : ext === ".webp"
+            ? "image/webp"
+            : "image/png";
+    const buf = fs.readFileSync(filePath);
+    return `data:${mime};base64,${buf.toString("base64")}`;
+  } catch (e) {
+    console.error("[avatar] 读取聊天头像图片失败:", e);
+    return undefined;
+  }
+}
+
+// 把形象配置中的 chatAvatar 从 avatar:// 协议地址转成可直接在 <img> 中显示的 data URL。
+function withChatAvatarDataUrl(cfg: AvatarConfig): AvatarConfig {
+  if (!cfg.chatAvatar) return cfg;
+  const dataUrl = readAvatarImageAsDataUrl(cfg.chatAvatar);
+  if (dataUrl === cfg.chatAvatar) return cfg;
+  return { ...cfg, chatAvatar: dataUrl };
+}
+
 // 形象变更时广播给所有已打开窗口，含当前形象与自定义形象列表
 function broadcastAvatar() {
   const payload = {
-    current: clientConfig.avatar || DEFAULT_AVATAR,
-    custom: clientConfig.customAvatars || [],
+    current: withChatAvatarDataUrl(clientConfig.avatar || DEFAULT_AVATAR),
+    custom: (clientConfig.customAvatars || []).map(withChatAvatarDataUrl),
   };
   for (const win of [petWindow, chatWindow, settingsWindow]) {
     if (win && !win.isDestroyed()) win.webContents.send("avatar:changed", payload);
@@ -752,8 +789,10 @@ ipcMain.handle("pet-name:set", (_event, name: unknown) => {
 });
 
 // ---- 桌宠形象：读取 / 设置当前形象 + 列表 + 导入 ----
-ipcMain.handle("avatar:get", () => clientConfig.avatar || DEFAULT_AVATAR);
-ipcMain.handle("avatar:custom-get", () => clientConfig.customAvatars || []);
+ipcMain.handle("avatar:get", () => withChatAvatarDataUrl(clientConfig.avatar || DEFAULT_AVATAR));
+ipcMain.handle("avatar:custom-get", () =>
+  (clientConfig.customAvatars || []).map(withChatAvatarDataUrl)
+);
 
 ipcMain.handle("avatar:set", (_event, cfg: AvatarConfig) => {
   console.log("[main] avatar:set 收到:", cfg?.id, cfg?.name, cfg?.src);
