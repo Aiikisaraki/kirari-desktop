@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useChatSocket } from '../../composables/useChatSocket'
 import { usePetStore } from '../../stores/pet'
 import { useAvatarStore } from '../../stores/avatar'
+import type { PetEmotion } from '../../stores/chat'
 import type { AvatarState } from '../../pet/avatar/types'
 import PetAvatar from './PetAvatar.vue'
 import PetBubble from './PetBubble.vue'
@@ -37,7 +38,16 @@ declare global {
 const petStore = usePetStore()
 const avatarStore = useAvatarStore()
 const { isVisible, message, setMessage } = petStore
-const { bubbleMessage, bubbleInteractive, messages, unreadCount } = useChatSocket()
+const {
+  bubbleMessage,
+  bubbleInteractive,
+  messages,
+  unreadCount,
+  connected,
+  waitingForReply,
+  lastError,
+  chatWindowOpen,
+} = useChatSocket()
 const electron = window.require?.('electron')
 const ipcRenderer = electron?.ipcRenderer
 
@@ -117,7 +127,7 @@ function playSpeak() {
   }, 2500)
 }
 
-function playEmotionThenSpeak(emo: 'happy' | 'wave') {
+function playEmotionThenSpeak(emo: PetEmotion) {
   requestState(emo)
   if (speakTimer) clearTimeout(speakTimer)
   if (actionTimer) {
@@ -125,7 +135,7 @@ function playEmotionThenSpeak(emo: 'happy' | 'wave') {
     actionTimer = null
   }
   const d = durationOf(emo) || 1500
-  // 情绪动画播完后衔接说话
+  // 情绪/动作动画播完后衔接说话
   actionTimer = setTimeout(() => playSpeak(), d)
 }
 
@@ -143,7 +153,8 @@ watch(
     const lastPet = [...added].reverse().find((m) => m.author === 'pet')
     if (!lastPet) return
     const emo = lastPet.emotion
-    if (emo === 'happy' || emo === 'wave') {
+    if (emo) {
+      // 携带情绪/动作标签 → 先播该动作，结束再衔接说话
       playEmotionThenSpeak(emo)
     } else {
       playSpeak()
@@ -151,19 +162,32 @@ watch(
   },
 )
 
+/* ===================== 通用手势调度（统一收口） ===================== */
+// 所有「一次性动作」的触发都走这里：优先级互斥 + 按状态冷却 + 可强制打断瞌睡。
+// 替代原先散落在各 maybe* 里的重复冷却/占用判断，状态机更易维护与扩展。
+const gestureCooldownUntil: Partial<Record<AvatarState, number>> = {}
+function tryGesture(
+  s: AvatarState,
+  opts: { cooldown?: number; force?: boolean; skipIfSleepy?: boolean } = {},
+): boolean {
+  const { cooldown = 0, force = false, skipIfSleepy = true } = opts
+  if (!force) {
+    const now = Date.now()
+    if (now < (gestureCooldownUntil[s] ?? 0)) return false
+    // 轻动作不打断沉睡（保留趴桌观感）；情绪/事件类用 force 主动唤醒
+    if (skipIfSleepy && avatarStore.currentState === 'sleepy') return false
+  }
+  const ok = requestState(s)
+  if (ok && cooldown > 0) gestureCooldownUntil[s] = Date.now() + cooldown
+  return ok
+}
+
 /* ===================== 高兴跳跃 ===================== */
 // 触发条件：连续点击桌宠 3 次 / 对话结束小概率 / 唤醒熟睡彩蛋。冷却 3 分钟。
 const HAPPY_COOLDOWN = 3 * 60 * 1000
-let happyCooldownUntil = 0
 
 function maybeHappy(prob: number) {
-  if (Date.now() < happyCooldownUntil) return
-  if (avatarStore.currentState === 'happy') return
-  if (PRIORITY['happy'] < PRIORITY[avatarStore.currentState]) return // 被更高优先级占用
-  if (Math.random() < prob) {
-    requestState('happy')
-    happyCooldownUntil = Date.now() + HAPPY_COOLDOWN
-  }
+  if (Math.random() < prob) tryGesture('happy', { cooldown: HAPPY_COOLDOWN })
 }
 
 // 连续轻点检测：2.5s 内累计 3 次点击（非拖拽）触发。
@@ -184,17 +208,11 @@ function handleTap() {
 /* ===================== 招手 ===================== */
 // 随机 40~90s 触发；鼠标悬浮 1s 触发；窗口聚焦触发。冷却 90s。睡醒后才随机。
 const WAVE_COOLDOWN = 90 * 1000
-let waveCooldownUntil = 0
 let waveTimer: ReturnType<typeof setTimeout> | null = null
 let hoverTimer: ReturnType<typeof setTimeout> | null = null
 
 function maybeWave(force = false) {
-  if (!force && Date.now() < waveCooldownUntil) return
-  if (avatarStore.currentState === 'sleepy') return // 瞌睡中不主动招手
-  if (PRIORITY['wave'] < PRIORITY[avatarStore.currentState]) return // 被占用
-  if (requestState('wave')) {
-    waveCooldownUntil = Date.now() + WAVE_COOLDOWN
-  }
+  tryGesture('wave', { cooldown: WAVE_COOLDOWN, force })
 }
 
 function scheduleWave() {
@@ -203,6 +221,57 @@ function scheduleWave() {
     maybeWave()
     scheduleWave()
   }, delay)
+}
+
+/* ===================== 伸懒腰（环境动作） ===================== */
+// 闲置时随机 2~4 分钟伸个懒腰，增加存在感；不打断思考/说话/沉睡。
+let stretchTimer: ReturnType<typeof setTimeout> | null = null
+function scheduleStretch() {
+  const delay = 120000 + Math.random() * 120000
+  stretchTimer = setTimeout(() => {
+    tryGesture('stretch', { cooldown: 60000 })
+    scheduleStretch()
+  }, delay)
+}
+
+/* ===================== 思考（等待回复时持续） ===================== */
+// waitingForReply 为真时循环重播 thinking（素材为一次性），制造"持续思考"观感；
+// 回复到达或被更高优先级动作（说话）占用时自动让位。不走 requestState 的自动回 idle 计时。
+let thinkingTimer: ReturnType<typeof setInterval> | null = null
+let thinkingStartTimer: ReturnType<typeof setTimeout> | null = null
+function startThinking() {
+  if (avatarStore.currentState === 'sleepy') return
+  if (PRIORITY['thinking'] < PRIORITY[avatarStore.currentState]) return
+  avatarStore.setState('thinking')
+  if (thinkingTimer) clearInterval(thinkingTimer)
+  const period = Math.max((durationOf('thinking') || 4000) - 200, 1200)
+  thinkingTimer = setInterval(() => {
+    if (!waitingForReply.value) {
+      stopThinking()
+      return
+    }
+    if (PRIORITY['thinking'] >= PRIORITY[avatarStore.currentState]) {
+      avatarStore.setState('thinking') // 重新从头播，形成持续思考
+    }
+  }, period)
+}
+function stopThinking() {
+  if (thinkingTimer) {
+    clearInterval(thinkingTimer)
+    thinkingTimer = null
+  }
+  if (avatarStore.currentState === 'thinking') avatarStore.setState('idle')
+}
+
+/* ===================== 互动动作：点头 / 鞠躬 / 害羞 ===================== */
+// - nod：听到你发消息时点一下头回应
+// - bow：对话框打开时鞠躬问候
+// - shy：光标在桌宠身上抚摸（移动）时害羞 —— 最强"互动感"
+function onUserSpoke() {
+  tryGesture('nod', { cooldown: 1500 })
+}
+function onChatOpened() {
+  tryGesture('bow', { force: true, skipIfSleepy: false })
 }
 
 /* ===================== 打瞌睡 ===================== */
@@ -242,6 +311,67 @@ function scheduleBlink() {
   }, delay)
 }
 
+/* ===================== 事件驱动自动触发 ===================== */
+// 把后端/连接状态映射到桌宠情绪，让它在无人操作时也"有反应"。
+let wasConnected = connected.value
+watch(connected, (c) => {
+  if (c && !wasConnected) {
+    // （重）连接成功：兴奋
+    tryGesture('excited', { force: true, skipIfSleepy: false })
+  } else if (!c && wasConnected) {
+    // 断开连接：伤心
+    tryGesture('sad', { force: true, skipIfSleepy: false })
+  }
+  wasConnected = c
+})
+
+watch(lastError, (err) => {
+  if (err && err.trim()) {
+    // 聊天出错 / 无法满足：摇头
+    tryGesture('shake', { force: true, skipIfSleepy: false, cooldown: 8000 })
+  }
+})
+
+let lastUnread = unreadCount.value
+watch(unreadCount, (n) => {
+  if (n > lastUnread) {
+    // 对话框关闭时收到新消息：惊讶（"你收到消息啦"）
+    tryGesture('surprised', { force: true, skipIfSleepy: false, cooldown: 6000 })
+  }
+  lastUnread = n
+})
+
+watch(chatWindowOpen, (open) => {
+  if (open) onChatOpened()
+})
+
+watch(waitingForReply, (w) => {
+  if (w) {
+    // 等点头回应播完再开始思考，避免动作打架
+    const delay = (durationOf('nod') || 1000) + 200
+    thinkingStartTimer = setTimeout(() => {
+      if (waitingForReply.value) startThinking()
+    }, delay)
+  } else {
+    if (thinkingStartTimer) {
+      clearTimeout(thinkingStartTimer)
+      thinkingStartTimer = null
+    }
+    stopThinking()
+  }
+})
+
+// 你发消息 → 点头回应（与"收到 pet 回复播说话"互补）
+watch(
+  () => messages.value.length,
+  (next, prev) => {
+    if (!primed) return
+    if (next <= prev) return
+    const added = messages.value.slice(prev)
+    if (added.some((m) => m.author === 'user')) onUserSpoke()
+  },
+)
+
 /* ===================== 生命周期 ===================== */
 const isDragging = ref(false)
 const isBubbleDismissed = ref(false)
@@ -269,11 +399,18 @@ onMounted(() => {
   avatarStore.init()
   scheduleBlink()
   scheduleWave()
+  scheduleStretch()
   scheduleSleepy()
   window.addEventListener('focus', onFocus)
   // 主进程每 20ms 轮询一次光标位置并广播到本窗口；这里注册接收器做判定。
   // 不依赖渲染进程能否读取 screen / 能否接收鼠标事件，彻底规避死锁。
   ipcRenderer?.on('desktop-pet:cursor', onCursorPos)
+  // 上报视口尺寸 / dpr 供主进程诊断坐标空间（见 main.ts 的 [renderer-diag]）。
+  ipcRenderer?.send('desktop-pet:diag', {
+    innerW: window.innerWidth,
+    innerH: window.innerHeight,
+    dpr: window.devicePixelRatio,
+  })
 })
 
 onBeforeUnmount(() => {
@@ -281,6 +418,9 @@ onBeforeUnmount(() => {
   if (speakTimer) clearTimeout(speakTimer)
   if (waveTimer) clearTimeout(waveTimer)
   if (hoverTimer) clearTimeout(hoverTimer)
+  if (stretchTimer) clearTimeout(stretchTimer)
+  if (thinkingTimer) clearInterval(thinkingTimer)
+  if (thinkingStartTimer) clearTimeout(thinkingStartTimer)
   if (sleepTimer) clearTimeout(sleepTimer)
   if (blinkTimer) clearTimeout(blinkTimer)
   if (tapResetTimer) clearTimeout(tapResetTimer)
@@ -326,6 +466,39 @@ function stopDrag() {
   window.removeEventListener('pointerup', stopDrag)
   window.removeEventListener('pointercancel', stopDrag)
   window.removeEventListener('blur', stopDrag)
+}
+
+/* ===================== 抚摸 → 害羞 ===================== */
+// 光标在桌宠身体范围内移动（不拖拽）视为"抚摸"，累计位移达标即害羞。
+// 抚摸属于真实交互，会顺带唤醒沉睡中的桌宠（markActivity）。
+let strokeX = 0
+let strokeY = 0
+let strokeAccum = 0
+function onPetEnter() {
+  strokeX = 0
+  strokeY = 0
+  strokeAccum = 0
+}
+function onPetLeave() {
+  strokeX = 0
+  strokeY = 0
+  strokeAccum = 0
+}
+function onPetMove(e: PointerEvent) {
+  if (isDragging.value) return
+  markActivity()
+  if (strokeX === 0 && strokeY === 0) {
+    strokeX = e.clientX
+    strokeY = e.clientY
+    return
+  }
+  strokeAccum += Math.hypot(e.clientX - strokeX, e.clientY - strokeY)
+  strokeX = e.clientX
+  strokeY = e.clientY
+  if (strokeAccum > 140) {
+    strokeAccum = 0
+    tryGesture('shy', { cooldown: 5000 }) // 抚摸够久 → 害羞
+  }
 }
 
 const hovering = ref(false)
@@ -443,7 +616,14 @@ function onCursorPos(_e: unknown, pt: { x: number; y: number }) {
       @open-chat="openChat"
       @dismiss="dismissBubble"
     />
-    <div class="pet-body" @pointerdown="startDrag" @contextmenu.prevent="showContextMenu">
+    <div
+      class="pet-body"
+      @pointerdown="startDrag"
+      @pointerenter="onPetEnter"
+      @pointerleave="onPetLeave"
+      @pointermove="onPetMove"
+      @contextmenu.prevent="showContextMenu"
+    >
       <PetAvatar :visible="isVisible" />
     </div>
     <PetQuickMenu

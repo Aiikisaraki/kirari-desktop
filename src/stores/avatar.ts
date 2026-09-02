@@ -2,8 +2,8 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import type { AvatarConfig, AvatarMeta, AvatarState, AvatarType } from "../pet/avatar/types";
 
-// 兜底默认值：内置 Kirari 精灵皮肤。其聊天头像（一套皮肤一个头像）用
-// public/avatars/kirari.jpg；主进程安装的真实形象经扫描注册后覆盖此值。
+// 兜底默认值：内置 Kirari 精灵皮肤。聊天头像由皮肤目录的 frames.json.chatAvatar 声明，
+// 经 avatar:// 协议对外服务；主进程启动时扫描皮肤并写入真实头像到 config，覆盖此兜底。
 const DEFAULT_AVATAR: AvatarConfig = {
   id: "custom-kirari",
   name: "Aki Kirari",
@@ -11,7 +11,6 @@ const DEFAULT_AVATAR: AvatarConfig = {
   version: "1.0.0",
   type: "sprite",
   src: "avatar://kirari/frames.json",
-  chatAvatar: "/avatars/kirari.jpg",
 };
 
 type ElectronApi = {

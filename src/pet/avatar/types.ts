@@ -3,24 +3,23 @@
 // 不关心底层是精灵帧（SpriteRenderer）还是 Live2D（Live2DRenderer）。
 // 这样即可在同一套框架下支持多种形象，并允许用户上传自定义精灵形象。
 
-export type AvatarState = 
-  | "idle" 
-  | "blink" 
-  | "speak" 
-  | "wave" 
-  | "happy" 
+export type AvatarState =
+  | "idle"
+  | "blink"
+  | "speak"
+  | "wave"
+  | "happy"
   | "sleepy"
-  // 新增情绪类
-  | "shy"
-  | "sad"
-  | "surprised"
-  | "thinking"
-  | "excited"
-  // 新增交互类
-  | "stretch"
-  | "nod"
-  | "shake"
-  | "bow";
+  // —— 以下为新增情绪/动作动画（对应 frames.json 中新增的精灵表）——
+  | "bow" // 鞠躬
+  | "excited" // 兴奋
+  | "nod" // 点头
+  | "sad" // 伤心
+  | "shake" // 摇头
+  | "shy" // 害羞
+  | "stretch" // 伸懒腰
+  | "surprised" // 惊讶
+  | "thinking"; // 思考
 
 export type AvatarType = "sprite" | "live2d" | "image";
 
@@ -96,7 +95,8 @@ export interface AvatarConfig {
   // image: 静态图片的 URL
   src: string;
   // 这套皮肤对应的聊天头像图（聊天窗口头部与消息流里显示的小头像）。
-  // 内置皮肤指向 /avatars/<name>.jpg；自定义皮肤为 avatar://<皮肤目录>/<文件名>。
+  // 由皮肤的 frames.json 顶层 "chatAvatar" 字段声明（皮肤目录内的图片文件名），
+  // 运行时经 avatar://<皮肤目录>/<文件名> 协议对外服务；换皮肤即换头像。
   chatAvatar?: string;
   scale?: number;
   // 仅用于列表展示 / 持久化（以下字段不参与渲染）

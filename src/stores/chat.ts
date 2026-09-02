@@ -1,13 +1,19 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import type { AvatarState } from '../pet/avatar/types'
+
+// 可由对话情绪标签驱动播放的动画状态（先播该动作、再衔接 speak）。
+// 即 AvatarState 去掉基础态与说话态：idle / blink / sleepy / speak。
+export type PetEmotion = Exclude<AvatarState, 'idle' | 'blink' | 'sleepy' | 'speak'>
 
 export type ChatMessage = {
   id: string
   author: 'user' | 'pet' | 'system'
   text: string
   timestamp: number
-  // 对话回答携带的情绪标签（来自后端 pet_response.emotion）。无则省略。
-  emotion?: 'happy' | 'wave' | null
+  // 对话回答携带的情绪/动作标签（来自后端 pet_response.emotion）。无则省略。
+  // 取值见 PetEmotion：先播该动作、结束再衔接说话；不含基础态与说话态。
+  emotion?: PetEmotion | null
   // 关联的图片 URL 或 base64 data URL（用户发送的图片、或 AI 返回的图片）。
   images?: string[]
 }

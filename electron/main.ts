@@ -34,7 +34,9 @@ type AvatarConfig = {
   type: "sprite" | "live2d" | "image";
   src: string;
   // 这套皮肤对应的聊天头像图（「一套皮肤一个头像」）。
-  // 内置皮肤指向打包进 dist 的 /avatars/<name>.jpg；自定义皮肤为 avatar://<皮肤目录>/<文件名>。
+  // 由皮肤的 frames.json 顶层 "chatAvatar" 字段声明（皮肤目录内的图片文件名，
+  // 如 "kirari.jpg"），运行时经 avatar://<皮肤目录>/<文件名> 协议对外服务。
+  // 因此换一套皮肤，头像随之变化；此处不硬编码任何图片路径。
   chatAvatar?: string;
   scale?: number;
   id?: string;
@@ -52,13 +54,15 @@ const DEFAULT_AVATAR: AvatarConfig = {
   version: "1.0.0",
   type: "sprite",
   src: `avatar://${encodeURIComponent(DEFAULT_SKIN_DIR)}/frames.json`,
-  // 默认皮肤的聊天头像：浅蓝发 Kirari 立绘（public/avatars/kirari.jpg）
-  chatAvatar: "/avatars/kirari.jpg",
+  // 不再硬编码聊天头像：头像图随皮肤打包进 userData/avatars/<皮肤>/，由 frames.json 的
+  // chatAvatar 字段声明，启动时经扫描同步到当前形象（见 syncCurrentAvatarFromScan）。
 };
 
 // 兼容旧版持久化：把旧默认形象（id=kirari-sprite / src=pet://frames.json，
 // 以及历史上误把默认形象写成 image 型 aurora-kirari 的版本）
 // 迁移到当前默认形象（Kirari 精灵皮肤），避免下拉框选不中当前形象。
+// 注意：聊天头像不再硬编码，旧值（/avatars/xxx.jpg、avatars/xxx.jpg）会被
+// syncCurrentAvatarFromScan 用皮肤目录里的真实头像覆盖。
 function migrateLegacyAvatar(saved: AvatarConfig): AvatarConfig {
   if (
     saved.id === "kirari-sprite" ||
@@ -426,18 +430,18 @@ function getOfficialAvatarsSource(): string {
   return candidates.find((p) => fs.existsSync(p)) ?? candidates[0];
 }
 
-// 默认（官方）皮肤兜底：扫描 userData/avatars，若没有任何含 frames.json 的皮肤目录，
-// 则从「打包进来的官方皮肤源」复制一次。生产环境源为 process.resourcesPath/official-avatars
-// （extraResources 打包进安装包）；开发环境源为项目 resources/official-avatars。
-// 仅当目标缺失时复制一次，绝不覆盖用户已存在的皮肤 —— 满足「只复制一次、不每次替换」。
+// 默认（官方）皮肤兜底：把「打包进来的官方皮肤源」同步到 userData/avatars。
+// 生产环境源为 process.resourcesPath/official-avatars（extraResources 打包进安装包）；
+// 开发环境源为项目 resources/official-avatars。
+// 策略：
+//   - 目标皮肤目录不存在 → 整目录复制（首次安装）。
+//   - 目标已存在（升级/重装场景）→ 增量合并：补官方源新增的动画字段（如本次新增的
+//     bow/excited/... 9 个状态、chatAvatar 等）与缺失的图片文件，绝不删除用户自定义文件
+//     或覆盖用户已修改的 frames.json 字段，满足「升级也能拿到新内容、且不破坏自定义」。
 function ensureDefaultAvatars(): void {
   try {
     const destRoot = getAvatarsRoot();
     fs.mkdirSync(destRoot, { recursive: true });
-    const hasAnySkin = fs
-      .readdirSync(destRoot, { withFileTypes: true })
-      .some((e) => e.isDirectory() && fs.existsSync(path.join(destRoot, e.name, "frames.json")));
-    if (hasAnySkin) return; // 已有皮肤则不复制，避免覆盖用户自定义
     const srcRoot = getOfficialAvatarsSource();
     if (!fs.existsSync(srcRoot)) {
       console.warn("[avatar] 未找到官方皮肤源，跳过默认皮肤复制:", srcRoot);
@@ -446,12 +450,83 @@ function ensureDefaultAvatars(): void {
     for (const e of fs.readdirSync(srcRoot, { withFileTypes: true })) {
       if (!e.isDirectory()) continue;
       const srcDir = path.join(srcRoot, e.name);
-      if (!fs.existsSync(path.join(srcDir, "frames.json"))) continue;
-      fs.cpSync(srcDir, path.join(destRoot, e.name), { recursive: true });
-      console.log("[avatar] 已复制默认皮肤到:", path.join(destRoot, e.name));
+      const srcFrames = path.join(srcDir, "frames.json");
+      if (!fs.existsSync(srcFrames)) continue;
+      const destDir = path.join(destRoot, e.name);
+      const destFrames = path.join(destDir, "frames.json");
+      if (!fs.existsSync(destFrames)) {
+        fs.cpSync(srcDir, destDir, { recursive: true });
+        console.log("[avatar] 已复制默认皮肤到:", destDir);
+      } else {
+        // 已存在 → 增量合并（补缺失图片 + 补 frames.json 新增顶层字段）
+        mergeBuiltinSkin(srcDir, destDir, srcFrames, destFrames);
+      }
     }
   } catch (e) {
     console.error("[avatar] 默认皮肤复制失败:", e);
+  }
+}
+
+// 增量合并内置皮肤：把官方源里目标缺失的图片文件复制过去，并根据版本号决定合并策略：
+//   - 官方源版本号 > 用户目录版本号：强制覆盖元信息字段（version/name/author/type/chatAvatar），
+//     并补齐用户目录缺失的动画声明（bow/excited 等新状态），但不删除用户自定义的动画。
+//   - 官方源版本号 <= 用户目录版本号：仅补缺失字段，不覆盖既有内容（用户可能自定义了皮肤）。
+function mergeBuiltinSkin(srcDir: string, destDir: string, srcFrames: string, destFrames: string): void {
+  try {
+    // 1) 复制官方源有、但目标缺失的资源文件（图片/子目录）。已存在的文件不覆盖。
+    for (const f of fs.readdirSync(srcDir)) {
+      if (f.toLowerCase() === "frames.json") continue; // 单独合并
+      const srcFile = path.join(srcDir, f);
+      const destFile = path.join(destDir, f);
+      if (fs.existsSync(destFile)) continue;
+      try {
+        fs.cpSync(srcFile, destFile, { recursive: true });
+      } catch {
+        /* 忽略单个文件复制失败 */
+      }
+    }
+    // 2) 合并 frames.json：比对版本号决定策略。
+    const srcMeta = JSON.parse(fs.readFileSync(srcFrames, "utf8"));
+    const destMeta = JSON.parse(fs.readFileSync(destFrames, "utf8"));
+    let changed = false;
+    
+    // 版本号比对（semver 简化比较：split('.') 逐段对比数值）
+    const parseVer = (v: unknown) => {
+      if (typeof v !== "string") return [0, 0, 0];
+      return v.split(".").map((s) => parseInt(s, 10) || 0);
+    };
+    const srcVer = parseVer(srcMeta.version);
+    const destVer = parseVer(destMeta.version);
+    const srcNewer =
+      srcVer[0] > destVer[0] ||
+      (srcVer[0] === destVer[0] && srcVer[1] > destVer[1]) ||
+      (srcVer[0] === destVer[0] && srcVer[1] === destVer[1] && srcVer[2] > destVer[2]);
+
+    if (srcNewer) {
+      // 官方源版本更高：强制覆盖元信息字段（确保用户拿到新头像/新版本号）
+      const metaKeys = ["version", "name", "author", "type", "chatAvatar"];
+      for (const key of metaKeys) {
+        if (key in srcMeta && srcMeta[key] !== destMeta[key]) {
+          destMeta[key] = srcMeta[key];
+          changed = true;
+        }
+      }
+    }
+    
+    // 无论版本高低，都补齐用户目录缺失的动画声明（新增的 bow/excited 等状态）
+    for (const key of Object.keys(srcMeta)) {
+      if (!(key in destMeta)) {
+        destMeta[key] = srcMeta[key];
+        changed = true;
+      }
+    }
+    
+    if (changed) {
+      fs.writeFileSync(destFrames, JSON.stringify(destMeta, null, 2));
+      console.log(`[avatar] 已为默认皮肤合并${srcNewer ? "（官方源更新，已覆盖元信息）" : "新增字段"}:`, destFrames);
+    }
+  } catch (e) {
+    console.error("[avatar] 默认皮肤增量合并失败:", e);
   }
 }
 
@@ -462,11 +537,48 @@ function broadcastTheme(name: ThemeName) {
   }
 }
 
+// 把 avatar:// 协议地址指向的皮肤目录内图片读取为 base64 data URL。
+// 这样渲染进程的 <img> 无需依赖自定义协议 handler，避免打包后 / 部分机器上
+// avatar:// 加载失败导致头像不显示的问题；若文件缺失则返回 undefined。
+function readAvatarImageAsDataUrl(url: string): string | undefined {
+  if (!url.startsWith("avatar://")) return url;
+  try {
+    const rel = decodeURIComponent(url.replace("avatar://", ""));
+    const filePath = path.join(app.getPath("userData"), "avatars", rel);
+    if (!fs.existsSync(filePath)) {
+      console.warn("[avatar] 聊天头像图片不存在:", filePath);
+      return undefined;
+    }
+    const ext = path.extname(filePath).toLowerCase();
+    const mime =
+      ext === ".png"
+        ? "image/png"
+        : ext === ".jpg" || ext === ".jpeg"
+          ? "image/jpeg"
+          : ext === ".webp"
+            ? "image/webp"
+            : "image/png";
+    const buf = fs.readFileSync(filePath);
+    return `data:${mime};base64,${buf.toString("base64")}`;
+  } catch (e) {
+    console.error("[avatar] 读取聊天头像图片失败:", e);
+    return undefined;
+  }
+}
+
+// 把形象配置中的 chatAvatar 从 avatar:// 协议地址转成可直接在 <img> 中显示的 data URL。
+function withChatAvatarDataUrl(cfg: AvatarConfig): AvatarConfig {
+  if (!cfg.chatAvatar) return cfg;
+  const dataUrl = readAvatarImageAsDataUrl(cfg.chatAvatar);
+  if (dataUrl === cfg.chatAvatar) return cfg;
+  return { ...cfg, chatAvatar: dataUrl };
+}
+
 // 形象变更时广播给所有已打开窗口，含当前形象与自定义形象列表
 function broadcastAvatar() {
   const payload = {
-    current: clientConfig.avatar || DEFAULT_AVATAR,
-    custom: clientConfig.customAvatars || [],
+    current: withChatAvatarDataUrl(clientConfig.avatar || DEFAULT_AVATAR),
+    custom: (clientConfig.customAvatars || []).map(withChatAvatarDataUrl),
   };
   for (const win of [petWindow, chatWindow, settingsWindow]) {
     if (win && !win.isDestroyed()) win.webContents.send("avatar:changed", payload);
@@ -745,8 +857,10 @@ ipcMain.handle("pet-name:set", (_event, name: unknown) => {
 });
 
 // ---- 桌宠形象：读取 / 设置当前形象 + 列表 + 导入 ----
-ipcMain.handle("avatar:get", () => clientConfig.avatar || DEFAULT_AVATAR);
-ipcMain.handle("avatar:custom-get", () => clientConfig.customAvatars || []);
+ipcMain.handle("avatar:get", () => withChatAvatarDataUrl(clientConfig.avatar || DEFAULT_AVATAR));
+ipcMain.handle("avatar:custom-get", () =>
+  (clientConfig.customAvatars || []).map(withChatAvatarDataUrl)
+);
 
 ipcMain.handle("avatar:set", (_event, cfg: AvatarConfig) => {
   console.log("[main] avatar:set 收到:", cfg?.id, cfg?.name, cfg?.src);
@@ -955,6 +1069,52 @@ function scanAvatarsIntoConfig(): void {
     }
   } catch (e) {
     console.error("[avatar] 启动扫描失败:", e);
+  }
+}
+
+// 把「当前形象」的动态字段（头像、渲染类型、显示名等）与扫描到的皮肤元信息对齐。
+// 头像由皮肤的 frames.json.chatAvatar 声明，经 avatar:// 协议对外服务；换一套皮肤时，
+// clientConfig.avatar 的 id 随之变化、这里同步出新头像，从而「换皮肤 → 头像变化」生效。
+// 旧持久化里残留的硬编码头像路径（/avatars/ 或 avatars/ 开头）视为无效，强制用皮肤真实值覆盖。
+function syncCurrentAvatarFromScan(): void {
+  try {
+    const cur = clientConfig.avatar;
+    if (!cur || !cur.id) return;
+    const match = (clientConfig.customAvatars || []).find((a) => a.id === cur.id);
+    if (!match) return;
+    const isLegacyHardcoded =
+      typeof cur.chatAvatar === "string" && /^\/?avatars\/[^/]+$/i.test(cur.chatAvatar);
+    const next: AvatarConfig = { ...cur };
+    let changed = false;
+    const keys: (keyof AvatarMeta)[] = ["chatAvatar", "src", "name", "type", "author", "version"];
+    for (const key of keys) {
+      const freshVal = match[key];
+      if (key === "chatAvatar") {
+        // 旧硬编码值直接丢弃；否则以皮肤声明为准（缺省则沿用当前值）
+        if (isLegacyHardcoded) {
+          if (freshVal !== cur.chatAvatar) {
+            next.chatAvatar = freshVal;
+            changed = true;
+          }
+          continue;
+        }
+        if (typeof freshVal === "string" && freshVal !== cur.chatAvatar) {
+          next.chatAvatar = freshVal;
+          changed = true;
+        }
+        continue;
+      }
+      if (freshVal !== undefined && freshVal !== (cur as Record<string, unknown>)[key as string]) {
+        (next as Record<string, unknown>)[key as string] = freshVal;
+        changed = true;
+      }
+    }
+    if (changed) {
+      clientConfig.avatar = next;
+      saveClientConfig();
+    }
+  } catch (e) {
+    console.error("[avatar] 当前形象与扫描同步失败:", e);
   }
 }
 
@@ -1736,6 +1896,19 @@ function createWindow() {
   });
 
   petWindow = win;
+  // 关键修复：透明无边框窗口在 Windows 高 DPI 下，DWM 会在 setPosition 时错误地放大窗口。
+  // setMinimumSize/setMaximumSize 在透明窗口上被 DWM 忽略（Electron 已知 bug），所以
+  // 改用 resize 事件兜底：一旦窗口被撑大，立即用 setBounds 拉回目标尺寸。
+  const targetSize = { width: petWindowSize.width, height: petWindowSize.height };
+  
+  win.on("resize", () => {
+    const b = win.getBounds();
+    // 只要尺寸偏离目标（容忍 ±0px，因为 DWM 每帧都在尝试放大），立即强制拉回。
+    // 用 setBounds 同时改位置+尺寸，避免单独 setSize 又触发 DWM 坐标重算。
+    if (b.width !== targetSize.width || b.height !== targetSize.height) {
+      win.setBounds({ x: b.x, y: b.y, width: targetSize.width, height: targetSize.height }, false);
+    }
+  });
   // 优先恢复持久化位置；坐标无效（如屏幕外）则回退默认右下角。
   const saved = clientConfig.window;
   if (saved && isPositionOnScreen(saved.x, saved.y, petWindowSize.width, petWindowSize.height)) {
@@ -1885,6 +2058,8 @@ ipcMain.on("desktop-pet:drag-start", (event) => {
   if (!win) return;
 
   const [x, y] = win.getPosition();
+  // screen.getCursorScreenPoint() 与 win.getPosition()/getBounds() 同为 DIP（逻辑像素），
+  // 直接相减即可，不要按 scaleFactor 换算。下方点穿轮询同此坐标系。
   const pointerStart = screen.getCursorScreenPoint();
   dragState = {
     windowId: win.id,
@@ -1898,10 +2073,10 @@ ipcMain.on("desktop-pet:drag-move", (event) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win || !dragState || dragState.windowId !== win.id) return;
 
-  const pointer = screen.getCursorScreenPoint();
-  const nextX = Math.round(dragState.windowStart.x + pointer.x - dragState.pointerStart.x);
-  const nextY = Math.round(dragState.windowStart.y + pointer.y - dragState.pointerStart.y);
-
+  // 光标与窗口位置同为 DIP，直接相减（不除 scaleFactor）。
+  const cursor = screen.getCursorScreenPoint();
+  const nextX = Math.round(dragState.windowStart.x + cursor.x - dragState.pointerStart.x);
+  const nextY = Math.round(dragState.windowStart.y + cursor.y - dragState.pointerStart.y);
   win.setPosition(nextX, nextY, false);
 });
 
@@ -1910,6 +2085,11 @@ ipcMain.on("desktop-pet:drag-end", (event) => {
   dragState = null;
   // 拖动结束：把最终位置持久化，下次启动恢复。
   if (win) persistWindowPosition(win);
+});
+
+// 渲染进程上报视口尺寸 / dpr，用于坐实「窗口内坐标」与「光标坐标」是否同一坐标系。
+ipcMain.on("desktop-pet:diag", (_event, d) => {
+  console.log("[renderer-diag] innerW=", d?.innerW, "innerH=", d?.innerH, "dpr=", d?.dpr);
 });
 
 // 逐像素点穿：渲染进程按光标处像素 alpha 判定后，通知主进程切换窗口的鼠标穿透。
@@ -1931,13 +2111,12 @@ setInterval(() => {
   if (!petWindow || petWindow.isDestroyed()) return;
   const cursor = screen.getCursorScreenPoint();
   const b = petWindow.getBounds();
-  // 关键修复：screen.getCursorScreenPoint() 返回物理像素，getBounds() 返回逻辑像素。
-  // 必须按光标所在显示器的 scaleFactor 把光标换算成逻辑像素，再与 getBounds 相减，
-  // 否则高 DPI 下坐标被放大，命中测试整片错位/越界 → 永久点穿。
-  const disp = screen.getDisplayNearestPoint(cursor);
-  const scale = disp?.scaleFactor || 1;
-  const lx = cursor.x / scale - b.x;
-  const ly = cursor.y / scale - b.y;
+  // screen.getCursorScreenPoint() 与 getBounds() 同为 DIP（逻辑像素），同坐标系直接相减，
+  // 得到「光标相对窗口的逻辑偏移」，供渲染进程配合 getBoundingClientRect 做命中测试。
+  // 注意：不要按 scaleFactor 换算——二者本就在同一坐标系，多除一次 scale 会让高 DPI 下
+  // 坐标被错误缩小/缩放，命中测试整片错位/越界 → 窗口被永久点穿（点不到、拖不动）。
+  const lx = cursor.x - b.x;
+  const ly = cursor.y - b.y;
   // 坐标无变化则跳过，避免无谓 IPC 抖动
   if (lx === lastCursorSent.x && ly === lastCursorSent.y) return;
   lastCursorSent = { x: lx, y: ly };
@@ -2148,11 +2327,13 @@ app.whenReady().then(async () => {
   // 启动形象目录监听：用户直接向形象文件夹增删皮肤时自动刷新设置页与桌宠窗口。
   startAvatarFolderWatch();
 
-  // 兼容旧版持久化 + 兜底校验：默认形象若指向旧 pet:// 协议、旧 id，或当前形象
-  // 已不在扫描后的形象列表中，则回退到默认形象，避免下拉框选不中。
+  // 兼容旧版持久化 + 兜底校验：默认形象若指向旧 pet:// 协议、旧 id、当前形象
+  // 已不在扫描后的形象列表中、或 config.json 里根本没存过形象（首次启动/卸载重装），
+  // 则初始化/回退到默认形象，避免下拉框选不中或 syncCurrentAvatarFromScan 因 undefined 跳过。
   const registeredIds = new Set((clientConfig.customAvatars || []).map((a) => a.id));
   const current = clientConfig.avatar || DEFAULT_AVATAR;
   if (
+    !clientConfig.avatar ||  // ← 新增：首次启动/卸载重装，config.json 里无 avatar 字段
     current.id === "kirari-sprite" ||
     current.src === "pet://frames.json" ||
     (current.src?.startsWith("avatar://kirari/") && current.id !== "custom-kirari") ||
@@ -2161,6 +2342,10 @@ app.whenReady().then(async () => {
     clientConfig.avatar = { ...DEFAULT_AVATAR };
     saveClientConfig();
   }
+
+  // 把当前形象的动态字段（含聊天头像）与扫描到的皮肤配置对齐：
+  // 头像由 skin 目录的 frames.json.chatAvatar 声明，换皮肤即换头像。
+  syncCurrentAvatarFromScan();
 
   let res = await checkBackendHealth();
   chatSessionStoragePath = resolveChatStoragePath();
