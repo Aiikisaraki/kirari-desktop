@@ -1,4 +1,5 @@
 import type { PetBackendResponse } from "./types";
+import type { LocalKnowledge } from "../../src/knowledge/localKnowledge";
 
 type ResponseListener = (resp: PetBackendResponse) => void;
 
@@ -8,15 +9,17 @@ type ResponseListener = (resp: PetBackendResponse) => void;
 export class BotBackendClient {
   private readonly backendUrl: string;
   private readonly token: string;
+  private readonly localKnowledge: LocalKnowledge | undefined;
   private socket: any = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
   private listeners = new Map<string, ResponseListener>();
   private statusCbs: ((connected: boolean) => void)[] = [];
 
-  constructor(backendUrl: string, token: string) {
+  constructor(backendUrl: string, token: string, localKnowledge?: LocalKnowledge) {
     this.backendUrl = backendUrl;
     this.token = token;
+    this.localKnowledge = localKnowledge;
   }
 
   onStatus(cb: (connected: boolean) => void): void {
@@ -109,18 +112,21 @@ export class BotBackendClient {
     this.listeners.delete(sessionId);
   }
 
-  send(payload: {
+  async send(payload: {
     content: string;
     images: string[];
     sessionId: string;
     locationScope: string | null;
-  }): boolean {
+  }): Promise<boolean> {
     if (!this.socket || this.socket.readyState !== 1) return false;
+    // 私人知识库检索：发消息前本地 + 远程检索（异步），携带结果给后端
+    const kbContext = this.localKnowledge ? await this.localKnowledge.search(payload.content) : undefined;
     const msg = JSON.stringify({
       content: payload.content,
       images: payload.images,
       session_id: payload.sessionId,
       locationScope: payload.locationScope,
+      kbContext,
     });
     try {
       this.socket.send(msg);

@@ -126,6 +126,18 @@ contextBridge.exposeInMainWorld("skillApi", {
   save: (list: unknown[]): Promise<{ ok: boolean }> => ipcRenderer.invoke("skill:save", list),
 });
 
+// 私人知识库本地存储 API
+contextBridge.exposeInMainWorld("kbApi", {
+  list: (category?: string): Promise<unknown[]> => ipcRenderer.invoke("kb:list", category),
+  add: (entry: { title: string; content: string; category?: string; tags?: string[]; source?: string }): Promise<{ ok: boolean; id: number }> => 
+    ipcRenderer.invoke("kb:add", entry),
+  delete: (id: number): Promise<{ ok: boolean }> => ipcRenderer.invoke("kb:delete", id),
+  addRemote: (source: { name: string; url: string; sourceType: string; enabled?: boolean; priority?: number }): Promise<{ ok: boolean; id: number }> =>
+    ipcRenderer.invoke("kb:add-remote", source),
+  updateRemote: (id: number, updates: any): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke("kb:update-remote", id, updates),
+});
+
 // 媒体查看器：在独立 BrowserWindow 中打开媒体（替代应用内 overlay）。
 // src 可为 data: URL / http(s) URL / avatar:// / pet:// / 本地路径；kind 可选 image|video。
 //

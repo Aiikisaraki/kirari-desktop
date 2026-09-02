@@ -2,6 +2,7 @@ import { BotAdapter } from "./bot-adapter";
 import { OneBotAdapter } from "./onebot-adapter";
 import { BotBackendClient } from "./bot-backend-client";
 import type { AdapterConfig, AdapterStatus, BotIncoming, PetBackendResponse } from "./types";
+import type { LocalKnowledge } from "../../src/knowledge/localKnowledge";
 
 // 主人在其他协议端（如 QQ）发起的对话，需要同步进桌宠聊天框。
 // 由 main.ts 注入一个回调，内部转发到 ChatSessionService.injectExternalMessage。
@@ -21,6 +22,8 @@ export interface AdapterManagerOpts {
   onStatusChange: () => void;
   // 把主人的跨端消息/回复同步到桌宠聊天框；可选（未注入则不同步）。
   pushOwnerMessage?: (msg: OwnerSyncMessage) => void;
+  // 私人知识库：机器人发消息前本地检索，携带 kbContext 给后端
+  localKnowledge?: LocalKnowledge;
 }
 
 // 管理多个协议适配器实例：持久化配置、按 (adapter, 发送者) 解析 locationScope，
@@ -34,7 +37,7 @@ export class AdapterManager {
 
   constructor(opts: AdapterManagerOpts) {
     this.opts = opts;
-    this.backend = new BotBackendClient(opts.backendUrl, opts.token);
+    this.backend = new BotBackendClient(opts.backendUrl, opts.token, opts.localKnowledge);
   }
 
   init(): void {
@@ -46,7 +49,7 @@ export class AdapterManager {
       if (!inst) continue;
       this.instances.set(cfg.id, inst);
       this.knownAccounts.set(cfg.id, new Set());
-      inst.on("message", (msg: BotIncoming) => this.handleIncoming(inst, msg));
+      inst.on("message", (msg: BotIncoming) => void this.handleIncoming(inst, msg));
       if (cfg.enabled) inst.connect();
     }
     this.backend.connect();
@@ -87,7 +90,7 @@ export class AdapterManager {
     if (inst) {
       this.instances.set(id, inst);
       this.knownAccounts.set(id, new Set());
-      inst.on("message", (msg: BotIncoming) => this.handleIncoming(inst, msg));
+      inst.on("message", (msg: BotIncoming) => void this.handleIncoming(inst, msg));
       if (full.enabled) inst.connect();
     }
     this.emitStatus();
@@ -165,7 +168,7 @@ export class AdapterManager {
     this.emitStatus();
   }
 
-  private handleIncoming(adapter: BotAdapter, msg: BotIncoming): void {
+  private async handleIncoming(adapter: BotAdapter, msg: BotIncoming): Promise<void> {
     console.log(`[adapter] handleIncoming adapter=${adapter.name} sender=${msg.senderId} text="${msg.text}"`);
     const accts = this.knownAccounts.get(adapter.id) || new Set<string>();
     const isNew = !accts.has(msg.senderId);
@@ -203,7 +206,7 @@ export class AdapterManager {
       }
     };
     this.backend.onResponse(sessionId, onResp);
-    const ok = this.backend.send({
+    const ok = await this.backend.send({
       content: msg.text,
       images: msg.images,
       sessionId,

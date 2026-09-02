@@ -19,6 +19,7 @@ import { startBackendIfLocal, stopBackend, applyConfigToBackend, getBackendPort,
 import * as frontendTools from "./frontend-tools";
 import { readModelConfigFile, writeModelConfigFile, onModelConfigChanged, startModelConfigWatch } from "./model-config";
 import { initAppLogger, getLogPath, isDebugMode } from "./app-logger";
+import { LocalKnowledge } from "../src/knowledge/localKnowledge";
 
 type PetWindow = InstanceType<typeof BrowserWindow>;
 type PetTray = InstanceType<typeof Tray>;
@@ -275,6 +276,42 @@ ipcMain.handle("skill:save", (_e, list: frontendTools.SkillConfig[]): { ok: bool
   return { ok: true };
 });
 
+// 私人知识库本地存储 IPC
+ipcMain.handle("kb:list", (_e, category?: string) => {
+  if (!localKnowledge) return [];
+  return localKnowledge.getAll(category);
+});
+
+ipcMain.handle("kb:add", (_e, entry: { title: string; content: string; category?: string; tags?: string[]; source?: string }) => {
+  if (!localKnowledge) return { ok: false };
+  const id = localKnowledge.add(entry);
+  return { ok: true, id };
+});
+
+ipcMain.handle("kb:delete", (_e, id: number) => {
+  if (!localKnowledge) return { ok: false };
+  const ok = localKnowledge.delete(id);
+  return { ok };
+});
+
+ipcMain.handle("kb:add-remote", (_e, source: { name: string; url: string; sourceType: string; enabled?: boolean; priority?: number }) => {
+  if (!localKnowledge) return { ok: false };
+  const id = localKnowledge.addRemote({
+    name: source.name,
+    url: source.url,
+    sourceType: source.sourceType as any,
+    enabled: source.enabled !== false,
+    priority: source.priority,
+  });
+  return { ok: true, id };
+});
+
+ipcMain.handle("kb:update-remote", (_e, id: number, updates: any) => {
+  if (!localKnowledge) return { ok: false };
+  const ok = localKnowledge.updateRemote(id, updates);
+  return { ok };
+});
+
 // 重新把前端工具（MCP + skill）注册给后端：通过 ChatSessionService 重新发送 register_tools / register_skills。
 function reRegisterFrontendTools(): void {
   try {
@@ -318,6 +355,7 @@ function initAdapterManager() {
         const svc = ensureChatSessionService();
         if (svc) svc.injectExternalMessage(m);
       },
+      localKnowledge: localKnowledge ?? undefined,
     });
     adapterManager.init();
   } catch (e) {
@@ -545,6 +583,8 @@ let chatSessionService: ChatSessionService | null = null;
 // 聊天会话持久化文件路径：按当前部署模式/服务端/登录身份隔离（见 resolveChatStoragePath），
 // 每次重建聊天连接时重算，确保不同身份加载各自独立的聊天历史。
 let chatSessionStoragePath = "";
+// 私人知识库：本地文件存储（userData/knowledge.json），前端自主检索，后端零状态
+let localKnowledge: LocalKnowledge | null = null;
 
 async function readApiResponse(response: Response) {
   const text = await response.text();
@@ -1532,6 +1572,7 @@ function ensureChatSessionService() {
       token,
       requireToken: true,
       emitState: broadcastChatState,
+      localKnowledge: localKnowledge ?? undefined,
     });
     // 暴露给 MCP / skill 保存后「重新注册工具」时调用。
     (globalThis as any).__chatSessionService = chatSessionService;
@@ -1989,6 +2030,10 @@ app.whenReady().then(async () => {
   console.log(`日志文件: ${logPath ?? "(无法写入，请检查 userData 权限)"}`);
   console.log(`工作模式: ${clientConfig.mode}`);
   console.log("========================================");
+
+  // 初始化私人知识库（本地文件）
+  localKnowledge = new LocalKnowledge(app.getPath("userData"));
+  console.log(`[kb] 私人知识库已加载 ${localKnowledge.getAll().length} 条`);
 
   // 注册 pet:// 协议：打包后 loadFile 无 HTTP 服务器，
   // fetch('/pet/frames.json') 无法解析。通过自定义协议映射到精灵帧资源目录。

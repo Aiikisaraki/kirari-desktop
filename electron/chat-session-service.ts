@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import { nativeImage } from "electron";
 import * as frontendTools from "./frontend-tools";
+import type { LocalKnowledge } from "../src/knowledge/localKnowledge";
 
 export type ChatAuthor = "user" | "pet" | "system";
 
@@ -45,6 +46,8 @@ type ChatSessionOptions = {
     // 缺失时若 requireToken 为 true，后端会拒绝连接。
     token?: string;
     requireToken?: boolean;
+    // 私人知识库：发消息前本地检索，携带 kbContext 给后端
+    localKnowledge?: LocalKnowledge;
 };
 
 const WELCOME_MESSAGE = "今天也一起加油吧。";
@@ -94,6 +97,7 @@ export class ChatSessionService {
     private readonly emitState: (state: ChatStateSnapshot) => void;
     private readonly token: string;
     private readonly requireToken: boolean;
+    private readonly localKnowledge: LocalKnowledge | undefined;
     private storagePath = "";
     private socket: any = null;
     private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -120,6 +124,7 @@ export class ChatSessionService {
         this.emitState = options.emitState;
         this.token = options.token ?? "";
         this.requireToken = options.requireToken !== false;
+        this.localKnowledge = options.localKnowledge;
     }
 
     async init(storagePath: string) {
@@ -155,11 +160,15 @@ export class ChatSessionService {
             return false;
         }
 
+        // 私人知识库检索：发消息前本地 + 远程检索（异步），携带结果给后端
+        const kbContext = this.localKnowledge ? await this.localKnowledge.search(text) : undefined;
+
         const msgPayload = JSON.stringify({
             userid: this.userid,
             content: text,
             images,
             session_id: this.state.sessionId,
+            kbContext,
         });
 
         try {
@@ -338,6 +347,19 @@ export class ChatSessionService {
             // 后端回调解「前端托管工具」：在本进程（Electron 主进程）实际执行后回传结果。
             if (payload.type === "tool_invoke" && typeof payload.call_id === "string") {
                 void this.handleToolInvoke(payload);
+                return;
+            }
+
+            // 后端反向请求私人知识库：本地检索后回 kb_response
+            if (payload.type === "kb_request" && typeof payload.requestId === "string" && this.localKnowledge) {
+                const results = this.localKnowledge.search(payload.query || "", 5);
+                if (this.socket && this.socket.readyState === 1) {
+                    this.socket.send(JSON.stringify({
+                        type: "kb_response",
+                        requestId: payload.requestId,
+                        results,
+                    }));
+                }
                 return;
             }
 
