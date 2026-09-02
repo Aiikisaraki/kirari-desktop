@@ -3,7 +3,24 @@
 // 不关心底层是精灵帧（SpriteRenderer）还是 Live2D（Live2DRenderer）。
 // 这样即可在同一套框架下支持多种形象，并允许用户上传自定义精灵形象。
 
-export type AvatarState = "idle" | "blink" | "speak" | "wave" | "happy" | "sleepy";
+export type AvatarState = 
+  | "idle" 
+  | "blink" 
+  | "speak" 
+  | "wave" 
+  | "happy" 
+  | "sleepy"
+  // 新增情绪类
+  | "shy"
+  | "sad"
+  | "surprised"
+  | "thinking"
+  | "excited"
+  // 新增交互类
+  | "stretch"
+  | "nod"
+  | "shake"
+  | "bow";
 
 export type AvatarType = "sprite" | "live2d" | "image";
 
@@ -28,10 +45,40 @@ export interface SpriteStateDef {
 // 加载时会自动包成 clips:[...]（见 SpriteRenderer.normalizeState）。新格式为 {loop, clips:[...]}。
 export type RawSpriteState = SpriteStateDef | (SpriteClipDef & { loop: boolean });
 
+// 皮肤专属台词库定义
+export interface PersonalityDialogues {
+  greeting?: string[]
+  drag?: {
+    start?: string[]
+    end?: string[]
+  }
+  idle?: string[]
+  lateNight?: string[]
+  longChat?: string[]
+  apiError?: string[]
+  reconnect?: string[]
+  // 新增情绪场景
+  shy?: string[]           // 害羞时台词
+  sad?: string[]           // 难过时台词
+  surprised?: string[]     // 惊讶时台词
+  thinking?: string[]      // 思考中台词
+  excited?: string[]       // 兴奋时台词
+  // 新增交互场景
+  stretch?: string[]       // 伸懒腰时台词
+  nod?: string[]          // 点头确认时台词
+  shake?: string[]        // 摇头拒绝时台词
+  bow?: string[]          // 鞠躬时台词
+  onEquip?: {
+    text: string
+    emotion?: AvatarState
+  }
+}
+
 // 皮肤配置文件（frames.json）结构：
 // 顶层可选 `type` 声明该皮肤用什么渲染器（sprite / live2d / image），缺省回退为 sprite（向后兼容）。
 // 顶层可选 `name`（显示名，缺省回退文件夹名）、`author`（作者）、`version`（版本号）。
 // 顶层可选 `chatAvatar`（聊天头像图文件名，相对皮肤文件夹）——「一套皮肤一个头像」。
+// 顶层可选 `personality`（台词库）——跟随皮肤包分发的专属台词。
 // 其余顶层键为动画状态（idle/blink/...），值为状态定义。
 export type SpriteManifest = Record<string, RawSpriteState> & {
   type?: AvatarType;
@@ -39,6 +86,7 @@ export type SpriteManifest = Record<string, RawSpriteState> & {
   author?: string;
   version?: string;
   chatAvatar?: string;
+  personality?: PersonalityDialogues;
 };
 
 export interface AvatarConfig {

@@ -100,12 +100,19 @@ export class SpriteRenderer implements AvatarRenderer {
         this.baseDir = idx >= 0 ? config.src.slice(0, idx + 1) : "";
 
         // 归一化每个状态（兼容旧扁平格式），仅保留合法状态。
-        // 跳过顶层保留字段 `type`（渲染类型声明，非动画状态）。
+        // 跳过顶层保留字段 `type`、`name`、`author`、`version`、`chatAvatar`、`personality`（元数据，非动画状态）。
+        const reservedKeys = new Set(['type', 'name', 'author', 'version', 'chatAvatar', 'personality']);
         this.manifest = {};
         for (const key of Object.keys(json)) {
-            if (key === "type") continue;
+            if (reservedKeys.has(key)) continue;
             const norm = normalizeState(json[key]);
             if (norm && norm.clips.length > 0) this.manifest[key] = norm;
+        }
+        
+        // 加载皮肤专属台词库（如果存在）
+        if (json.personality) {
+            const { dialogueManager } = await import('../personality/dialogueManager');
+            dialogueManager.loadPersonality(json.personality);
         }
         if (Object.keys(this.manifest).length === 0) {
             throw new Error(`frames.json 为空或格式无效: ${config.src}`);

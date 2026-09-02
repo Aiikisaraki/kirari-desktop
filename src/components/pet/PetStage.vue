@@ -42,14 +42,23 @@ const electron = window.require?.('electron')
 const ipcRenderer = electron?.ipcRenderer
 
 /* ===================== 状态机调度器 ===================== */
-// 优先级：说话 > 高兴 > 招手 > 瞌睡 > 眨眼 > 待机。
+// 优先级：说话 > 情绪类(excited/happy/sad/surprised) > 交互类(wave/bow/nod/shake) > 思考 > 害羞 > 瞌睡 > 眨眼/伸懒腰 > 待机。
 // 低优先级状态不能打断高优先级（豆包互斥规则）；瞌睡的打断走专门的 markActivity/wakeUp。
 const PRIORITY: Record<AvatarState, number> = {
   idle: 0,
   blink: 10,
+  stretch: 10,
   sleepy: 20,
-  wave: 40,
+  shy: 30,
+  thinking: 40,
+  wave: 50,
+  bow: 50,
+  nod: 50,
+  shake: 50,
   happy: 60,
+  excited: 60,
+  surprised: 60,
+  sad: 60,
   speak: 100,
 }
 
@@ -58,6 +67,13 @@ const FALLBACK_DUR: Partial<Record<AvatarState, number>> = {
   blink: 11000,
   wave: 5200,
   happy: 5200,
+  shy: 4000,
+  surprised: 3000,
+  excited: 5000,
+  nod: 2000,
+  shake: 2000,
+  bow: 3500,
+  stretch: 4500,
 }
 function durationOf(s: AvatarState): number {
   return avatarStore.durations[s] ?? FALLBACK_DUR[s] ?? 0
