@@ -1,68 +1,110 @@
 <p align="center">
-  <img src="./assets/kirari-banner.jpg" alt="Kirari" width="720">
+  <img src="./assets/kirari-banner.jpg" alt="Kirari 绮莉" width="720">
 </p>
 
-# Kirari 绮莉 (kirari-desktop)
+# Kirari 绮莉
 
-桌面宠物客户端：Electron + Vue 3 + Vite + TypeScript。
+> 让一个会聊天、会记事、能陪在桌面上的小伙伴，安静地住进你的电脑。
 
-## 特性
+Kirari 是以桌面宠物为主体的机器人项目。它优先保证桌面陪伴体验，同时提供 AI 对话、记忆、知识库、换肤、工具调用，以及可选的 OneBot / QQ 消息接入能力。
 
-- 模型配置可在安装向导或「设置」中填写，配置持久化于用户目录 `config.json`，直接编辑文件即生效。
-- 默认使用免费大模型 API（chatanywhere），也可自由切换任意 OpenAI 兼容端点。
-- 可作为 **QQ 机器人** 运行（通过内置 OneBot 适配器桥接）。
-- 可接入 **MCP（Model Context Protocol）服务器**，把外部工具交给桌宠调用。
+当前客户端版本：`0.7.2`
 
-## 关联项目
+## 能做什么
 
-- **[kirari-core](https://github.com/Aiikisaraki/kirari-core)（后端服务）**：本客户端通过 WebSocket（`ws://localhost:9089/ws`）与 HTTP（`http://localhost:9089`）对接后端；开发/集成模式下后端作为本地子进程随客户端启动，也可在设置中填写远端地址对接独立部署的后端。
-- **OneBot 协议**：内置 OneBot 适配器（`electron/adapter/onebot-adapter.ts`），以正向 WebSocket（如 `ws://127.0.0.1:3001`）桥接 QQ 等平台消息，使桌宠可作为聊天机器人使用。
-- **MCP 服务器**：设置中可配置任意 MCP（streamable-HTTP / stdio）服务器，其工具由客户端托管，并通过后端 WS 工具桥接（工具名前缀 `frontend__`）供模型调用。
+- **桌面陪伴**：透明无边框窗口、可拖动、逐像素点穿、多种动画状态和多套形象。
+- **AI 对话**：支持文本和图片消息，可连接任意 OpenAI 兼容服务。
+- **记忆与知识库**：保存对话上下文，支持公用知识源和私人知识库。
+- **个性化形象**：支持官方皮肤、自定义形象包、聊天头像和情绪动画。
+- **工具扩展**：可配置外部工具服务，让 Kirari 在对话中调用天气、搜索或其他工具。
+- **机器人接入**：内置 OneBot 适配器，可桥接 QQ 等消息平台；这是桌宠能力的可选扩展，不影响桌面端单独使用。
 
-## 引用的 API 与外部服务
+## 安装与版本选择
 
-| 用途 | 服务 / 端点 | 说明 |
-| ---- | ----------- | ---- |
-| 大模型对话（OpenAI 兼容） | 默认 `https://api.chatanywhere.tech/v1`（免费 Key 见 [chatanywhere/GPT_API_free](https://github.com/chatanywhere/GPT_API_free)） | 可在「模型设置」切换为任意 OpenAI 兼容端点（如智谱 GLM、通义千问、DeepSeek 等）；实际由后端 kirari-core 调用。 |
-| 工具栏图标 | [MingCute](https://www.mingcute.com)（萌趣图标） | 聊天气泡工具栏图标来源，详见下方「资源版权」。 |
+推荐从 [Releases](https://github.com/Aiikisaraki/kirari-desktop/releases) 下载 Windows 安装包：
 
-> 本项目仅把上述服务作为**可配置端点/素材来源**引用，不内置其任何专有内容；使用这些服务须遵守各自的服务条款，相关密钥由使用者自行提供并承担合规责任。
+| 版本 | 适合谁 | 特点 |
+| --- | --- | --- |
+| 纯前端版 | 已有独立后端的用户 | 安装包小，连接远程 `kirari-core` |
+| 整合版 | 想开箱即用的用户 | 客户端内置后端，本地模式自动启动 |
+| 全功能版 | 需要在本地部署或连接远程服务的用户 | 安装时可选择使用本地后端或远程后端 |
 
-## 主要第三方依赖
+本地模式会在启动时自动选择可用端口，并由客户端把连接地址传给内置后端。不要把 `9089` 当作桌面端永远固定使用的端口。
 
-运行时：`vue`、`pinia`、`electron`、`marked`（Markdown 渲染）、`dompurify`（HTML 净化）、`katex`（公式渲染）、`extract-zip`（形象压缩包解压）、`birpc` / `hookable` / `perfect-debounce` / `nostics`（开发工具链）。
+## 从源码运行
 
-构建/开发：`vite`、`@vitejs/plugin-vue`、`vite-plugin-electron`、`electron-builder`、`typescript`、`vue-tsc`。
-
-以上依赖各自沿用其原始开源许可证（多为 MIT / ISC / Apache-2.0），通过 npm 安装，其许可证随包提供，使用即视为接受其条款。
-
-## 开发
+### 前端开发
 
 ```bash
 npm install
-npm run dev          # 开发模式（前端 + 本地后端子进程）
+npm run dev
 ```
 
-## 打包（本地）
+`npm run dev` 启动 Vite 前端开发服务。开发本地后端时，请在另一个终端进入 [`kirari-core`](https://github.com/Aiikisaraki/kirari-core) 仓库并单独启动后端。开发端口以终端输出为准，端口被占用时 Vite 会自动顺延。
+
+### Windows 本地打包
+
+以下命令在 Windows Git Bash 中执行：
 
 ```bash
 rm -rf release
-npm run dist         # vite build + electron-builder，产出 release/*.exe
+npm run dist:integrated
 ```
 
-## 仓库结构
+常用打包命令：
 
-- 本仓库为**前端/客户端**（Electron 应用）。
-- 后端服务见 [`kirari-core`](https://github.com/Aiikisaraki/kirari-core)。
+```bash
+npm run dist:frontend   # 纯前端版
+npm run dist:integrated # 前后端整合版
+npm run dist:full       # 全功能版
+npm run dist:all        # 一次构建三种版本
+```
 
-## 许可证与资源版权
+后端运行时和依赖会在打包前由脚本准备，后端源码以 `kirari-core` 仓库为准。不要直接修改 `build-resources/pet-api-bundle` 或其他构建产物，它们会在下一次打包时重新生成。
 
-- **代码**：本项目以 **MIT 许可证** 发布，详见仓库根目录 [`LICENSE`](./LICENSE)。
-- **第三方依赖**：运行时与构建依赖各自沿用其原始开源许可证（见上方「主要第三方依赖」），通过 npm 安装，其许可证随包提供。
-- **图标（MingCute）**：聊天气泡工具栏图标使用 MingCute 图标库。MingCute 可免费用于个人与商业用途，请保留其署名，出处：<https://www.mingcute.com>。
-- **形象与视觉素材（AI 生成 + 人工设计）**：`assets/kirari-banner.jpg`、`public/avatars/*`、`resources/official-avatars/*`、`build-resources/icons/*` 等角色形象与图标，由作者通过 AI 生成并结合人工设计、调校而成。关于 AI 生成内容的著作权，各地法律认定不一（部分地区要求具备人类创造性贡献方可构成作品）；作者就其中的人工设计、编排与后期处理主张权利，并在法律允许范围内按 MIT 许可证授权。如你另行分发这些素材，请留意 AI 生成内容的权属可能与代码不同，并自行留存生成过程记录。
-- **外部服务**：本项目仅把第三方 API 作为可配置端点引用，不内置其专有内容；使用须遵守各自服务条款，密钥由使用者自行提供并承担合规责任。
+### 官方形象资源
 
----
+官方形象的二进制资源使用 Git LFS 管理。首次获取源码后请确保已安装 Git LFS，并执行：
 
-> 🤖 **本项目由 AI 辅助创建并持续维护**。界面、交互逻辑与打包流程均在 AI 协作下设计与实现，欢迎反馈与共建。
+```bash
+git lfs install
+git lfs pull
+```
+
+如果只拿到了几 KB 的文本指针而不是图片，说明 LFS 资源尚未拉取完整，打包前应先修复。
+
+修改 Electron 主进程代码（例如 `electron/main.ts`、后端启动器或 IPC 相关文件）后，需要完整重启开发进程；Vite 热更新只覆盖渲染层。
+
+## 项目关系
+
+- [`kirari-desktop`](https://github.com/Aiikisaraki/kirari-desktop)：本仓库，桌面宠物客户端。
+- [`kirari-core`](https://github.com/Aiikisaraki/kirari-core)：对话、记忆、知识库、账户和工具服务。
+- [OneBot](https://onebot.dev/)：可选的消息平台协议接入层。
+
+客户端与后端的通信由桌面主进程统一管理。远程部署时，在设置中填写后端地址；本地模式则由客户端负责拉起并连接内置后端。
+
+## 配置说明
+
+首次启动后，可在设置中填写模型服务地址、模型名称和密钥。客户端会把配置保存在用户目录，不要把包含密钥的配置文件提交到 Git。
+
+模型服务需兼容 OpenAI API 格式。默认端点仅作为示例和初始配置来源，实际可用性、费用、地区限制和服务条款以对应服务商为准。
+
+## 已知边界
+
+- 项目当前以 Windows 桌面端为主要发布目标；源码层面保留跨平台 Electron 结构。
+- OneBot / QQ 接入适合熟悉消息平台配置的用户，具体反向连接地址和鉴权方式取决于所使用的 OneBot 实现。
+- 外部模型、搜索、天气和其他数据服务可能有速率限制或临时不可用，服务异常时部分对话会进入降级处理。
+- 当前仓库没有完整的自动化测试套件，发布前应至少验证启动、拖动、点穿、聊天、换肤和打包安装流程。
+
+## 许可证与资源
+
+- 代码采用 [MIT License](./LICENSE)。
+- MingCute 图标来自 <https://www.mingcute.com>，请遵守其许可证和署名要求。
+- 角色形象、横幅和其他视觉素材包含 AI 生成与人工设计、编排、调校内容。素材权利可能与代码权利不同，二次分发时请自行确认相关授权和当地法律要求。
+- 使用的第三方模型、接口、数据源和工具服务均须遵守其服务条款，密钥和使用责任由使用者自行承担。
+
+## 参与开发
+
+欢迎提交 Issue 和 Pull Request。提交前请先确认改动属于客户端还是 `kirari-core`，并尽量保持桌宠的拖动、点穿、动画、换肤和安装包稳定性。
+
+后端接口细节请查看 [`kirari-core/PORTREADME.md`](https://github.com/Aiikisaraki/kirari-core/blob/main/PORTREADME.md)。
