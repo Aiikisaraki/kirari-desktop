@@ -14,8 +14,10 @@ export type OwnerSyncMessage = {
 };
 
 export interface AdapterManagerOpts {
-  backendUrl: string;
-  token: string;
+  /** @deprecated 已废弃：内核跑在本进程内，不再需要后端地址。保留仅为兼容旧调用点。 */
+  backendUrl?: string;
+  /** @deprecated 已废弃：本机不设账户，不再需要令牌。 */
+  token?: string;
   getDesktopSessionId: () => string;
   getAdaptersConfig: () => AdapterConfig[];
   saveAdaptersConfig: (adapters: AdapterConfig[]) => void;
@@ -27,7 +29,7 @@ export interface AdapterManagerOpts {
 }
 
 // 管理多个协议适配器实例：持久化配置、按 (adapter, 发送者) 解析 locationScope，
-// 把入站消息经 BotBackendClient 发给后端，再按 session 把 pet_response 路由回对应适配器。
+// 把入站消息交给本进程的 AI 引擎，再按 session 把回复路由回对应适配器。
 export class AdapterManager {
   private opts: AdapterManagerOpts;
   private backend: BotBackendClient;

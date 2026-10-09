@@ -1,154 +1,115 @@
 import type { PetBackendResponse } from "./types";
 import type { LocalKnowledge } from "../../src/knowledge/localKnowledge";
+import * as engine from "../ai/engine";
+import type { AiModelSettings } from "../ai/aiContext";
+import { readModelConfigFile } from "../model-config";
+import { collectBasePersona, collectSkillPrompts } from "../frontend-tools";
 
 type ResponseListener = (resp: PetBackendResponse) => void;
 
-// 机器人适配器专用的后端 WS 客户端：与桌面 ChatSessionService 并列，但支持「多会话」，
-// 按 session_id 把 pet_response 分发给对应适配器。认证使用登录 uid 的令牌（与桌面一致），
-// 记忆隔离由入站时携带的 locationScope 决定（后端忽略客户端 userid，身份来自令牌）。
+/**
+ * 机器人适配器用的对话通道。
+ *
+ * 原来是「连后端 WebSocket，按 session_id 把 pet_response 分发给对应适配器」。
+ * 现在 AI 内核跑在本进程内，这个类的对外接口（connect / send / onResponse / onStatus）
+ * 完全保留，内部改为直接调用本地引擎——AdapterManager 与各协议适配器无需改动。
+ *
+ * 语义差异：
+ *  - send() 现在是「等到回复生成完」而非「发出即返回」；
+ *  - connected 表示「大脑配置齐全」，不再是「网络已连上后端」。
+ */
 export class BotBackendClient {
-  private readonly backendUrl: string;
-  private readonly token: string;
-  private readonly localKnowledge: LocalKnowledge | undefined;
-  private socket: any = null;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private disposed = false;
-  private listeners = new Map<string, ResponseListener>();
-  private statusCbs: ((connected: boolean) => void)[] = [];
+    private readonly localKnowledge: LocalKnowledge | undefined;
+    private disposed = false;
+    private listeners = new Map<string, ResponseListener>();
+    private statusCbs: ((connected: boolean) => void)[] = [];
 
-  constructor(backendUrl: string, token: string, localKnowledge?: LocalKnowledge) {
-    this.backendUrl = backendUrl;
-    this.token = token;
-    this.localKnowledge = localKnowledge;
-  }
-
-  onStatus(cb: (connected: boolean) => void): void {
-    this.statusCbs.push(cb);
-  }
-
-  connect(): void {
-    if (this.disposed) return;
-    // 已在连接中(0)或已打开(1)则跳过，避免重复连接；已关闭/为空才重连
-    if (this.socket && this.socket.readyState !== 2 && this.socket.readyState !== 3) return;
-    const WebSocketCtor = (globalThis as any).WebSocket;
-    if (!WebSocketCtor) {
-      console.error("[bot-backend] WebSocket 不可用");
-      return;
+    constructor(_deprecatedUrl?: unknown, _deprecatedToken?: unknown, localKnowledge?: LocalKnowledge) {
+        // 前两个参数（后端地址、令牌）已废弃：内核在本进程内，不再有连接地址与令牌。
+        // 保留形参数位只为兼容既有调用点，不参与任何逻辑。
+        this.localKnowledge = localKnowledge;
     }
-    let url = this.backendUrl;
-    if (this.token) {
-      try {
-        const u = new URL(this.backendUrl);
-        if (!u.searchParams.has("token")) {
-          u.searchParams.set("token", this.token);
-          url = u.toString();
+
+    onStatus(cb: (connected: boolean) => void): void {
+        this.statusCbs.push(cb);
+    }
+
+    /** 读取本机模型配置（大脑凭证由用户自持，存在 config.json）。 */
+    private readSettings(): AiModelSettings | null {
+        const cfg = readModelConfigFile();
+        return {
+            model: cfg.model || "",
+            endpoint: cfg.endpoint || "",
+            key: cfg.key || "",
+            searchProvider: cfg.searchProvider,
+            searchKey: cfg.searchKey,
+            searchEndpoint: cfg.searchEndpoint,
+        };
+    }
+
+    connect(): void {
+        if (this.disposed) return;
+        const ready = engine.isConfigured(this.readSettings());
+        if (ready) {
+            console.log("[bot-backend] 大脑已就绪");
+        } else {
+            console.warn("[bot-backend] 大脑还没配置好，机器人暂时无法回复");
         }
-      } catch {
-        /* ignore */
-      }
+        this.statusCbs.forEach((cb) => cb(ready));
     }
-    const socket = new WebSocketCtor(url);
-    this.socket = socket;
-    socket.onopen = () => {
-      console.log("[bot-backend] 后端 WS 已连接");
-      this.statusCbs.forEach((cb) => cb(true));
-    };
-    socket.onmessage = (ev: { data: string }) => {
-      this.handleMessage(ev.data);
-    };
-    socket.onclose = () => {
-      console.log("[bot-backend] 后端 WS 已断开");
-      if (this.socket === socket) this.socket = null; // 关键：断开后清空，否则重连被 guard 挡死
-      this.statusCbs.forEach((cb) => cb(false));
-      this.scheduleReconnect();
-    };
-    socket.onerror = () => {
-      console.error("[bot-backend] 后端 WS 错误（可能未授权/地址错误）");
-      if (this.socket === socket) this.socket = null;
-      this.statusCbs.forEach((cb) => cb(false));
-      this.scheduleReconnect();
-    };
-  }
 
-  private scheduleReconnect(): void {
-    if (this.disposed || this.reconnectTimer) return;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      this.connect();
-    }, 5000);
-  }
+    // 注册某 session 的响应回调（发送前调用，收到后自动注销）
+    onResponse(sessionId: string, cb: ResponseListener): void {
+        this.listeners.set(sessionId, cb);
+    }
+    offResponse(sessionId: string): void {
+        this.listeners.delete(sessionId);
+    }
 
-  private handleMessage(raw: string): void {
-    try {
-      const payload = JSON.parse(raw);
-      if (payload && payload.type === "pet_response" && typeof payload.speech === "string") {
-        const sessionId: string = payload.session_id || "";
-        // 后端每条连接建立后 1.5s 会推一条无 session_id 的「问候」，不是用户消息，直接忽略。
-        if (!sessionId) {
-          console.log(`[bot-backend] 收到问候/广播(无 session_id)，已忽略: "${String(payload.speech).slice(0, 24)}"`);
-          return;
+    async send(payload: {
+        content: string;
+        images: string[];
+        sessionId: string;
+        locationScope: string | null;
+    }): Promise<boolean> {
+        const settings = this.readSettings();
+        if (!engine.isConfigured(settings)) return false;
+
+        const { content, images, sessionId, locationScope } = payload;
+        try {
+            const result = await engine.chat({
+                settings: settings!,
+                sessionId,
+                text: content,
+                images: Array.isArray(images) ? images : [],
+                locationScope: locationScope ?? null,
+                persona: collectBasePersona() || null,
+                skillPrompts: collectSkillPrompts(),
+            });
+            const cb = this.listeners.get(sessionId);
+            if (cb) {
+                cb({
+                    speech: result.speech,
+                    emotion: result.emotion,
+                    images: Array.isArray(result.images) ? result.images : [],
+                    sessionId,
+                });
+            }
+            return true;
+        } catch (e) {
+            console.error("[bot-backend] 生成回复失败:", e instanceof Error ? e.message : String(e));
+            return false;
         }
-        const cb = this.listeners.get(sessionId);
-        console.log(`[bot-backend] pet_response session=${sessionId} 命中回调=${!!cb}`);
-        if (cb) {
-          cb({
-            speech: payload.speech,
-            emotion: payload.emotion,
-            images: Array.isArray(payload.images) ? payload.images : [],
-            sessionId,
-          });
-        }
-      }
-    } catch {
-      /* ignore parse errors */
     }
-  }
 
-  // 注册某 session 的响应回调（发送前调用，收到后自动注销）
-  onResponse(sessionId: string, cb: ResponseListener): void {
-    this.listeners.set(sessionId, cb);
-  }
-  offResponse(sessionId: string): void {
-    this.listeners.delete(sessionId);
-  }
+    disconnect(): void {
+        this.disposed = true;
+        this.listeners.clear();
+    }
 
-  async send(payload: {
-    content: string;
-    images: string[];
-    sessionId: string;
-    locationScope: string | null;
-  }): Promise<boolean> {
-    if (!this.socket || this.socket.readyState !== 1) return false;
-    // 私人知识库检索：发消息前本地 + 远程检索（异步），携带结果给后端
-    const kbContext = this.localKnowledge ? await this.localKnowledge.search(payload.content) : undefined;
-    const msg = JSON.stringify({
-      content: payload.content,
-      images: payload.images,
-      session_id: payload.sessionId,
-      locationScope: payload.locationScope,
-      kbContext,
-    });
-    try {
-      this.socket.send(msg);
-      return true;
-    } catch {
-      return false;
+    /** 私有知识库检索（保留原语义：机器人侧也走本地库）。 */
+    async searchKnowledge(query: string): Promise<unknown[]> {
+        if (!this.localKnowledge) return [];
+        return this.localKnowledge.search(query, 5);
     }
-  }
-
-  disconnect(): void {
-    this.disposed = true;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    if (this.socket) {
-      try {
-        this.socket.close();
-      } catch {
-        /* ignore */
-      }
-      this.socket = null;
-    }
-  }
 }

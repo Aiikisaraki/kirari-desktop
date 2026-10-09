@@ -15,7 +15,6 @@ import extract from "extract-zip";
 import { ChatSessionService, type ChatStateSnapshot } from "./chat-session-service";
 import { AdapterManager } from "./adapter/adapter-manager";
 import type { AdapterConfig, AdapterStatus } from "./adapter/types";
-import { startBackendIfLocal, stopBackend, applyConfigToBackend, getBackendPort, isBackendBundled } from "./backend-launcher";
 import { initEngine, shutdownEngine } from "./ai/engine";
 import * as frontendTools from "./frontend-tools";
 import { readModelConfigFile, writeModelConfigFile, onModelConfigChanged, startModelConfigWatch } from "./model-config";
@@ -77,10 +76,9 @@ function migrateLegacyAvatar(saved: AvatarConfig): AvatarConfig {
   return saved;
 }
 
+// 本机配置（userData/pet-client.config.json）。
+// 桌宠自带大脑，不再保存「部署模式 / 服务端地址 / 账户令牌」这类后端相关字段。
 type DeployConfig = {
-  mode: "local" | "remote";
-  server: { wsUrl: string; httpUrl: string };
-  builtinToken?: string;
   theme?: ThemeName;
   avatar?: AvatarConfig;
   customAvatars?: AvatarMeta[];
@@ -93,18 +91,8 @@ type DeployConfig = {
   window?: { x: number; y: number };
   // 机器人适配器配置（OneBot / QQ 官方机器人）。连接信息含令牌，仅存于本机 userData 配置。
   adapters?: AdapterConfig[];
-  // 分离（远端）模式登录后的会话令牌，持久化以跨重启保持登录态。
-  sessionToken?: string;
-  // 配置由哪种安装包写入，用于区分残留配置：
-  // "integrated" = 一键部署（内联后端）；"frontend" = 仅前端（需自连远程服务器）；
-  // 旧版/非一键安装包可能无此字段（undefined），视为 legacy，会被一键部署包重置。
-  deployment?: "integrated" | "frontend";
 };
-const DEFAULT_BUILTIN_TOKEN = "kirari-local-builtin";
 const DEFAULT_LOCAL = {
-  mode: "local" as const,
-  server: { wsUrl: "ws://localhost:9089/ws", httpUrl: "http://localhost:9089" },
-  builtinToken: DEFAULT_BUILTIN_TOKEN,
   theme: DEFAULT_THEME,
   avatar: DEFAULT_AVATAR,
   adapters: [],
@@ -118,14 +106,8 @@ function loadClientConfig(): DeployConfig {
   for (const p of candidates) {
     try {
       const raw = JSON.parse(fs.readFileSync(p, "utf8"));
-      if (raw && (raw.mode === "local" || raw.mode === "remote") && raw.server) {
+      if (raw && typeof raw === "object") {
       return {
-        mode: raw.mode,
-        server: {
-          wsUrl: raw.server.wsUrl || (raw.mode === "local" ? "ws://localhost:9089/ws" : ""),
-          httpUrl: raw.server.httpUrl || (raw.mode === "local" ? "http://localhost:9089" : ""),
-        },
-        builtinToken: raw.builtinToken || DEFAULT_BUILTIN_TOKEN,
         theme: THEME_LIST.includes(raw.theme) ? raw.theme : DEFAULT_THEME,
         avatar: migrateLegacyAvatar(
           raw.avatar && raw.avatar.type && raw.avatar.src ? raw.avatar : DEFAULT_AVATAR,
@@ -139,11 +121,6 @@ function loadClientConfig(): DeployConfig {
               (a: AdapterConfig) => a && typeof a.id === "string" && typeof a.type === "string",
             )
           : [],
-        sessionToken: typeof raw.sessionToken === "string" ? raw.sessionToken : undefined,
-        deployment:
-          raw.deployment === "integrated" || raw.deployment === "frontend"
-            ? raw.deployment
-            : undefined,
         // 仅当 x/y 都是有效数字时才采用持久化位置；否则保持 undefined，启动时回退默认。
         window:
           raw.window && typeof raw.window.x === "number" && typeof raw.window.y === "number"
@@ -160,31 +137,8 @@ function loadClientConfig(): DeployConfig {
 
 const clientConfig = loadClientConfig();
 
-// 纯前端版（frontend edition）未打包后端：若配置仍是 local 模式，强制退化为 remote，
-// 否则会一直尝试连接本机 9089 而后端根本不存在。退化后由设置页让用户填写远程服务器地址。
-const localBackendAvailable = isBackendBundled();
-
-if (!localBackendAvailable && clientConfig.mode === "local") {
-  console.warn("[config] 当前安装包未包含本地后端，强制切换为远程模式（请在设置中填写服务端地址）");
-  clientConfig.mode = "remote";
-  if (!clientConfig.server) clientConfig.server = { wsUrl: "", httpUrl: "" };
-  saveClientConfig();
-}
-
-// 一键部署包（bundled 后端）：防止旧的非一键部署安装包残留配置干扰内联连接。
-// 旧配置可能残留 remote 模式 + 旧服务器地址 + 已失效的 sessionToken，会导致本应内联的
-// 连接被错误地指向旧服务器而失效。检测到「非本安装包写入」(deployment !== "integrated")
-// 时，强制重置为内联 local 模式，丢弃旧服务器地址与旧 sessionToken（内联模式用 builtinToken）。
-if (localBackendAvailable && clientConfig.deployment !== "integrated") {
-  console.warn(
-    "[config] 检测到非一键部署的残留配置，一键部署包已重置为内联本地模式（忽略旧服务器地址与凭证）",
-  );
-  clientConfig.mode = "local";
-  clientConfig.server = { wsUrl: "", httpUrl: "" };
-  clientConfig.sessionToken = undefined;
-  clientConfig.deployment = "integrated";
-  saveClientConfig();
-}
+// 桌宠自带大脑，不再区分「本地部署 / 连接远程服务端」两种模式，
+// 也不再随包携带或拉起任何后端进程。配置里残留的模式与服务端地址一律忽略。
 
 function saveClientConfig() {
   try {
@@ -329,8 +283,7 @@ function reRegisterFrontendTools(): void {
   }
 }
 
-// 创建并初始化机器人适配器管理器（连接已启用的适配器 + 后端 WS）。
-// 启动时与「远程服务器地址变更（deploy:set-server）」时共用，保证重建逻辑一致。
+// 创建并初始化机器人适配器管理器（各协议适配器 + 本进程 AI 引擎）。
 function initAdapterManager() {
   try {
     if (adapterManager) {
@@ -341,13 +294,7 @@ function initAdapterManager() {
       }
       adapterManager = null;
     }
-    const token =
-      clientConfig.mode === "local"
-        ? clientConfig.builtinToken || DEFAULT_BUILTIN_TOKEN
-        : settingsSessionToken ?? "";
     adapterManager = new AdapterManager({
-      backendUrl,
-      token,
       getDesktopSessionId: () => ensureChatSessionService().getSnapshot().sessionId,
       getAdaptersConfig: () => clientConfig.adapters || [],
       saveAdaptersConfig: (adapters) => {
@@ -630,12 +577,6 @@ function startAvatarFolderWatch(): void {
   }
 }
 
-type SettingsApiRequest = {
-  method: "GET" | "POST" | "PUT";
-  path: string;
-  body: Record<string, unknown>;
-};
-
 const petWindowSize = { width: 360, height: 400 };
 // 聊天窗口默认尺寸：QQ 桌面聊天区大小（920×680），
 // 配合方向⑤「双栏头像·带尾气泡」布局（头像常驻两侧 + 非对称圆角气泡 + 时间戳）。
@@ -648,38 +589,19 @@ const chatWindowSize = { width: 920, height: 680 };
 // minWidth 锁到 640：保证即使被用户拖到很窄，也仍处于"双栏布局"档位，
 // 只有真正接近手机的宽度（≤640）才会回退到顶部胶囊的移动端布局。
 const settingsWindowSize = { width: 980, height: 720 };
-// 后端连接地址。本地模式下，这些值会在 startBackendIfLocal 之后被动态端口刷新
-// （见下方 init 流程），覆盖配置里写死的 9089；远程模式沿用配置中的远端地址。
-let backendUrl = clientConfig.server.wsUrl || "ws://localhost:9089/ws";
-let backendHttpUrl = clientConfig.server.httpUrl || "http://localhost:9089";
-let backendHealthUrl = `${backendHttpUrl.replace(/\/$/, "")}/health`;
-let loggedInUid: number | null = null; // 非本地模式：登录后的 uid（聊天身份）
-let chatServiceUserid: number | null = null; // 已创建的聊天服务所用 uid，便于登录/登出后重建
+// 桌宠本机只有一个使用者：聊天身份固定为 uid=1（机器人客人由 scope 隔离，见内核）。
+const CHAT_UID = 1;
+let chatServiceUserid: number | null = null; // 已创建的聊天服务所用 uid
 
-// 聊天身份：本地模式固定为内置账户 uid=1；非本地模式使用登录后的 uid。
 function resolveChatUserid(): number {
-  if (clientConfig.mode === "local") return 1;
-  return loggedInUid && loggedInUid > 0 ? loggedInUid : 1;
+  return CHAT_UID;
 }
 
-// 聊天记录按「部署模式 + 服务端 + 登录身份」隔离存储：避免本地部署与分离部署
-// （或不同远程服务器 / 不同账号）的聊天历史混在同一份文件里互相串味。
-// 旧版只有一个固定的 chat-session.json，切换模式/账号时加载的是同一份记录，
-// 即「本地部署的记录和分离部署登录其他服务器的记录混在一起」bug 的根源。
+// 聊天记录落在本机 userData 下，按本机身份存储一份即可。
 function resolveChatStoragePath(): string {
-  const base = app.getPath("userData");
-  if (clientConfig.mode === "local") {
-    return path.join(base, "chat-session.local.json");
-  }
-  // 远程模式：同一台服务器 + 同一 uid 视为同一会话身份，各自独立文件。
-  // 服务端地址做哈希以生成安全文件名（避免 URL 中特殊字符 / 过长）。
-  const serverId = clientConfig.server?.httpUrl || clientConfig.server?.wsUrl || "unknown";
-  const hash = createHash("sha1").update(serverId).digest("hex").slice(0, 12);
-  const uid = resolveChatUserid();
-  return path.join(base, `chat-session.remote.${hash}.${uid}.json`);
+  return path.join(app.getPath("userData"), "chat-session.json");
 }
 
-let settingsSessionToken: string | null = clientConfig.sessionToken ?? null;
 let settingsWindow: PetWindow | null = null;
 
 let petWindow: PetWindow | null = null;
@@ -711,26 +633,8 @@ async function readApiResponse(response: Response) {
 // 统一「带超时」的 HTTP 请求封装（避免后端无响应时无限挂起）。实现见 ./http。
 import { fetchWithTimeout } from "./http";
 
-// 设置/账号类请求：本地模式带内置账户令牌，远程模式带登录后的会话令牌。
-// 不再使用 ed25519 客户端签名，配置读写由账户凭证驱动，对前端无感。
-async function requestSettingsApi(request: SettingsApiRequest) {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (clientConfig.mode === "local") {
-    // 本地内置账户令牌：后端 verifySessionOrBuiltin 只认 Authorization: Bearer，
-    // 故优先用 Bearer 形式；X-Builtin-Token 仅作兼容保留。
-    const builtinToken = clientConfig.builtinToken || DEFAULT_BUILTIN_TOKEN;
-    headers["Authorization"] = `Bearer ${builtinToken}`;
-    headers["X-Builtin-Token"] = builtinToken;
-  } else if (settingsSessionToken) {
-    headers["Authorization"] = `Bearer ${settingsSessionToken}`;
-  }
-  const response = await fetchWithTimeout(`${backendHttpUrl}${request.path}`, {
-    method: request.method,
-    headers,
-    body: request.method === "GET" ? undefined : JSON.stringify(request.body),
-  });
-  return { status: response.status, data: await readApiResponse(response) };
-}
+// 桌宠已不设账户系统：模型凭证由用户自持并存 config.json，
+// 设置读写全部在本机完成，不再有「带令牌请求后端」的通道。
 
 // 自定义窗口控件（最小化 / 关闭 / 最大化）的 IPC 入口；
 // 用 event.sender 反查触发窗口，避免直接持有窗口引用。
@@ -785,55 +689,11 @@ function createSettingsWindow() {
 
 ipcMain.handle("deploy:get-config", () => clientConfig);
 
-// 暴露「本机是否打包了后端」给前端，用于决定是否展示本地/远程相关提示与控件。
-ipcMain.handle("deploy:get-capabilities", () => ({
-  localAvailable: localBackendAvailable,
-}));
+// 桌宠本机自带大脑，不再区分「本地/远程部署」，也不需要切换模式或填写服务端地址。
+// 这两个入口保留为空实现，仅为兼容旧版本渲染进程残留的调用，后续可随设置页一并移除。
+ipcMain.handle("deploy:get-capabilities", () => ({ localAvailable: true }));
+ipcMain.handle("deploy:set-server", () => ({ ok: true as const, server: { wsUrl: "", httpUrl: "" } }));
 
-// 切换部署模式（本地部署 ⇄ 连接远程服务端）。
-// 关键诉求：切换时自动清除「对方模式」的残留配置，避免用户手动登出+重配。
-//   - 切到 remote：清空本地 server 地址与远程 sessionToken（builtinToken 保留，无害），
-//     重启后进入 remote 模式，由设置页填写服务端地址并登录。
-//   - 切到 local：恢复 localhost 默认地址与内置令牌，清空远程 sessionToken，
-//     重启后随程序启动内置后端、以内置令牌免登录。
-// deployment 字段保持 "integrated"（由本安装包写入），确保重启后不会被 L158 的
-// 「非一键部署残留」保护块再次强制重置，使本次切换稳定生效。
-// 切换需要重启：后端连接与聊天通道在启动时依 mode 建立，无法在运行时热切换。
-ipcMain.handle("deploy:switch-mode", (_event, target: "local" | "remote") => {
-  if (target === "remote") {
-    clientConfig.mode = "remote";
-    clientConfig.server = { wsUrl: "", httpUrl: "" };
-    clientConfig.sessionToken = undefined;
-  } else {
-    clientConfig.mode = "local";
-    clientConfig.server = { wsUrl: "ws://localhost:9089/ws", httpUrl: "http://localhost:9089" };
-    clientConfig.sessionToken = undefined;
-  }
-  saveClientConfig();
-  // 先登记重启，再退出；relaunch 在 quit 后拉起新实例。
-  app.relaunch();
-  app.quit();
-});
-
-// 远程模式下由设置页修改服务端地址（ws/http）。写入 clientConfig 并持久化，
-// 立即刷新主进程连接地址、重建适配器连接（无需重启即可生效）。
-ipcMain.handle(
-  "deploy:set-server",
-  (_event, server: { wsUrl?: string; httpUrl?: string }) => {
-    const wsUrl = typeof server.wsUrl === "string" ? server.wsUrl.trim() : "";
-    const httpUrl = typeof server.httpUrl === "string" ? server.httpUrl.trim() : "";
-    clientConfig.server = { wsUrl, httpUrl };
-    saveClientConfig();
-    // 刷新主进程级别的连接地址
-    backendUrl = wsUrl || "ws://localhost:9089/ws";
-    backendHttpUrl = httpUrl || "http://localhost:9089";
-    backendHealthUrl = `${backendHttpUrl.replace(/\/$/, "")}/health`;
-    console.log(`[deploy] 服务端地址已更新 ws=${backendUrl} http=${backendHttpUrl}`);
-    // 重建适配器连接，让新的后端地址立即生效（local 模式也重建，无副作用）
-    initAdapterManager();
-    return { ok: true as const, server: { wsUrl, httpUrl } };
-  },
-);
 ipcMain.handle("theme:get", () => clientConfig.theme || DEFAULT_THEME);
 ipcMain.handle("theme:set", (_event, name: string) => {
   const next: ThemeName = (THEME_LIST as string[]).includes(name) ? (name as ThemeName) : DEFAULT_THEME;
@@ -1558,65 +1418,8 @@ ipcMain.handle("avatar:import-folder", async () => {
   broadcastAvatar();
   return { ok: true, meta };
 });
-ipcMain.handle("deploy:set-session", (_event, token: string | null) => {
-  settingsSessionToken = token || null;
-  clientConfig.sessionToken = token ?? undefined;
-  saveClientConfig();
-  if (!token) {
-    // 登出：清空远程 uid，并按本地身份（uid=1）重建聊天服务。
-    loggedInUid = null;
-    if (chatSessionService) {
-      chatSessionService.dispose();
-      chatSessionService = null;
-      chatServiceUserid = null;
-    }
-  } else if (!chatSessionService) {
-    // 防御性分支：若登录链路未兜底重建（例如未来某路径只调用 set-session），
-    // 在此补一次重连。已重建则跳过，避免重复 dispose/recreate。
-    reconnectChatSession();
-  }
-});
-ipcMain.handle("token:login", async (_event, credentials: { username: string; password: string }) => {
-  try {
-    const response = await fetchWithTimeout(`${backendHttpUrl}/api/auth/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(credentials),
-    });
-    const data = await readApiResponse(response);
-    if (!response.ok) return { ok: false, message: String(data.message || "登录失败") };
-    settingsSessionToken = String(data.sessionToken);
-    loggedInUid = Number(data.uid);
-    // 登录后按新身份（含新会话令牌）重建聊天服务并自动重连：
-    // 旧连接已被放弃，若不在登录成功后立即重建+init，聊天窗口会停留在断开态，
-    // 直到用户手动发一条消息才惰性触发连接——这正是“登录后不自动连接”的根因。
-    reconnectChatSession();
-    // 持久化登录凭证，重启桌宠后自动恢复登录态。
-    clientConfig.sessionToken = settingsSessionToken;
-    saveClientConfig();
-    return { ok: true, uid: data.uid };
-  } catch (err) {
-    return { ok: false, message: err instanceof Error ? err.message : "无法连接服务端" };
-  }
-});
-ipcMain.handle("token:register", async (_event, credentials: { username: string; password: string }) => {
-  try {
-    const response = await fetchWithTimeout(`${backendHttpUrl}/api/auth/register`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(credentials),
-    });
-    const data = await readApiResponse(response);
-    if (!response.ok) return { ok: false, message: String(data.message || "注册失败") };
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, message: err instanceof Error ? err.message : "无法连接服务端" };
-  }
-});
-ipcMain.handle("token:request", (_event, request: SettingsApiRequest) => requestSettingsApi(request));
-
-// ---- 模型配置（config.json）：本地模式的「用户级可编辑配置文件」 ----
-// 本地模式设置界面直接读写 config.json；远程模式仍走后端 /api/profile。
+// ---- 模型配置（config.json）：用户级可编辑配置文件 ----
+// 所有设置读写都在本机完成，凭证由用户自持。
 ipcMain.handle("config:get", () => readModelConfigFile());
 ipcMain.handle("config:set", (_event, patch: Record<string, unknown>) => {
   const next = writeModelConfigFile({
@@ -1628,16 +1431,16 @@ ipcMain.handle("config:set", (_event, patch: Record<string, unknown>) => {
     searchProvider: typeof patch.searchProvider === "string" ? patch.searchProvider : undefined,
     basePersona: typeof patch.basePersona === "string" ? patch.basePersona : undefined,
   });
-  // 写文件会触发 fs.watch → 同步后端 + 广播；这里再显式执行一次，确保本进程内保存也能即时生效。
+  // 写文件会触发 fs.watch → 广播；这里再显式执行一次，确保本进程内保存也能即时生效。
   handleModelConfigChanged(next);
   return next;
 });
 
-// config.json 被外部编辑器修改（或本进程写入）后：同步到后端 DB 并广播给所有窗口。
+// config.json 被外部编辑器修改（或本进程写入）后：刷新引擎并广播给所有窗口。
 function handleModelConfigChanged(cfg: ReturnType<typeof readModelConfigFile>) {
-  void applyConfigToBackend();
-  // 基础人格随配置变更即时生效：更新持有人并通过 WS 重新注册给后端（无需重启）。
+  // 基础人格随配置变更即时生效（无需重启）。
   frontendTools.setBasePersona(cfg.basePersona || "");
+  // 重新装载前端能力并刷新「大脑就绪」状态（引擎按配置指纹自动重建上下文）。
   reRegisterFrontendTools();
   for (const win of [petWindow, chatWindow, settingsWindow]) {
     if (win && !win.isDestroyed()) win.webContents.send("config:changed", cfg);
@@ -2163,15 +1966,6 @@ ipcMain.on("desktop-pet:show-context-menu", (event) => {
   ]).popup({ window: win ?? undefined });
 });
 
-async function checkBackendHealth() {
-  try {
-    const res = await fetchWithTimeout(backendHealthUrl);
-    if (!res.ok) throw new Error("后端服务未正常启动");
-  } catch (e) {
-    console.log("联调提示", `请先启动后端服务（${backendHealthUrl}）`);
-  }
-}
-
 app.whenReady().then(async () => {
   // 安装向导「开机自动启动」勾选：以一次性标志拉起本进程，仅写入登录项后退出，
   // 不创建任何窗口（避免闪窗）。保证与设置界面勾选走同一套 Electron 登录项机制。
@@ -2201,7 +1995,7 @@ app.whenReady().then(async () => {
   console.log(`Kirari绮莉 启动`);
   console.log(`调试模式: ${debug ? "开 (--debug)" : "关"}`);
   console.log(`日志文件: ${logPath ?? "(无法写入，请检查 userData 权限)"}`);
-  console.log(`工作模式: ${clientConfig.mode}`);
+  console.log(`大脑: 本机自带（进程内引擎）`);
   console.log("========================================");
 
   // 初始化私人知识库（本地文件）
@@ -2269,51 +2063,12 @@ app.whenReady().then(async () => {
     }
   });
 
-  // 加载前端托管的 MCP server 与 skill 配置，供 WS 连接后注册给后端调用。
+  // 加载前端托管的 MCP server 与 skill 配置，供内核在生成时调用。
   initFrontendTools();
 
-  // 本地模式（打包版）：以子进程方式自启动后端 API，关闭前端时一并关闭。
-  // dev 与 remote 模式不启动本地后端。
-  // 关键：把 clientConfig.builtinToken 透传给启动器，确保后端 BUILTIN_ACCOUNT_TOKEN
-  // 与前端的 WS 握手令牌一致，否则会一直被后端拒绝（4401）。
-  if (clientConfig.mode === "local") {
-    await startBackendIfLocal({ isLocal: true, builtinToken: clientConfig.builtinToken || DEFAULT_BUILTIN_TOKEN });
-  }
+  // 桌宠自带大脑：不再以子进程拉起后端，也不需要动态端口与远程凭证检测。
 
-  // 本地模式（打包版）：主进程已为本次启动动态挑选空闲端口并作为启动参数注入后端子进程，
-  // 这里同步刷新主进程/前端的连接地址，覆盖配置里写死的 9089。
-  // 远程模式不注入动态端口，沿用配置中的远端地址；dev 模式也不覆盖（使用外部独立后端）。
-  if (clientConfig.mode === "local" && app.isPackaged) {
-    const p = getBackendPort();
-    backendUrl = `ws://127.0.0.1:${p}/ws`;
-    backendHttpUrl = `http://127.0.0.1:${p}`;
-    backendHealthUrl = `http://127.0.0.1:${p}/health`;
-    console.log(`[backend] 本地模式使用动态端口 ${p} 连接后端`);
-  }
-
-  // 分离（远程）模式：程序启动即做一次凭证有效性检测。
-  // 若本地残留的 sessionToken 已失效（服务端重置 DB / token 过期），不要带着错误凭证
-  // 去反复重连 WS，而是立即清除并通知前端回到「未登录」状态，由用户在设置页重新登录。
-  if (clientConfig.mode === "remote" && settingsSessionToken) {
-    try {
-      const verifyRes = await fetchWithTimeout(`${backendHttpUrl}/api/profile`, {
-        method: "GET",
-        headers: { Authorization: `Bearer ${settingsSessionToken}` },
-      });
-      if (verifyRes.status === 401) {
-        console.warn("[auth] 启动检测：本地 sessionToken 已失效，清除并回到未登录状态");
-        settingsSessionToken = undefined;
-        clientConfig.sessionToken = undefined;
-        saveClientConfig();
-      } else if (verifyRes.ok) {
-        console.log("[auth] 启动检测：本地 sessionToken 仍有效");
-      }
-    } catch (e) {
-      console.warn("[auth] 启动检测 sessionToken 失败（后端不可达）:", e instanceof Error ? e.message : String(e));
-    }
-  }
-
-  // 启动 config.json 监听：用户在外部编辑器修改模型配置后，实时同步到后端并广播前端。
+  // 启动 config.json 监听：用户在外部编辑器修改模型配置后，实时广播前端并刷新引擎。
   startModelConfigWatch();
 
   // 官方皮肤兜底：生产/开发通用。若 userData/avatars 为空（如 NSIS 安装脚本释放失败、
@@ -2345,21 +2100,8 @@ app.whenReady().then(async () => {
   // 头像由 skin 目录的 frames.json.chatAvatar 声明，换皮肤即换头像。
   syncCurrentAvatarFromScan();
 
-  let res = await checkBackendHealth();
+  // 大脑在本进程内，无需探测外部服务健康状态。
   chatSessionStoragePath = resolveChatStoragePath();
-  // 兼容迁移：旧版把全部历史存在固定的 chat-session.json。本地模式改用独立文件，
-  // 首次启动时把旧文件内容搬到本地槽位，避免既有本地聊天记录凭空消失（远程历史不迁移，避免错归身份）。
-  const legacyChatPath = path.join(app.getPath("userData"), "chat-session.json");
-  if (clientConfig.mode === "local" && chatSessionStoragePath !== legacyChatPath) {
-    try {
-      if (!fs.existsSync(chatSessionStoragePath) && fs.existsSync(legacyChatPath)) {
-        fs.copyFileSync(legacyChatPath, chatSessionStoragePath);
-        console.log("[chat] 已迁移旧版本地聊天记录到 chat-session.local.json");
-      }
-    } catch (e) {
-      console.warn("[chat] 迁移旧聊天记录失败（不影响启动）:", e instanceof Error ? e.message : String(e));
-    }
-  }
   await ensureChatSessionService().init(chatSessionStoragePath);
   // 初始化机器人适配器管理器：连接已启用的适配器与后端 WS，使 QQ 等跨端消息可在启动时同步进桌宠。
   // 之前仅在 deploy:set-server（远程改服务端地址）里调用，启动时漏掉会导致 adapter:* 处理器
@@ -2375,7 +2117,6 @@ app.whenReady().then(async () => {
 
 app.on("before-quit", () => {
   isQuitting = true;
-  stopBackend();
   chatSessionService?.dispose();
   shutdownEngine();
   if (avatarFolderWatcher) {
