@@ -2,12 +2,15 @@ import fs from "fs/promises";
 import path from "path";
 import { nativeImage } from "electron";
 import * as frontendTools from "./frontend-tools";
+import * as engine from "./ai/engine";
+import type { AiModelSettings } from "./ai/aiContext";
+import { readModelConfigFile } from "./model-config";
 import type { LocalKnowledge } from "../src/knowledge/localKnowledge";
 
 export type ChatAuthor = "user" | "pet" | "system";
 
 // 对话回答可携带的情绪标签：用于前端"情绪优先"播放（先播情绪动画再播说话）。
-// 由后端 LLM 在 pet_response 中返回；本仓库只消费，不负责生成。
+// 由模型在回复解析后给出；本模块只消费，不负责生成。
 export type PetEmotion = "happy" | "wave";
 
 export type ChatMessage = {
@@ -23,6 +26,7 @@ export type ChatMessage = {
 
 export type ChatStateSnapshot = {
     sessionId: string;
+    /** 大脑是否就绪：配置齐全即 true。不再是"网络连接"语义。 */
     connected: boolean;
     lastError: string;
     waitingForReply: boolean;
@@ -39,29 +43,28 @@ type PersistedChatState = {
 };
 
 type ChatSessionOptions = {
-    backendUrl: string;
     userid: number;
     emitState: (state: ChatStateSnapshot) => void;
-    // 会话令牌：在 WS 握手阶段通过 query(?token=) 带上，由后端校验。
-    // 缺失时若 requireToken 为 true，后端会拒绝连接。
-    token?: string;
-    requireToken?: boolean;
-    // 私人知识库：发消息前本地检索，携带 kbContext 给后端
+    // 私人知识库：发消息前本地检索，结果直接进入内核的私有知识库通道
     localKnowledge?: LocalKnowledge;
+    // 模型配置读取器。缺省直接读 userData/config.json。
+    readSettings?: () => AiModelSettings | null;
 };
 
 const WELCOME_MESSAGE = "今天也一起加油吧。";
 const LONG_REPLY_PROMPT = "回复较长，点我看详情";
 
-// 单条消息的回复超时（毫秒）：后端收下消息却迟迟不回（大模型推理卡死、后端崩溃、
-// 连接中途断开）时，不能让前端永远停在“思考中”且禁用发送按钮。到点后兜底清除等待态
-// 并给出可见提示，用户可重试。此前完全没有任何超时，这正是“一直硬卡着”的根因。
+// 单条消息的回复超时（毫秒）：模型推理卡死或网络中断时，不能让前端永远停在"思考中"
+// 且禁用发送按钮。到点后兜底清除等待态并给出可见提示，用户可重试。
 const REPLY_TIMEOUT_MS = 60000;
 
-// 发送前图片压缩阈值：在客户端就从源头把图压小，桌面→pet-api→模型的整条链路都受益，
-// 避免超大图直接喂给视觉模型导致推理失败或白白吃带宽/ token。
+// 发送前图片压缩阈值：在客户端就从源头把图压小，
+// 避免超大图直接喂给视觉模型导致推理失败或白白吃带宽 / token。
 const MAX_IMAGE_LONG_EDGE = 1280; // 最长边像素上限（多数视觉模型甜区 512–1024，留点余量）
 const IMAGE_JPEG_QUALITY = 0.8; // 转 JPEG 质量，单图通常压到 < 300KB
+
+// 未配置大脑时的提示。按项目规范：不裸露"API Key / Token / 模型 / 提示词"等术语。
+const NOT_CONFIGURED_HINT = "小灵的大脑还没连接上，去设置里填上就能聊天啦";
 
 // 对 base64 data URL 图片做等比缩放 + JPEG 压缩；远程 http(s) URL 由模型自行拉取，原样透传。
 // 任何异常（解码失败、resize 为空）一律回退原图，绝不阻断发送。
@@ -92,21 +95,17 @@ function downscaleImageDataUrl(dataUrl: string): string {
 }
 
 export class ChatSessionService {
-    private readonly backendUrl: string;
     private readonly userid: number;
     private readonly emitState: (state: ChatStateSnapshot) => void;
-    private readonly token: string;
-    private readonly requireToken: boolean;
     private readonly localKnowledge: LocalKnowledge | undefined;
+    private readonly readSettings: () => AiModelSettings | null;
     private storagePath = "";
-    private socket: any = null;
-    private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     private persistenceQueue: Promise<void> = Promise.resolve();
     private initialized = false;
     private disposed = false;
-    // 凭证错误（4401/401）时置 true，停止自动重连，避免无限刷后端日志。
-    private stopReconnect = false;
-    // 发送消息后的回复超时定时器：到点仍未收到后端回应则兜底结束等待态。
+    // 本轮生成的取消控制器：用户点「停止」时中断模型请求。
+    private abortController: AbortController | null = null;
+    // 发送消息后的回复超时定时器：到点仍未收到回应则兜底结束等待态。
     private replyTimeout: ReturnType<typeof setTimeout> | null = null;
     private state: ChatStateSnapshot = {
         sessionId: crypto.randomUUID(),
@@ -119,12 +118,23 @@ export class ChatSessionService {
     };
 
     constructor(options: ChatSessionOptions) {
-        this.backendUrl = options.backendUrl;
         this.userid = options.userid;
         this.emitState = options.emitState;
-        this.token = options.token ?? "";
-        this.requireToken = options.requireToken !== false;
         this.localKnowledge = options.localKnowledge;
+        this.readSettings =
+            options.readSettings ??
+            (() => {
+                const cfg = readModelConfigFile();
+                return {
+                    model: cfg.model || "",
+                    endpoint: cfg.endpoint || "",
+                    key: cfg.key || "",
+                    searchProvider: cfg.searchProvider,
+                    searchKey: cfg.searchKey,
+                    searchEndpoint: cfg.searchEndpoint,
+                    userid: this.userid,
+                };
+            });
     }
 
     async init(storagePath: string) {
@@ -136,8 +146,9 @@ export class ChatSessionService {
         this.storagePath = storagePath;
         await this.loadFromDisk();
         this.ensureBubbleState();
+        // 进程内引擎：把前端托管工具与私有知识库注入内核，并检查大脑是否就绪
+        this.prepareEngine();
         this.emit();
-        this.connect();
     }
 
     getSnapshot() {
@@ -155,42 +166,86 @@ export class ChatSessionService {
             return false;
         }
 
-        if (!this.isSocketOpen()) {
-            this.setConnectionError("连接未就绪");
-            return false;
-        }
-
-        // 私人知识库检索：发消息前本地 + 远程检索（异步），携带结果给后端
-        const kbContext = this.localKnowledge ? await this.localKnowledge.search(text) : undefined;
-
-        const msgPayload = JSON.stringify({
-            userid: this.userid,
-            content: text,
-            images,
-            session_id: this.state.sessionId,
-            kbContext,
-        });
-
-        try {
-            this.socket.send(msgPayload);
-        } catch {
-            this.setConnectionError("发送失败");
+        // 大脑未配置：不进等待态，直接给出可操作的提示（设置页入口）。
+        const settings = this.readSettings();
+        if (!engine.isConfigured(settings)) {
+            this.state.connected = false;
+            this.state.lastError = NOT_CONFIGURED_HINT;
+            this.emit();
             return false;
         }
 
         this.state.waitingForReply = true;
         this.state.lastError = "";
+        this.state.connected = true;
         this.state.messages.push(this.createMessage("user", text, undefined, images));
         this.persist();
         this.emit();
         this.armReplyTimeout();
-        return true;
+
+        const controller = new AbortController();
+        this.abortController = controller;
+
+        try {
+            const result = await engine.chat({
+                settings: settings!,
+                sessionId: this.state.sessionId,
+                text,
+                images,
+                persona: frontendTools.collectBasePersona() || null,
+                skillPrompts: frontendTools.collectSkillPrompts(),
+                signal: controller.signal,
+            });
+            if (this.disposed) return true;
+
+            this.clearReplyTimeout();
+            this.state.waitingForReply = false;
+            this.state.lastError = "";
+            // 情绪标签：仅接受白名单值，避免脏数据破坏前端状态机
+            const emotion: PetEmotion | null =
+                result.emotion === "happy" || result.emotion === "wave" ? result.emotion : null;
+            const replyImages = Array.isArray(result.images)
+                ? result.images.filter((x: string) => typeof x === "string" && x.trim())
+                : [];
+            this.state.messages.push(
+                this.createMessage("pet", result.speech, emotion, replyImages),
+            );
+            this.state.bubbleMessage = result.speech.length <= 10 ? result.speech : LONG_REPLY_PROMPT;
+            this.state.bubbleInteractive = result.speech.length > 10;
+            this.persist();
+            this.emit();
+            return true;
+        } catch (e) {
+            if (this.disposed) return true;
+            const err = e as Error & { name?: string };
+            const aborted = err?.name === "AbortError" || /abort/i.test(err?.message || "");
+            this.clearReplyTimeout();
+            this.state.waitingForReply = false;
+            // 用户主动停止：不算错误，只清等待态，不给红色提示
+            this.state.lastError = aborted ? "" : this.describeError(err);
+            this.emit();
+            return false;
+        } finally {
+            if (this.abortController === controller) this.abortController = null;
+        }
+    }
+
+    /** 用户点「停止生成」：中断当前模型请求。 */
+    stopGeneration(): void {
+        if (this.abortController) {
+            try {
+                this.abortController.abort();
+            } catch {
+                // 已结束的请求忽略
+            }
+            this.abortController = null;
+        }
     }
 
     // 跨端同步：把「主人在其他协议端（如 QQ）发起的对话」注入到桌宠聊天框。
     // 仅由 AdapterManager 在 isOwner 时调用；guest 账号保持隔离，不调用本方法。
     // 语义与桌面自身收发一致：user 消息置 waitingForReply，pet 回复清 waiting 并更新气泡，
-    // 并复用 lastPetSpeech 去重，避免后端重连/重试导致同一句刷屏。
+    // 并复用 lastPetSpeech 去重，避免重连/重试导致同一句刷屏。
     injectExternalMessage(msg: {
         author: ChatAuthor;
         text: string;
@@ -231,185 +286,97 @@ export class ChatSessionService {
         }
     }
 
+    // 清空聊天记录（UI 的"清空"）：同时清 UI 历史与内核上下文历史。
+    async clearHistory(): Promise<void> {
+        await engine.clearHistory(this.state.sessionId);
+        this.state.sessionId = crypto.randomUUID();
+        this.state.messages = [];
+        this.lastPetSpeech = "";
+        this.ensureBubbleState();
+        this.persist();
+        this.emit();
+    }
+
     dispose() {
         this.disposed = true;
-        this.clearReconnectTimer();
+        this.stopGeneration();
         this.clearReplyTimeout();
-        if (this.socket) {
-            try {
-                this.socket.close();
-            } catch {
-                // ignore
-            }
-        }
-        this.socket = null;
     }
 
-    private connect() {
-        if (this.disposed || this.isSocketConnectingOrOpen()) {
-            return;
-        }
-
-        this.clearReconnectTimer();
-        this.stopReconnect = false;
-        this.state.connected = false;
-        this.state.lastError = "";
-        this.emit();
-
-        const WebSocketCtor = (globalThis as any).WebSocket;
-        if (!WebSocketCtor) {
-            this.setConnectionError("WebSocket 不可用");
-            return;
-        }
-
-        const socket = new WebSocketCtor(this.buildWsUrl());
-        this.socket = socket;
-
-        socket.onopen = () => {
-            if (this.socket !== socket) {
-                return;
-            }
-            this.state.connected = true;
-            this.state.lastError = "";
-            this.clearReconnectTimer();
-            this.emit();
-            // 连接建立后，把「前端托管工具」（MCP server + skill 提供的工具）注册给后端，
-            // 这样模型就能在 function-calling 中调用它们；同时注册启用中的 skill 行为模板。
-            try {
-                const schemas = frontendTools.collectToolSchemas();
-                if (schemas.length > 0) {
-                    socket.send(JSON.stringify({ type: "register_tools", tools: schemas }));
-                    console.log(`[chat-session] 已向后端注册 ${schemas.length} 个前端工具`);
-                }
-                const skillPrompts = frontendTools.collectSkillPrompts();
-                if (skillPrompts.length > 0) {
-                    socket.send(JSON.stringify({ type: "register_skills", prompts: skillPrompts }));
-                }
-                // 基础人格：始终推送（空串表示使用后端预设），保证人格锚点随连接生效。
-                const persona = frontendTools.collectBasePersona();
-                socket.send(JSON.stringify({ type: "register_persona", persona }));
-            } catch (e) {
-                console.warn("[chat-session] 注册前端工具失败:", e instanceof Error ? e.message : String(e));
-            }
-        };
-
-        socket.onmessage = (event: { data: string }) => {
-            if (this.socket !== socket) {
-                return;
-            }
-            this.handleMessage(event.data);
-        };
-
-        socket.onerror = (event: any) => {
-            if (this.socket !== socket) {
-                return;
-            }
-            // 后端在握手阶段以 4401 拒绝（令牌无效/缺失）：ws 库错误信息含 "4401"，
-            // 据此给出精准的“认证失败”提示，区别于普通连接错误。
-            const msg = (event && (event.message || event.error?.message)) || "";
-            this.setConnectionError(/4401|未授权|unauthorized/i.test(msg) ? "认证失败：会话令牌无效" : "连接出错");
-        };
-
-        socket.onclose = (eventOrCode: any) => {
-            if (this.socket !== socket) {
-                return;
-            }
-            // ws 库以 (code, reason) 调用，浏览器以 (event) 调用，统一取 code。
-            const code = typeof eventOrCode === "number" ? eventOrCode : eventOrCode?.code;
-            this.setConnectionError(code === 4401 ? "认证失败：会话令牌无效" : "连接已断开");
-        };
-    }
-
-    // 把会话令牌拼到握手 URL 的 query（?token=），兼容已带 query 与 ws/wss 协议。
-    private buildWsUrl(): string {
-        if (!this.requireToken || !this.token) {
-            return this.backendUrl;
-        }
+    /**
+     * 让内核进入可用状态：注入前端托管工具（MCP / skill）与私有知识库，
+     * 并检查大脑配置是否齐全。
+     *
+     * 原先这里是建立 WebSocket 连接并注册工具；进程内引擎不需要连接，
+     * 改成本进程直接注入——省掉一次网络往返和"重连时要不要重新注册"的复杂度。
+     */
+    private prepareEngine() {
         try {
-            const url = new URL(this.backendUrl);
-            if (url.searchParams.has("token")) {
-                return this.backendUrl;
+            const schemas = frontendTools.collectToolSchemas();
+            const count = engine.registerFrontendTools(schemas, (name, args) =>
+                frontendTools.executeTool(name, args),
+            );
+            if (count > 0) {
+                console.log(`[chat-session] 已装载 ${count} 个额外能力`);
             }
-            url.searchParams.set("token", this.token);
-            return url.toString();
-        } catch {
-            return this.backendUrl;
+        } catch (e) {
+            console.warn("[chat-session] 装载额外能力失败:", e instanceof Error ? e.message : String(e));
         }
+
+        // 私有知识库：本地检索直接进入内核，不再经"后端反向请求前端"
+        if (this.localKnowledge) {
+            engine.registerPrivateKnowledge(async (query, opts) => {
+                const rows = await this.localKnowledge!.search(query, opts?.topK ?? 5);
+                // 本地库的 tier 是自由字符串，内核只接受 A/B/C，这里做一次收敛
+                return rows.map((r) => ({
+                    text: r.text || "",
+                    source: r.source,
+                    score: r.score,
+                    url: r.url,
+                    tier: r.tier === "A" || r.tier === "B" || r.tier === "C" ? r.tier : undefined,
+                    priority: r.priority,
+                }));
+            });
+        }
+
+        const settings = this.readSettings();
+        const ready = engine.isConfigured(settings);
+        this.state.connected = ready;
+        this.state.lastError = ready ? "" : NOT_CONFIGURED_HINT;
     }
 
-    // 去重缓存：记录上一条 pet 消息的文本，防止后端因重连/重试推送相同消息导致刷屏。
+    /** 设置页改了大脑配置 / MCP / skill 后调用：重新装载能力并刷新就绪状态。 */
+    refreshEngine(): void {
+        if (this.disposed) return;
+        this.prepareEngine();
+        this.emit();
+    }
+
+    /** 设置页变更 MCP / skill 后重新装载（无需重启）。保留旧方法名，供主进程调用。 */
+    reRegisterTools(): void {
+        this.refreshEngine();
+    }
+
+    // 去重缓存：记录上一条 pet 消息的文本，防止同一句重复刷屏。
     private lastPetSpeech = "";
 
-    private handleMessage(rawData: string) {
-        try {
-            const payload = JSON.parse(rawData);
-
-            // 后端回调解「前端托管工具」：在本进程（Electron 主进程）实际执行后回传结果。
-            if (payload.type === "tool_invoke" && typeof payload.call_id === "string") {
-                void this.handleToolInvoke(payload);
-                return;
-            }
-
-            // 后端反向请求私人知识库：本地检索后回 kb_response
-            if (payload.type === "kb_request" && typeof payload.requestId === "string" && this.localKnowledge) {
-                const results = this.localKnowledge.search(payload.query || "", 5);
-                if (this.socket && this.socket.readyState === 1) {
-                    this.socket.send(JSON.stringify({
-                        type: "kb_response",
-                        requestId: payload.requestId,
-                        results,
-                    }));
-                }
-                return;
-            }
-
-            // 收到任意「用户可见的回复」（pet_response / error）即视为本轮等待结束，清除超时定时器。
-            const isReply =
-                (payload.type === "pet_response" && typeof payload.speech === "string") ||
-                (payload.type === "error" && typeof payload.message === "string");
-            if (isReply) {
-                this.clearReplyTimeout();
-            }
-
-            if (payload.type === "pet_response" && typeof payload.speech === "string") {
-                const speech = payload.speech.trim();
-                // 连续相同消息去重：后端可能在 WS 重连时重复发送欢迎/问候消息。
-                // 注意：去重也要结束等待态，否则重复消息会让前端一直卡在“思考中”。
-                if (speech === this.lastPetSpeech) {
-                    this.state.waitingForReply = false;
-                    this.emit();
-                    return;
-                }
-                this.lastPetSpeech = speech;
-                // 情绪标签：仅接受白名单值，避免脏数据破坏前端状态机
-                const rawEmotion = payload.emotion;
-                const emotion: PetEmotion | null | undefined =
-                    rawEmotion === "happy" || rawEmotion === "wave" ? rawEmotion : undefined;
-                const images = Array.isArray(payload.images)
-                    ? payload.images.filter((x: string) => typeof x === "string" && x.trim())
-                    : [];
-                this.state.messages.push(this.createMessage("pet", speech, emotion, images));
-                this.state.waitingForReply = false;
-                // 收到正常回复即清除之前的错误提示（如“大模型未配置”），横幅随之消失。
-                this.state.lastError = "";
-                this.state.bubbleMessage = speech.length <= 10 ? speech : LONG_REPLY_PROMPT;
-                this.state.bubbleInteractive = speech.length > 10;
-                this.persist();
-                this.emit();
-                return;
-            }
-
-            if (payload.type === "error" && typeof payload.message === "string") {
-                this.state.waitingForReply = false;
-                this.state.lastError = payload.message;
-                this.emit();
-            }
-        } catch {
-            this.clearReplyTimeout();
-            this.state.waitingForReply = false;
-            this.state.lastError = "消息解析失败";
-            this.emit();
+    /** 把内核/引擎异常翻译成用户看得懂的话。按项目规范不裸露技术术语。 */
+    private describeError(err: Error): string {
+        const msg = err?.message || "";
+        if (/未配置|尚未配置|还没连接|还没填写|还没选择/.test(msg)) return msg;
+        if (/401|403|invalid api key|unauthorized|Incorrect API/i.test(msg)) {
+            return "大脑的钥匙不对或者过期了，去设置里重新填一下";
         }
+        if (/429|quota|insufficient|余额/i.test(msg)) {
+            return "大脑的额度用完了，换个钥匙或者等它恢复";
+        }
+        if (/ENOTFOUND|EAI_AGAIN|ECONNREFUSED|fetch failed|network/i.test(msg)) {
+            return "连不上大脑，检查一下网络或者接口地址";
+        }
+        if (/timeout|超时/i.test(msg)) {
+            return "大脑想太久了没答上来，再问一次试试";
+        }
+        return "小灵没答上来，稍后再试一次吧";
     }
 
     private ensureBubbleState() {
@@ -434,70 +401,7 @@ export class ChatSessionService {
         }
     }
 
-    // 执行后端回调的前端工具，并把结果回传（tool_result）。
-    private async handleToolInvoke(payload: { call_id: string; name: string; args?: unknown }) {
-        const socket = this.socket;
-        if (!socket || socket.readyState !== (globalThis as any).WebSocket?.OPEN) {
-            return;
-        }
-        let content: string;
-        try {
-            const result = await frontendTools.executeTool(payload.name, (payload.args as Record<string, unknown>) || {});
-            content = typeof result === "string" ? result : JSON.stringify(result);
-        } catch (e) {
-            content = `前端工具执行异常：${e instanceof Error ? e.message : String(e)}`;
-        }
-        socket.send(
-            JSON.stringify({ type: "tool_result", call_id: payload.call_id, content }),
-        );
-    }
-
-    // 设置页变更 MCP / skill 后，重新把工具注册给后端（无需重启）。
-    reRegisterTools(): void {
-        const socket = this.socket;
-        if (!socket || socket.readyState !== (globalThis as any).WebSocket?.OPEN) {
-            console.log("[chat-session] 未连接，跳过重新注册工具（下次连接会自动注册）");
-            return;
-        }
-        const schemas = frontendTools.collectToolSchemas();
-        socket.send(JSON.stringify({ type: "register_tools", tools: schemas }));
-        const skillPrompts = frontendTools.collectSkillPrompts();
-        socket.send(JSON.stringify({ type: "register_skills", prompts: skillPrompts }));
-        const persona = frontendTools.collectBasePersona();
-        socket.send(JSON.stringify({ type: "register_persona", persona }));
-        console.log(`[chat-session] 重新注册 ${schemas.length} 个前端工具、${skillPrompts.length} 条技能指令、基础人格${persona ? "（自定义）" : "（预设）"}`);
-    }
-
-    private setConnectionError(message: string) {
-        this.state.connected = false;
-        this.state.lastError = message;
-        // 断线/出错时也结束等待态：否则正在“思考中”的消息会让发送按钮被永久禁用，必须重启才恢复。
-        this.state.waitingForReply = false;
-        this.clearReplyTimeout();
-        this.emit();
-        // 凭证错误（401 / 4401 / 未授权）属于不可恢复错误：后端明确拒绝了令牌，
-        // 不应无限重连反复刷后端日志。停止重连，等待用户在设置页重新登录 / 修正内置令牌。
-        if (/4401|401|未授权|令牌.*无效|凭证/.test(message)) {
-            console.error("[chat-session] ⛔ 凭证错误，停止自动重连。请在设置页重新登录或检查内置令牌配置。");
-            this.stopReconnect = true;
-            return;
-        }
-        this.scheduleReconnect();
-    }
-
-    private scheduleReconnect() {
-        if (this.disposed || this.stopReconnect) {
-            return;
-        }
-
-        this.clearReconnectTimer();
-        this.reconnectTimer = setTimeout(() => {
-            this.reconnectTimer = null;
-            this.connect();
-        }, 3000);
-    }
-
-    // 启动回复超时：发送消息后置 waitingForReply 时调用，给后端一个最迟回应期限。
+    // 启动回复超时：发送消息后置 waitingForReply 时调用，给内核一个最迟回应期限。
     private armReplyTimeout() {
         this.clearReplyTimeout();
         this.replyTimeout = setTimeout(() => this.onReplyTimeout(), REPLY_TIMEOUT_MS);
@@ -510,30 +414,15 @@ export class ChatSessionService {
         }
     }
 
-    // 超时兜底：后端未在规定时间内回应。清除等待态并给出可见错误，避免 UI 永久卡在“思考中”。
+    // 超时兜底：内核未在规定时间内回应。清除等待态并给出可见错误，避免 UI 永久卡在"思考中"。
     private onReplyTimeout() {
         this.replyTimeout = null;
         if (!this.state.waitingForReply) {
             return;
         }
         this.state.waitingForReply = false;
-        this.state.lastError = "后端未在规定时间内回应（可能模型推理超时或连接中断），请稍后重试。";
+        this.state.lastError = "小灵想太久了，先停一下，你可以再问一次";
         this.emit();
-    }
-
-    private clearReconnectTimer() {
-        if (this.reconnectTimer) {
-            clearTimeout(this.reconnectTimer);
-            this.reconnectTimer = null;
-        }
-    }
-
-    private isSocketOpen() {
-        return !!this.socket && this.socket.readyState === 1;
-    }
-
-    private isSocketConnectingOrOpen() {
-        return !!this.socket && (this.socket.readyState === 0 || this.socket.readyState === 1);
     }
 
     private createMessage(author: ChatAuthor, text: string, emotion?: PetEmotion | null, images?: string[]): ChatMessage {

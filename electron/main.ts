@@ -16,6 +16,7 @@ import { ChatSessionService, type ChatStateSnapshot } from "./chat-session-servi
 import { AdapterManager } from "./adapter/adapter-manager";
 import type { AdapterConfig, AdapterStatus } from "./adapter/types";
 import { startBackendIfLocal, stopBackend, applyConfigToBackend, getBackendPort, isBackendBundled } from "./backend-launcher";
+import { initEngine, shutdownEngine } from "./ai/engine";
 import * as frontendTools from "./frontend-tools";
 import { readModelConfigFile, writeModelConfigFile, onModelConfigChanged, startModelConfigWatch } from "./model-config";
 import { initAppLogger, getLogPath, isDebugMode } from "./app-logger";
@@ -1721,16 +1722,9 @@ function ensureChatSessionService() {
   if (!chatSessionService || chatServiceUserid !== uid) {
     if (chatSessionService) chatSessionService.dispose();
     chatServiceUserid = uid;
-    // 会话令牌：本地模式带内置账户令牌，远程模式带登录后的会话令牌；由后端在 WS 握手阶段校验。
-    const token =
-      clientConfig.mode === "local"
-        ? clientConfig.builtinToken || DEFAULT_BUILTIN_TOKEN
-        : (settingsSessionToken ?? "");
+    // AI 引擎跑在本进程内：不再连接后端，也不用令牌握手。
     chatSessionService = new ChatSessionService({
-      backendUrl,
       userid: uid,
-      token,
-      requireToken: true,
       emitState: broadcastChatState,
       localKnowledge: localKnowledge ?? undefined,
     });
@@ -2214,6 +2208,10 @@ app.whenReady().then(async () => {
   localKnowledge = new LocalKnowledge(app.getPath("userData"));
   console.log(`[kb] 私人知识库已加载 ${localKnowledge.getAll().length} 条`);
 
+  // 初始化进程内 AI 引擎（本地数据库落在本机 userData）。
+  // 桌宠自此不再依赖任何外部后端进程——大脑、知识库、历史全在本进程内。
+  initEngine({ dbPath: path.join(app.getPath("userData"), "kirari.db") });
+
   // 注册 pet:// 协议：打包后 loadFile 无 HTTP 服务器，
   // fetch('/pet/frames.json') 无法解析。通过自定义协议映射到精灵帧资源目录。
   // 注意：Electron 42.x 的 registerFileProtocol 回调要求 filePath 属性（非 path）。
@@ -2379,6 +2377,7 @@ app.on("before-quit", () => {
   isQuitting = true;
   stopBackend();
   chatSessionService?.dispose();
+  shutdownEngine();
   if (avatarFolderWatcher) {
     try {
       avatarFolderWatcher.close();
