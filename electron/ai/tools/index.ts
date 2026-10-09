@@ -73,6 +73,8 @@ export type GeoCandidate = {
     latitude: number;
     longitude: number;
     country?: string;
+    /** ISO 3166-1 alpha-2 国家代码（如 CN） */
+    country_code?: string;
     admin1?: string;
     population?: number;
     timezone?: string;

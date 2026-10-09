@@ -20,6 +20,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import Database from "better-sqlite3";
+import type { ContentPart, MessageRole } from "../types";
 
 type DB = Database.Database;
 
@@ -115,8 +116,8 @@ const SCHEMA = `
 
 /** 单条消息（content 可能是纯文本，也可能是 [text, image_url] 多模态数组） */
 export type StoredMessage = {
-    role: string;
-    content: string | unknown[];
+    role: MessageRole;
+    content: string | ContentPart[];
 };
 
 /** 每个会话保留的最大消息条数（与内核原行为一致，避免上下文无限膨胀） */
@@ -130,7 +131,7 @@ export async function getSession(sessionId: string): Promise<StoredMessage[]> {
     const rows = getDb()
         .prepare("SELECT role, content FROM messages WHERE session_id = ? ORDER BY id ASC")
         .all(sessionId) as { role: string; content: string }[];
-    return rows.map((m) => ({ role: m.role, content: parseContent(m.content) }));
+    return rows.map((m) => ({ role: toRole(m.role), content: parseContent(m.content) }));
 }
 
 export async function saveMessage(
@@ -156,7 +157,7 @@ export async function getRecentMessages(sessionId: string, limit = 5): Promise<S
     const rows = getDb()
         .prepare("SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?")
         .all(sessionId, limit * 2) as { role: string; content: string }[];
-    return rows.reverse().map((m) => ({ role: m.role, content: parseContent(m.content) }));
+    return rows.reverse().map((m) => ({ role: toRole(m.role), content: parseContent(m.content) }));
 }
 
 /** 清空指定会话（用户点了"清空聊天记录"） */
@@ -172,15 +173,21 @@ export async function listSessions(): Promise<string[]> {
     return rows.map((r) => r.session_id);
 }
 
-function parseContent(raw: string): string | unknown[] {
+function parseContent(raw: string): string | ContentPart[] {
     if (typeof raw !== "string") return raw;
     try {
         const parsed = JSON.parse(raw);
-        return Array.isArray(parsed) ? parsed : raw;
+        return Array.isArray(parsed) ? (parsed as ContentPart[]) : raw;
     } catch {
         // 非 JSON → 纯文本，保持原样
         return raw;
     }
+}
+
+/** 数据库读出的 role 统一收敛为合法的 MessageRole */
+function toRole(raw: string): MessageRole {
+    const r = String(raw || "") as MessageRole;
+    return r === "system" || r === "user" || r === "assistant" || r === "tool" ? r : "user";
 }
 
 // ---------------------------------------------------------------- 位置记忆
