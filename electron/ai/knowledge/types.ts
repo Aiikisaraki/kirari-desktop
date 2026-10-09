@@ -49,6 +49,8 @@ export type KnowledgeSourceDef = {
     endpoint?: string;
     /** 离线索引 / 文件的本地路径 */
     path?: string;
+    /** REST 源使用的解析器名（pubchem / pubmed / musicbrainz） */
+    parser?: string;
     auth?: AuthMode;
     /** 是否启用（默认 true） */
     enabled?: boolean;
@@ -77,4 +79,15 @@ export type RetrievedPassage = {
 export type RetrieveOptions = {
     limit?: number;
     signal?: AbortSignal;
+    /** 领域过滤标签（命中任一即参与检索；源自身 domains 为空表示不限） */
+    domains?: string[];
+    /** 前端主动携带的私有知识库检索结果（DBKnowledgeSource 优先使用） */
+    kbContext?: RetrievedPassage[];
+    /**
+     * 用户信息。私有知识库按此隔离检索。
+     * 进程内场景下为本地标识，不再经由网络传输。
+     */
+    userid?: string;
+    /** 预留：单源超时（毫秒） */
+    timeoutMs?: number;
 };

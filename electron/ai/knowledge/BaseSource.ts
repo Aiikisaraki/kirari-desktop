@@ -9,7 +9,7 @@
 //
 // 由 kirari-core/src/knowledge/BaseSource.js 迁入。
 
-import type { KnowledgeSourceDef, RetrievedPassage, RetrieveOptions } from "./types";
+import type { KnowledgeSourceDef, RetrievedPassage, RetrieveOptions, Tier } from "./types";
 
 export abstract class BaseSource {
     readonly def: KnowledgeSourceDef;
@@ -19,7 +19,7 @@ export abstract class BaseSource {
     readonly auth: string;
     readonly enabled: boolean;
     readonly priority: number;
-    readonly tier: string;
+    readonly tier: Tier;
     readonly domains: string[];
     readonly options: Record<string, unknown>;
 
