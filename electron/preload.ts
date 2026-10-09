@@ -1,44 +1,20 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { AdapterStatus } from "./adapter/types";
 
-type SettingsRequest = {
-  method: "GET" | "POST" | "PUT";
-  path: string;
-  body: Record<string, unknown>;
-};
-
-type DeployConfig = {
-  mode: "local" | "remote";
-  server: { wsUrl: string; httpUrl: string };
-  builtinToken?: string;
-};
-
-// 模型配置文件（config.json）的结构：本地模式下设置界面与用户外部编辑共用。
+// 模型配置文件（config.json）的结构：设置界面与用户外部编辑共用。
 type ModelConfigFile = {
   endpoint?: string;
   model?: string;
   key?: string;
+  searchKey?: string;
+  searchEndpoint?: string;
+  searchProvider?: string;
+  basePersona?: string;
   seeded?: boolean;
 };
 
+// 桌宠不设账户、也不连远程服务端：设置窗口只需要读写本机配置。
 contextBridge.exposeInMainWorld("tokenApi", {
-  getDeployConfig: (): Promise<DeployConfig> => ipcRenderer.invoke("deploy:get-config"),
-  getCapabilities: (): Promise<{ localAvailable: boolean }> => ipcRenderer.invoke("deploy:get-capabilities"),
-  setDeployServer: (
-    server: { wsUrl: string; httpUrl: string },
-  ): Promise<{ ok: boolean; server: { wsUrl: string; httpUrl: string } }> =>
-    ipcRenderer.invoke("deploy:set-server", server),
-  setSession: (token: string | null): Promise<void> => ipcRenderer.invoke("deploy:set-session", token),
-  // 切换部署模式（本地部署 ⇄ 连接远程服务端）；主进程会清除对方模式残留并重启。
-  switchMode: (target: "local" | "remote"): Promise<void> =>
-    ipcRenderer.invoke("deploy:switch-mode", target),
-  login: (username: string, password: string): Promise<{ ok: boolean; uid?: number; message?: string }> =>
-    ipcRenderer.invoke("token:login", { username, password }),
-  register: (username: string, password: string): Promise<{ ok: boolean; message?: string }> =>
-    ipcRenderer.invoke("token:register", { username, password }),
-  request: (request: SettingsRequest): Promise<{ status: number; data: Record<string, unknown> }> =>
-    ipcRenderer.invoke("token:request", request),
-  // 本地模式：直接读写模型配置文件（config.json），外部编辑会实时同步。
   getModelConfig: (): Promise<ModelConfigFile> => ipcRenderer.invoke("config:get"),
   setModelConfig: (patch: Partial<ModelConfigFile>): Promise<ModelConfigFile> =>
     ipcRenderer.invoke("config:set", patch),

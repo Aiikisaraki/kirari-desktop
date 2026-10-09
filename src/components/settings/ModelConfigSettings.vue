@@ -1,14 +1,10 @@
 <script setup lang="ts">
-import { computed, inject, onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useApiToken } from "../../composables/useApiToken";
-import { SETTINGS_CONTEXT } from "./settingsContext";
 
-const { mode, authed } = inject(SETTINGS_CONTEXT)!;
 const {
     isLoading,
     error,
-    getProfile,
-    updateProfile,
     getModelConfig,
     setModelConfig,
     onModelConfigChanged,
@@ -71,24 +67,8 @@ function applyProfile(p: {
 }
 
 async function loadProfile() {
-    if (mode.value === "local") {
-        try {
-            const profile = await getModelConfig();
-            applyProfile(profile);
-            baseProfile.value = {
-                model: profile.model,
-                apiEndpoint: profile.apiEndpoint,
-                searchProvider: profile.searchProvider,
-            };
-        } catch {
-            /* 读不到则保留表单当前值 */
-        }
-        return;
-    }
-    // 远程模式：已登录才拉取
-    if (!authed.value) return;
     try {
-        const profile = await getProfile();
+        const profile = await getModelConfig();
         applyProfile(profile);
         baseProfile.value = {
             model: profile.model,
@@ -96,7 +76,7 @@ async function loadProfile() {
             searchProvider: profile.searchProvider,
         };
     } catch {
-        /* 拉取失败则保留当前值 */
+        /* 读不到则保留表单当前值 */
     }
 }
 
@@ -122,11 +102,9 @@ async function handleSave() {
         error.value = "模型名称和 API 端点不能为空";
         return;
     }
-    // 远程模式兜底：之前若因 key 名漂移把空 token 写进 DB（典型：已注册用户首次保存），
-    // 单凭改动 model/endpoint 不会自动补上 Token，会原地报「用户尚未配置 API Token」。
-    // 此时必须让用户主动重输 Token，否则 PUT 仍然不带 token，聊天还是不工作。
-    if (mode.value === "remote" && !hasToken.value && !newTokenInput.value.trim()) {
-        error.value = "远程账户尚未配置 API Token，请在「API Token」框里重新填入并保存";
+    // 还没填过钥匙，且本次也没填：直接提示，避免保存后仍然聊不了天。
+    if (!hasToken.value && !newTokenInput.value.trim()) {
+        error.value = "还没填过大脑的钥匙，请在下面的钥匙框里填一次再保存";
         return;
     }
     // 仅发送变更过的字段：改一个就只发一个，不必三个一起填。
@@ -155,11 +133,7 @@ async function handleSave() {
         return;
     }
     try {
-        // 本地模式直接写 config.json；远程模式写后端 /api/profile。
-        const updated =
-            mode.value === "remote"
-                ? await updateProfile(patch)
-                : await setModelConfig(patch);
+        const updated = await setModelConfig(patch);
         modelInput.value = updated.model;
         apiEndpointInput.value = updated.apiEndpoint;
         tokenMasked.value = updated.tokenMasked;
@@ -196,10 +170,6 @@ onMounted(() => {
     loadProfile();
 });
 
-// 远程模式登录态变化（登录/会话恢复）后自动加载配置
-watch(authed, (v) => {
-    if (v) loadProfile();
-});
 </script>
 
 <template>
@@ -212,8 +182,8 @@ watch(authed, (v) => {
             配置桌宠使用的大模型与联网搜索能力。
         </p>
 
-        <!-- 本地模式免登录，模型配置（含 API Token）直接可填；远程模式需先登录。 -->
-        <template v-if="mode === 'local' || authed">
+        <!-- 桌宠本机运行、免登录，模型配置（含钥匙）直接可填。 -->
+        <template>
             <div class="field">
                 <label class="field-label" for="model">模型名称</label>
                 <input
@@ -354,11 +324,5 @@ watch(authed, (v) => {
             <div v-if="saveSuccess" class="settings-success">保存成功</div>
             <div v-if="error" class="settings-error">{{ error }}</div>
         </template>
-
-        <p v-else class="settings-hint">
-            请先在「服务端账号」分区登录后，再配置模型与搜索。
-        </p>
-
-        <!-- 仅远程模式且未登录时显示上述提示；本地模式表单始终可填，不会走到这里。 -->
     </section>
 </template>

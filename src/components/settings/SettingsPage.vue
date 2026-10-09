@@ -6,21 +6,14 @@ import AppearanceSettings from "./AppearanceSettings.vue";
 import GeneralSettings from "./GeneralSettings.vue";
 import AvatarSettings from "./AvatarSettings.vue";
 import PersonaSettings from "./PersonaSettings.vue";
-import AccountSettings from "./AccountSettings.vue";
 import ModelConfigSettings from "./ModelConfigSettings.vue";
 import BotAdapterSettings from "./BotAdapterSettings.vue";
 import McpSettings from "./McpSettings.vue";
 import SkillSettings from "./SkillSettings.vue";
 import KnowledgeSettings from "./KnowledgeSettings.vue";
 import ProfileSettings from "./ProfileSettings.vue";
-import { useApiToken } from "../../composables/useApiToken";
 import { SETTINGS_CONTEXT, type SettingsContext } from "./settingsContext";
 
-const { getDeployConfig, login, register, getProfile, logout } = useApiToken();
-
-const mode = ref<"local" | "remote">("local");
-const authed = ref(false);
-const accountName = ref("");
 const error = ref("");
 const petName = ref("Kirari");
 const activeId = ref<string>("appearance");
@@ -41,8 +34,6 @@ const activeComponent = computed(() => {
             return AvatarSettings;
         case "persona":
             return PersonaSettings;
-        case "account":
-            return AccountSettings;
         case "profile":
             return ProfileSettings;
         case "model":
@@ -92,40 +83,6 @@ function setActiveId(id: string) {
     });
 }
 
-async function refreshAuth() {
-    try {
-        const config = await getDeployConfig();
-        mode.value = config.mode;
-        if (config.mode === "local") {
-            // 本地内置账户：必须真正向后端验证内置令牌是否已被接受，
-            // 不能无条件视为已登录（否则会与后端实际拒绝握手的凭证状态不一致）。
-            try {
-                const profile = await getProfile();
-                authed.value = true;
-                accountName.value = profile.username || "本地内置账户";
-            } catch (err) {
-                authed.value = false;
-                accountName.value = "";
-                error.value =
-                    err instanceof Error && err.message
-                        ? `内置账户令牌未被后端接受：${err.message}（请检查服务端 BUILTIN_ACCOUNT_TOKEN 与本地配置是否一致）`
-                        : "内置账户令牌未被后端接受，请检查后端状态或内置令牌配置";
-            }
-            return;
-        }
-        try {
-            const profile = await getProfile();
-            authed.value = true;
-            accountName.value = profile.username;
-        } catch {
-            authed.value = false;
-            accountName.value = "";
-        }
-    } catch {
-        authed.value = false;
-    }
-}
-
 async function loadPetName() {
     try {
         const w = window as unknown as {
@@ -140,19 +97,11 @@ async function loadPetName() {
     }
 }
 
-const ctx: SettingsContext = {
-    mode,
-    authed,
-    accountName,
-    refreshAuth,
-    login,
-    register,
-    logout,
-};
+// 桌宠本机运行、不设账户：设置上下文不再携带模式与鉴权状态。
+const ctx: SettingsContext = {};
 provide(SETTINGS_CONTEXT, ctx);
 
-// 导航项：远端模式才显示「账号」分区。
-// 每个分区可附带 hint（侧栏下方副标题展示）、count（侧栏右侧小徽标）。
+// 导航项。每个分区可附带 hint（侧栏下方副标题展示）、count（侧栏右侧小徽标）。
 const sections = computed(() => {
     const list: {
         id: string;
@@ -167,8 +116,6 @@ const sections = computed(() => {
         { id: "profile", label: "个人", emoji: "👤", hint: "我的头像" },
         { id: "persona", label: "人格", emoji: "🎭", hint: "自定义基础人格" },
     ];
-    if (mode.value === "remote")
-        list.push({ id: "account", label: "账号", emoji: "🔑", hint: "服务端地址与登录" });
     list.push(
         { id: "model", label: "模型", emoji: "🧠", hint: "大模型与联网搜索" },
         { id: "mcp", label: "MCP", emoji: "🔌", hint: "MCP 服务器" },
@@ -185,7 +132,6 @@ const activeLabel = computed(() => {
 });
 
 onMounted(() => {
-    refreshAuth();
     loadPetName();
     if (typeof window !== "undefined") {
         mq = window.matchMedia("(max-width: 640px)");
@@ -220,14 +166,6 @@ onMounted(() => {
                     </p>
                     <p v-if="error" class="settings-greeting__error">{{ error }}</p>
                     <span class="settings-greeting__spacer" />
-                    <span
-                        v-if="mode === 'remote'"
-                        class="settings-greeting__badge"
-                        :class="{ 'is-on': authed, 'is-off': !authed }"
-                    >
-                        <span class="badge-dot" />
-                        {{ authed ? "已登录" : "未登录" }}
-                    </span>
                 </header>
                 <SettingsNav
                     mode="pills"

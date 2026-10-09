@@ -1,21 +1,14 @@
-import type { InjectionKey, Ref } from "vue";
-
-export type AuthResult = { ok: boolean; uid?: number; message?: string };
+import type { InjectionKey } from "vue";
 
 /**
  * 设置页跨区块共享的上下文。
- * 主页面（SettingsPage）持有 mode / authed / accountName 与鉴权动作，
- * 各区块组件通过 inject 读取，彼此不再相互耦合。
+ *
+ * 桌宠本机运行、不设账户，也不区分本地/远程部署模式，
+ * 因此这里不再携带鉴权态与模式字段。保留这个注入点，
+ * 是为了后续加入「组网」等跨区块共享状态时不用改动各设置页的注入方式。
  */
 export interface SettingsContext {
-    mode: Ref<"local" | "remote">;
-    authed: Ref<boolean>;
-    accountName: Ref<string>;
-    /** 重新拉取鉴权态（登录/登出后调用） */
-    refreshAuth: () => Promise<void>;
-    login: (username: string, password: string) => Promise<AuthResult>;
-    register: (username: string, password: string) => Promise<AuthResult>;
-    logout: () => void;
+    // 暂无跨区块共享状态；保留空接口以便后续扩展。
 }
 
 export const SETTINGS_CONTEXT = Symbol(
