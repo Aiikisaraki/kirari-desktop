@@ -32,7 +32,10 @@ import {
 import type { NetState, NetRole, LeafCredential } from "./netStore";
 import { generatePairingCode, parsePairingCode, describeRemaining, randomToken } from "./pairingCode";
 import type { PairingCode, PairingRecord, ExpiryKey } from "./pairingCode";
-import { NET_PORT } from "./protocol";
+import { NET_PORT, PROTOCOL_VERSION } from "./protocol";
+import type { RelayResult, RelayBusy, RelayBackfill } from "./protocol";
+import { RelayRouter } from "./relayRouter";
+import type { RelayExecutor } from "./relayRouter";
 
 export type NetSnapshot = {
     role: NetRole;
@@ -48,6 +51,10 @@ export type NetSnapshot = {
     members: MemberInfo[];
     /** 叶子侧：连接状态 */
     leafStatus?: LeafStatus;
+    /** 叶子侧：待补传的离线对话条数 */
+    pendingBackfill?: number;
+    /** 主机侧：出口忙不忙 */
+    relay?: { running: number; queued: number; maxConcurrent: number; maxQueue: number } | null;
 };
 
 export type NetManagerEvents = {
@@ -55,7 +62,21 @@ export type NetManagerEvents = {
     /** 自动退出组网时要告知用户（避免误以为程序崩了） */
     onFallbackNotice?: (message: string) => void;
     onLog?: (message: string) => void;
+    /**
+     * 收到全网广播的回复（阶段 3）。所有设备都会收到 —— 活锁模型的必然结果。
+     * 请求方自己的发言已在本地显示，这里只管把回复显示出来。
+     */
+    onRelayResult?: (frame: RelayResult) => void;
+    /** 主机拒绝了请求 */
+    onRelayBusy?: (frame: RelayBusy) => void;
 };
+
+/**
+ * 主机侧的模型执行器（阶段 3）。
+ * 由 main.ts 注入本机 AI 引擎；不注入则主机不处理上行请求
+ * （叶子会收到「主机还没准备好」而不是卡死）。
+ */
+export type HostExecutor = RelayExecutor;
 
 export class NetManager {
     private userDataDir: string;
@@ -64,12 +85,60 @@ export class NetManager {
     private host: HostServer | null = null;
     private leaf: LeafClient | null = null;
     private events: NetManagerEvents;
+    /** 主机侧活锁路由（阶段 3）。有执行器才会建。 */
+    private router: RelayRouter | null = null;
+    /** 叶子侧补传入库回调（只记对话，不调模型） */
+    private backfillSink: ((msg: RelayBackfill) => Promise<void> | void) | null = null;
 
     constructor(userDataDir: string, events: NetManagerEvents = {}) {
         this.userDataDir = userDataDir;
         this.events = events;
         this.identity = loadOrCreateIdentity(userDataDir);
         this.state = loadNetState(userDataDir, this.identity.deviceId, this.identity.name);
+    }
+
+    /**
+     * 装上主机侧的模型执行器（阶段 3）。
+     *
+     * 组网启动时才调用 —— 也就是说「主机能不能当出口」取决于本机有没有配好大脑。
+     * 没配就应该是「不能当主机」，而不是让人配好了发现组网是坏的。
+     * @param executor 调用本机 AI 引擎
+     * @param onBackfill 补传入库（把断线期间的对话写进本机历史）
+     */
+    attachHostExecutor(executor: HostExecutor, onBackfill?: (msg: RelayBackfill) => Promise<void> | void): void {
+        this.backfillSink = onBackfill ?? null;
+        if (!this.router) {
+            this.router = new RelayRouter({
+                executor,
+                maxConcurrent: Number(process.env.NET_MAX_CONCURRENT || 2),
+                maxQueue: Number(process.env.NET_MAX_QUEUE || 20),
+                events: {
+                    // 广播：发给所有叶子 + 自己也收到（主机也是全网一员）
+                    broadcast: (frame) => {
+                        this.host?.broadcast(frame);
+                        this.events.onRelayResult?.(frame);
+                    },
+                    replyTo: (deviceId, frame) => this.host?.replyTo(deviceId, frame),
+                    onBackfill: async (msg) => {
+                        await this.backfillSink?.(msg);
+                        // 回执让叶子清掉本地待补队列
+                        this.host?.replyTo(msg.deviceId, {
+                            type: "relay_backfill_ack",
+                            v: PROTOCOL_VERSION,
+                            count: msg.entries.length,
+                        });
+                    },
+                    onLog: (m) => this.log(m),
+                },
+            });
+        } else {
+            this.router.setExecutor(executor);
+        }
+    }
+
+    /** 活锁路由的运行状态，给 UI 显示「主机现在忙不忙」。 */
+    relayStats(): { running: number; queued: number; maxConcurrent: number; maxQueue: number } | null {
+        return this.router?.stats() ?? null;
     }
 
     // ── 查询 ────────────────────────────────────────────────────
@@ -96,6 +165,8 @@ export class NetManager {
             })),
             members: this.host ? this.host.members() : [],
             leafStatus: this.leaf?.getStatus(),
+            pendingBackfill: this.leaf?.pendingBackfillCount(),
+            relay: this.relayStats(),
         };
     }
 
@@ -148,18 +219,23 @@ export class NetManager {
         this.persist();
 
         if (!this.host) {
-            this.host = new HostServer(this.state, {
-                onLog: (m) => this.log(m),
-                // HostServer 内部状态变化（新增/更新/移除成员）必须回流到
-                // NetManager 并落盘，否则主机重启后忘记已配对设备。
-                onStateChanged: (s) => {
+            // HostServer 不再自己存状态：一律通过 getState/setState 走这里。
+            // 单一数据源是必须的 —— 之前两边各存一份互相覆盖，循环下来
+            // 成员会莫名丢失（叶子重连时主机说「不认识」）。
+            this.host = new HostServer(
+                () => this.state,
+                (s) => {
                     this.state = s;
                     this.persist();
                 },
-                onMembersChanged: () => this.events.onSnapshot?.(this.snapshot()),
-            });
-        } else {
-            this.host.updateState(this.state);
+                {
+                    onLog: (m) => this.log(m),
+                    onMembersChanged: () => this.events.onSnapshot?.(this.snapshot()),
+                    // 阶段 3：上行请求交给活锁路由
+                    onRelayRequest: (req) => this.router?.handle(req) ?? false,
+                    onRelayBackfill: (msg) => void this.router?.handleBackfill(msg),
+                },
+            );
         }
 
         const started = await this.host.start(NET_PORT);
@@ -169,6 +245,8 @@ export class NetManager {
             this.persist();
             return { ok: false, error: started.error };
         }
+        // 重新打开 → 路由恢复收单
+        this.router?.reopen();
 
         this.host.updateState(this.state);
         return { ok: true, code };
@@ -192,6 +270,8 @@ export class NetManager {
                 onLog: (m) => this.log(m),
                 onStatus: () => this.events.onSnapshot?.(this.snapshot()),
                 onMembers: () => this.events.onSnapshot?.(this.snapshot()),
+                onRelayResult: (f) => this.events.onRelayResult?.(f),
+                onRelayBusy: (f) => this.events.onRelayBusy?.(f),
                 onFallback: (reason) => {
                     // 关键：只改 role，不动地址与凭据 —— 退出不清除。
                     // 下次用户打开开关，凭持久化的信息自动归位，无需重新配对。
@@ -236,6 +316,8 @@ export class NetManager {
                 onLog: (m) => this.log(m),
                 onStatus: () => this.events.onSnapshot?.(this.snapshot()),
                 onMembers: () => this.events.onSnapshot?.(this.snapshot()),
+                onRelayResult: (f) => this.events.onRelayResult?.(f),
+                onRelayBusy: (f) => this.events.onRelayBusy?.(f),
                 onFallback: (reason) => {
                     this.state = disableNetworking(this.state);
                     this.persist();
@@ -258,6 +340,8 @@ export class NetManager {
      */
     stopNetworking(): void {
         this.leaf?.disconnect();
+        // 先停路由：排队中的叶子要立刻收到「主机不接了」，而不是干等到超时
+        this.router?.close();
         this.host?.stop();
         this.state = disableNetworking(this.state);
         this.persist();
@@ -265,7 +349,7 @@ export class NetManager {
 
     // ── 主机侧管理 ──────────────────────────────────────────────
 
-    /** 再生成一个连接码（支持多台设备分别配对）。 */
+        /** 再生成一个连接码（支持多台设备分别配对）。 */
     issuePairing(expiryKey: ExpiryKey = DEFAULT_EXPIRY): PairingCode {
         const { code, record } = generatePairingCode({
             host: guessHostAddress(),
@@ -329,12 +413,32 @@ export class NetManager {
     }
 
     /** 阶段 3 预留：叶子端上行请求。 */
-    relay(content: string, images?: string[]): boolean {
-        return this.leaf?.sendRelay(content, images) ?? false;
+    relay(content: string, sessionId: string, images?: string[]): boolean {
+        return this.leaf?.sendRelay(content, sessionId, images, this.identity.name) ?? false;
+    }
+
+    /**
+     * 记录一条「本地独立工作期间产生的对话」（阶段 3 离线补传）。
+     *
+     * 只在**没连上主机**时才有意义 —— 连着的时候对话本来就走主机、不缺记录。
+     * 这些内容会在下次连上主机时补传（只入库，不重放模型调用）。
+     */
+    recordLocalExchange(sessionId: string, role: "user" | "assistant", text: string): void {
+        if (!this.leaf) return;
+        // 已连上主机 → 对话已由主机记录，不需要补传
+        if (this.leaf.getStatus() === "connected") return;
+        this.leaf.recordLocalExchange(sessionId, role, text);
+        this.events.onSnapshot?.(this.snapshot());
+    }
+
+    /** 手动触发一次补传（用户在 UI 上点「立即同步」时用）。 */
+    flushBackfillNow(): void {
+        this.leaf?.flushBackfill();
     }
 
     dispose(): void {
         this.leaf?.disconnect();
+        this.router?.close("主机已退出");
         this.host?.stop();
         this.leaf = null;
         this.host = null;

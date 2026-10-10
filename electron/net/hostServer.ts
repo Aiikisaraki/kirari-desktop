@@ -12,7 +12,7 @@
 import { WebSocketServer, type WebSocket } from "ws";
 import * as os from "node:os";
 import { NET_PORT, PROTOCOL_VERSION, parseClientFrame } from "./protocol";
-import type { MembersMessage, PairResponse, PongMessage, HostShutdown } from "./protocol";
+import type { MembersMessage, PairResponse, PongMessage, HostShutdown, RelayRequest, RelayBackfill, RelayBusy } from "./protocol";
 import { randomToken, verifyPairing } from "./pairingCode";
 import type { PairingRecord } from "./pairingCode";
 import type { NetState, LeafCredential } from "./netStore";
@@ -28,21 +28,29 @@ export type MemberInfo = {
 export type HostEvents = {
     /** 状态变化（成员增减、开关切换）—— 由调用方负责广播给 UI */
     onMembersChanged?: (members: MemberInfo[]) => void;
-    /**
-     * HostServer 内部状态发生变化（新增/更新成员、移除设备）。
-     *
-     * ⚠️ 必须回调出去让上层落盘。之前 HostServer 只在自己内存里记 members，
-     *    结果主机重启后「已配对设备」凭空消失，长期凭据也没了 ——
-     *    表现为叶子退出再打开永远连不上。是阶段 2 双机验收抓出来的。
-     */
-    onStateChanged?: (state: NetState) => void;
     /** 有叶子接入或离开，供日志与后续阶段扩展 */
     onLog?: (message: string) => void;
+    /**
+     * 处理上行请求（阶段 3 活锁路由）。
+     * 返回 true 表示已受理。由 NetManager 注入 RelayRouter。
+     */
+    onRelayRequest?: (req: RelayRequest) => boolean;
+    /** 处理离线补传（只记对话，不调模型） */
+    onRelayBackfill?: (msg: RelayBackfill) => void;
 };
 
 export class HostServer {
     private wss: WebSocketServer | null = null;
-    private state: NetState;
+    /**
+     * 状态**不在这里存**。
+     *
+     * ⚠️ 之前 HostServer 与 NetManager 各自持有一份 state，互相覆盖，
+     *    循环下来成员会莫名丢失（叶子重连时主机说「不认识」，
+     *    而主机界面明明显示它在线）。现在 HostServer 一律通过 getState()
+     *    读上层的最新状态，改动则通过 onStateChanged 写回 —— 单一数据源。
+     */
+    private getState: () => NetState;
+    private setState: (s: NetState) => void;
     private events: HostEvents;
     /** deviceId → 在线连接 */
     private clients = new Map<string, WebSocket>();
@@ -51,9 +59,15 @@ export class HostServer {
     /** 单调递增序号：阶段 3 广播时携带，保证叶子端顺序 */
     private seq = 0;
 
-    constructor(state: NetState, events: HostEvents = {}) {
-        this.state = state;
+    constructor(getState: () => NetState, setState: (s: NetState) => void, events: HostEvents = {}) {
+        this.getState = getState;
+        this.setState = setState;
         this.events = events;
+    }
+
+    /** 当前状态（实时向上层取，不缓存）。 */
+    private get state(): NetState {
+        return this.getState();
     }
 
     get isRunning(): boolean {
@@ -155,8 +169,7 @@ export class HostServer {
     /** 移除设备：作废其长期凭据，之后再也连不上。 */
     kick(deviceId: string): boolean {
         const existed = this.state.members.some((m) => m.deviceId === deviceId);
-        this.state = removeMember(this.state, deviceId);
-        this.syncState();
+        this.setState(removeMember(this.getState(), deviceId));
         const ws = this.clients.get(deviceId);
         if (ws) {
             try {
@@ -194,26 +207,33 @@ export class HostServer {
         }
     }
 
+    /** 只回给某一个叶子（限流拒绝、私密回执等）。 */
+    replyTo(deviceId: string, payload: unknown): void {
+        const ws = this.clients.get(deviceId);
+        if (!ws || ws.readyState !== 1) return;
+        try {
+            ws.send(JSON.stringify(payload));
+        } catch {
+            // 发送失败不必惊动谁：叶子会靠心跳超时自己回退
+        }
+    }
+
     /** 下一个序号（阶段 3 广播时用）。 */
     nextSeq(): number {
         return ++this.seq;
     }
 
-    /** 把内部状态变化同步给上层（上层负责落盘）。 */
-    private syncState(): void {
-        this.events.onStateChanged?.(this.state);
-    }
-
     /** 替换状态（上层改动后调用）。 */
     updateState(state: NetState): void {
-        this.state = state;
+        this.setState(state);
     }
 
-    getState(): NetState {
+    /** 当前状态的快照（调试与 UI 用）。 */
+    currentState(): NetState {
         return this.state;
     }
 
-    private send(ws: WebSocket, frame: PairResponse | MembersMessage | PongMessage): void {
+    private send(ws: WebSocket, frame: PairResponse | MembersMessage | PongMessage | RelayBusy): void {
         try {
             ws.send(JSON.stringify(frame));
         } catch {
@@ -265,8 +285,7 @@ export class HostServer {
                     clearTimeout(authTimeout);
                     this.clients.set(deviceId, ws);
                     this.onlineSince.set(deviceId, now);
-                    this.state = rememberLeaf(this.state, { ...known, lastSeenAt: now });
-                    this.syncState();
+                    this.setState(rememberLeaf(this.getState(), { ...known, lastSeenAt: now }));
                     this.send(ws, {
                         type: "pair_ok",
                         v: PROTOCOL_VERSION,
@@ -301,15 +320,16 @@ export class HostServer {
                     issuedAt: now,
                     lastSeenAt: now,
                 };
-                this.state = rememberLeaf(this.state, leaf);
-                    this.syncState();
+                this.setState(rememberLeaf(this.getState(), leaf));
                 // 把用掉的配对码标记为已使用（同时仍允许同一设备用它重连，见 verifyPairing）
                 const used = this.state.pairings.find((p) => p.tokenHash && !p.revoked && p.usedBy === null);
                 if (used) {
-                    this.state = {
-                        ...this.state,
-                        pairings: this.state.pairings.map((p) => (p.id === used.id ? { ...p, usedBy: deviceId } : p)),
-                    };
+                    this.setState({
+                        ...this.getState(),
+                        pairings: this.getState().pairings.map((p) =>
+                            p.id === used.id ? { ...p, usedBy: deviceId } : p,
+                        ),
+                    });
                 }
 
                 authedDeviceId = deviceId;
@@ -344,8 +364,30 @@ export class HostServer {
                 this.send(ws, { type: "pong", v: PROTOCOL_VERSION, seq: this.nextSeq(), serverTime: Date.now() });
                 const m = this.state.members.find((x) => x.deviceId === authedDeviceId);
                 if (m) {
-                    this.state = rememberLeaf(this.state, { ...m, lastSeenAt: Date.now() });
+                    this.setState(rememberLeaf(this.getState(), { ...m, lastSeenAt: Date.now() }));
                 }
+                return;
+            }
+
+            // ── 活锁路由（阶段 3）──
+            if (frame.type === "relay_request") {
+                const handler = this.events.onRelayRequest;
+                if (!handler) {
+                    this.send(ws, {
+                        type: "relay_busy",
+                        v: PROTOCOL_VERSION,
+                        requestId: frame.requestId,
+                        reason: "主机还没准备好，稍后再试",
+                    });
+                    return;
+                }
+                handler(frame);
+                return;
+            }
+
+            if (frame.type === "relay_backfill") {
+                this.events.onRelayBackfill?.(frame);
+                return;
             }
         });
 

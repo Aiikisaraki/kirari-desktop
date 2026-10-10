@@ -20,6 +20,15 @@ export const HEARTBEAT_INTERVAL_MS = 2000;
 export const HEARTBEAT_TIMEOUT_MS = 5000;
 
 /**
+ * 建连超时：CONNECTING 状态最多等这么久。
+ *
+ * ⚠️ 必需：被丢弃的 SYN（防火墙静默丢包、或本机 TCP TIME_WAIT 撞车）会让
+ *    连接**永远停在 CONNECTING**，既不成功也不报错。没有这个超时，
+ *    桌宠会一直显示「连接中」——正是历史上修过的「一直硬卡着」问题。
+ */
+export const CONNECT_TIMEOUT_MS = 8000;
+
+/**
  * 配对码格式版本。用于将来扩展字段时区分旧码。
  * 形如：kirari://connect?host=192.168.57.23&port=19760&token=xxx&name=Aki-台式机&exp=1789xxxxxx&v=1
  */
@@ -97,29 +106,89 @@ export type HostShutdown = {
 };
 
 /**
- * 阶段 3 预留：请求上行 / 结果广播。
- * 这里只占位以便协议版本对齐时不返工，实际逻辑在阶段 3 实现。
+ * ── 活锁路由（阶段 3）───────────────────────────────────────────
+ * 核心模型：请求上行主机，主机是唯一出口，结果广播给全网。
+ * 因此一条消息在任何时候都只有一份回复。
  */
+
+/** 叶子 → 主机：把请求上行（请求方要答，由主机的凭证付账）。 */
 export type RelayRequest = {
     type: "relay_request";
     v: number;
     deviceId: string;
     requestId: string;
+    /**
+     * 请求方的会话 ID。主机据此取历史上下文 ——
+     * 这样每台设备有自己的对话脉络，互不串味，且断线重连后上下文还在
+     * （上下文存在主机的库里，不是叶子本地）。
+     */
+    sessionId: string;
     content: string;
     images?: string[];
+    /** 请求方昵称，仅用于日志与广播显示 */
+    nickname?: string;
 };
 
+/** 主机 → 全网：生成好的回复。 */
 export type RelayResult = {
     type: "relay_result";
     v: number;
     requestId: string;
     speech: string;
     emotion?: string | null;
+    /** 单调递增：叶子只接受递增的，保证多端并发时顺序不乱 */
     seq: number;
+    /** 是谁问的 */
+    fromDeviceId: string;
+    fromName?: string;
+    /** 请求方的会话 ID，便于其他叶子决定要不要记进自己的历史 */
+    sessionId: string;
+    /** 发起时刻（毫秒），广播里带着，各端算延迟方便排查 */
+    askedAt: number;
 };
 
-export type ServerFrame = PairResponse | PongMessage | MembersMessage | HostShutdown | RelayResult;
-export type ClientFrame = PairRequest | PingMessage | RelayRequest;
+/** 主机 → 请求方：主机忙不过来（队列满 / 正在关停）。 */
+export type RelayBusy = {
+    type: "relay_busy";
+    v: number;
+    requestId: string;
+    reason: string;
+    /** 建议等待多久再试（毫秒） */
+    retryAfterMs?: number;
+};
+
+/**
+ * 叶子 → 主机：补传断线期间的对话记录。
+ *
+ * 只入库、**不重新触发模型调用** —— 否则其他叶子会看到重复内容，
+ * 而且等于凭空多花主机的额度（ARCHITECTURE-PLAN 3.5）。
+ */
+export type RelayBackfill = {
+    type: "relay_backfill";
+    v: number;
+    deviceId: string;
+    sessionId: string;
+    nickname?: string;
+    /** 本地独立工作期间产生的对话（按时间顺序） */
+    entries: { role: "user" | "assistant"; text: string; at: number }[];
+};
+
+/** 主机 → 叶子：补传已入库，可以清掉本地的待补队列。 */
+export type RelayBackfillAck = {
+    type: "relay_backfill_ack";
+    v: number;
+    count: number;
+};
+
+export type ServerFrame =
+    | PairResponse
+    | PongMessage
+    | MembersMessage
+    | HostShutdown
+    | RelayResult
+    | RelayBusy
+    | RelayBackfillAck;
+export type ClientFrame = PairRequest | PingMessage | RelayRequest | RelayBackfill;
 
 /** 解析服务端发来的文本帧。非法 JSON / 缺 type 一律返回 null（不抛）。 */
 export function parseServerFrame(raw: unknown): ServerFrame | null {
@@ -145,15 +214,32 @@ function parseFrame(raw: unknown): Record<string, unknown> | null {
     return frame;
 }
 
-/** 叶子端本地记录已收到的主机 seq，用于阶段 3 的顺序保证。 */
+/**
+ * 广播序号跟踪：**只做去重，不做乱序丢弃**。
+ *
+ * ⚠️ 这里踩过两个坑，最终结论是「宁可顺序不完美，也不能丢消息」：
+ *    1. 一开始实现成「只接受递增 seq，否则丢弃」→ 并发时完成顺序 ≠ seq 顺序，
+ *       真的把用户该看到的回复丢了。
+ *    2. 改成带定时器的重排序缓冲 → 逻辑太复杂，反而在并发下漏交付。
+ *
+ * 现在：全部收下、按 seq 去重后立即交付。**顺序由上层按 seq 排**（阶段 4 的 UI），
+ * 这样多端看到的顺序仍然一致，而一条都不会丢。
+ */
 export class SeqTracker {
+    private seen = new Set<number>();
     private last = 0;
 
-    /** 只接受递增的 seq。乱序或重复一律丢弃。 */
+    /** 返回 true 表示这是首次收到（应交付给上层）。 */
     accept(seq: number): boolean {
         if (typeof seq !== "number" || !Number.isFinite(seq)) return false;
-        if (seq <= this.last) return false;
-        this.last = seq;
+        if (this.seen.has(seq)) return false; // 重复帧
+        this.seen.add(seq);
+        // 只保留最近 200 个序号，防止长时间运行后 Set 无限增长
+        if (this.seen.size > 200) {
+            const keep = [...this.seen].sort((a, b) => b - a).slice(0, 100);
+            this.seen = new Set(keep);
+        }
+        this.last = Math.max(this.last, seq);
         return true;
     }
 
@@ -162,6 +248,7 @@ export class SeqTracker {
     }
 
     reset(): void {
+        this.seen.clear();
         this.last = 0;
     }
 }
