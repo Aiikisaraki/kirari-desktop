@@ -13,6 +13,7 @@ import QRCode from "qrcode";
 import type { NetManager, NetSnapshot } from "./manager";
 import type { ExpiryKey, PairingCode } from "./pairingCode";
 import { SYNC_FIELDS } from "./protocol";
+import { NET_ENABLED } from "./secure";
 import type { SyncField } from "./protocol";
 
 /** 允许的过期档位，防止非法值进来 */
@@ -44,6 +45,9 @@ export function setupNetIpc(getManager: () => NetManager | null): void {
 
     /** 本机可用于组网的地址（页面提示「用哪个地址连」） */
     ipcMain.handle("net:addresses", withManager((m) => m.addresses()));
+
+    /** 本构建是否带组网密钥（UI 据此决定开关能不能点） */
+    ipcMain.handle("net:enabled", withManager(() => ({ enabled: NET_ENABLED })));
 
     /**
      * 作为主机开启组网，并生成第一个连接码。

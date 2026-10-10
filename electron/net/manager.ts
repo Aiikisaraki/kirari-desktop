@@ -37,6 +37,7 @@ import type { PairingCode, PairingRecord, ExpiryKey } from "./pairingCode";
 import { NET_PORT, PROTOCOL_VERSION, SYNC_FIELDS } from "./protocol";
 import type { RelayResult, RelayBusy, RelayBackfill, ConfigPush, SyncField } from "./protocol";
 import { RelayRouter } from "./relayRouter";
+import { NET_ENABLED } from "./secure";
 import type { RelayExecutor } from "./relayRouter";
 
 export type NetSnapshot = {
@@ -215,6 +216,11 @@ export class NetManager {
         ok: true;
         code: PairingCode;
     } | { ok: false; error: string }> {
+        // 没有组网密钥就不给开 —— 「必须设密码才能开组网」的落地点。
+        // 这样 fork 后自行构建的人拿不到密钥，产物里的组网是关的。
+        if (!NET_ENABLED) {
+            return { ok: false, error: "这个版本没有包含组网密钥，无法开启组网" };
+        }
         this.state = enableNetworking(this.state, "host");
         // 主机不依赖凭据，但家庭标识要有（阶段 3 用它识别「同一伙设备」）
         if (!this.state.homeId) this.state = { ...this.state, homeId: randomToken(8) };
@@ -276,6 +282,9 @@ export class NetManager {
      * 配对成功会把主机地址与长期凭据一并落盘，下次打开开关直接连、免重新配对。
      */
     async startFollowing(pairingText: string): Promise<{ ok: true } | { ok: false; error: string }> {
+        if (!NET_ENABLED) {
+            return { ok: false, error: "这个版本没有包含组网密钥，无法接入" };
+        }
         const code = parsePairingCode(pairingText);
         if (!code) {
             return { ok: false, error: "这个连接码看起来不完整。让主机那边重新复制一次，粘完整的那一串。" };

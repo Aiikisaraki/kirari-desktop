@@ -12,7 +12,9 @@
 import { WebSocketServer, type WebSocket } from "ws";
 import * as os from "node:os";
 import { NET_PORT, PROTOCOL_VERSION, parseClientFrame } from "./protocol";
-import type { MembersMessage, PairResponse, PongMessage, HostShutdown, RelayRequest, RelayBackfill, RelayBusy, ConfigReport, ConfigPush } from "./protocol";
+import type { Hello, HelloAck } from "./protocol";
+import { NET_ENABLED, NET_SECRET, deriveKey, newSalt, seal, open, safeEqual, ReplayGuard } from "./secure";
+import type { MembersMessage, PairResponse, PongMessage, HostShutdown, RelayRequest, RelayBackfill, RelayBusy, ConfigReport, ConfigPush, ClientFrame } from "./protocol";
 import { filterWhitelisted } from "./netStore";
 import type { SyncField } from "./protocol";
 import { randomToken, verifyPairing } from "./pairingCode";
@@ -67,11 +69,37 @@ export class HostServer {
     private onlineSince = new Map<string, number>();
     /** 单调递增序号：阶段 3 广播时携带，保证叶子端顺序 */
     private seq = 0;
+    /**
+     * 本机 salt：与密钥一起派生会话密钥。每台主机一个，一台泄露不牵连其他主机。
+     * 存在组网状态里（主机侧），叶子握手时拿到。
+     */
+    private salt: string;
+    /** 每连接一把会话密钥（由 密钥+salt 派生后按连接隔离） */
+    private keys = new Map<string, Buffer>();
+    /** 每连接的重放窗口 */
+    private guards = new Map<string, ReplayGuard>();
+    /** 每连接的加密帧自增序号 */
+    private txSeq = new Map<string, number>();
+    /** 配对应答发出前，先记下是哪台设备（此刻它还没进 clients） */
+    private pendingDeviceId = "";
 
     constructor(getState: () => NetState, setState: (s: NetState) => void, events: HostEvents = {}) {
         this.getState = getState;
         this.setState = setState;
         this.events = events;
+        // salt 复用状态里的，缺省新建一个并落盘
+        const st = getState();
+        if (st.hostSalt) {
+            this.salt = st.hostSalt;
+        } else {
+            this.salt = newSalt();
+            setState({ ...st, hostSalt: this.salt });
+        }
+    }
+
+    /** 本机 salt（供 UI 诊断用） */
+    getSalt(): string {
+        return this.salt;
     }
 
     /** 当前状态（实时向上层取，不缓存）。 */
@@ -202,17 +230,15 @@ export class HostServer {
         this.events.onMembersChanged?.(this.members());
     }
 
-    /** 向所有叶子广播（阶段 3 的结果广播也走这里）。 */
+    /**
+     * 向所有叶子广播。
+     *
+     * 每台设备单独加密 —— 会话密钥虽由同一个密钥派生，但每台主机一个 salt，
+     * 且按连接隔离密钥材料。广播到多人时不能共用一份密文。
+     */
     broadcast(payload: unknown): void {
-        const text = JSON.stringify(payload);
-        for (const ws of this.clients.values()) {
-            if (ws.readyState === 1) {
-                try {
-                    ws.send(text);
-                } catch {
-                    // 单个发送失败不影响其他人
-                }
-            }
+        for (const [deviceId, ws] of this.clients.entries()) {
+            this.sendTo(deviceId, ws, payload);
         }
     }
 
@@ -220,7 +246,31 @@ export class HostServer {
     replyTo(deviceId: string, payload: unknown): void {
         const ws = this.clients.get(deviceId);
         if (!ws || ws.readyState !== 1) return;
+        this.sendTo(deviceId, ws, payload);
+    }
+
+    /**
+     * 发一帧：握手完成且该帧非心跳时加密，否则明文。
+     *
+     * 心跳（pong）与握手应答保持明文 —— 不含任何信息，加密只是白烧 CPU，
+     * 而且明文心跳让「连不上」这类问题能直接抓包看。
+     */
+    private sendTo(deviceId: string, ws: WebSocket, payload: unknown): void {
+        if (ws.readyState !== 1) return;
+        const type = (payload as { type?: string })?.type;
+        const keepPlain = type === "pong" || type === "hello_ack" || type === "host_shutdown";
         try {
+            if (!keepPlain && NET_ENABLED && deviceId) {
+                const key = this.keys.get(deviceId);
+                if (key) {
+                    const next = (this.txSeq.get(deviceId) || 0) + 1;
+                    this.txSeq.set(deviceId, next);
+                    // 序号放在密文里一起保护：攻击者改序号会导致解密失败
+                    const body = seal(key, { ...(payload as object), _s: next });
+                    ws.send(JSON.stringify({ e: 1, d: body }));
+                    return;
+                }
+            }
             ws.send(JSON.stringify(payload));
         } catch {
             // 发送失败不必惊动谁：叶子会靠心跳超时自己回退
@@ -243,33 +293,132 @@ export class HostServer {
     }
 
     private send(ws: WebSocket, frame: PairResponse | MembersMessage | PongMessage | RelayBusy): void {
-        try {
-            ws.send(JSON.stringify(frame));
-        } catch {
-            // 忽略
+        // 按类型决定明文还是加密：握手应答与 pong 走明文
+        const type = (frame as { type?: string })?.type;
+        const deviceId = type === "pair_ok" || type === "pair_fail" ? this.pendingDeviceId : this.deviceIdOf(ws);
+        this.sendTo(deviceId, ws, frame);
+    }
+
+    /** 由连接反查 deviceId（握手后建立） */
+    private deviceIdOf(ws: WebSocket): string {
+        for (const [id, sock] of this.clients.entries()) {
+            if (sock === ws) return id;
         }
+        return "";
+    }
+
+    /**
+     * 解开一个加密帧。
+     *
+     * 三道关：
+     *   1. 必须已完成握手（否则没有会话密钥）
+     *   2. 必须能解密（密钥不对 / 数据被改都会在这里失败）
+     *   3. 序号必须没被用过（防重放 —— GCM 挡篡改，挡不住重发）
+     *
+     * 任何一关不过都返回 null 且**不告诉对方原因**，避免被拿来探测。
+     */
+    private unsealFrame(connId: string, raw: string): any | null {
+        if (!connId || !NET_ENABLED) return null;
+        let envelope: { e?: number; d?: string };
+        try {
+            envelope = JSON.parse(raw);
+        } catch {
+            return null;
+        }
+        if (envelope?.e !== 1 || typeof envelope.d !== "string") return null;
+        const key = this.keys.get(connId);
+        if (!key) return null;
+        const opened = open(key, envelope.d);
+        if (!opened) return null;
+        const seq = typeof opened._s === "number" ? opened._s : 0;
+        const guard = this.guards.get(connId);
+        if (!guard || !guard.accept(seq)) return null;
+        // _s 只是防重放用的序号，不往上层暴露
+        delete opened._s;
+        return opened;
     }
 
     private handleConnection(ws: WebSocket): void {
         /** 本连接是否已通过鉴权（配对或长期凭据）。未鉴权的连接只能发 pair。 */
         let authedDeviceId = "";
-        /** 没鉴权时的超时：防止有人只连不发，白占资源。 */
-        const authTimeout = setTimeout(() => {
-            if (!authedDeviceId) {
+        /**
+         * 本连接绑定的设备标识。握手阶段建立（hello 里带来），
+         * 用来取会话密钥。空串 = 还没握手。
+         */
+        let connId = "";
+        /**
+         * 握手超时：连上但一直不发 hello 的，直接踢掉。
+         * 防止有人扫到端口只连不发、白占一个连接。
+         */
+        const helloTimeout = setTimeout(() => {
+            if (!connId) {
                 try {
-                    ws.close(1008, "pair timeout");
+                    ws.close(1008, "handshake timeout");
                 } catch {
                     // 忽略
                 }
             }
-        }, 15000);
+        }, 10000);
+
+        /**
+         * 处理明文 hello：派生会话密钥、回 hello_ack。
+         *
+         * 密钥不在网络上传输 —— 两边各自用同一串密钥 + 主机的 salt 算出来。
+         * 拿到错密钥的设备算出的 key 不一样，后续所有密文它都解不开，
+         * 自然连不上。这正是「有密钥才能用组网」的落地点。
+         */
+        const handleHello = (hello: Hello): void => {
+            const deviceId = String(hello.deviceId || "").trim();
+            const deviceName = String(hello.deviceName || "未命名设备").trim().slice(0, 24);
+            if (!deviceId) {
+                try {
+                    ws.close(1008, "bad hello");
+                } catch {
+                    // 忽略
+                }
+                return;
+            }
+            connId = deviceId;
+            clearTimeout(helloTimeout);
+            this.keys.set(deviceId, deriveKey(NET_SECRET, this.salt));
+            if (!this.guards.has(deviceId)) this.guards.set(deviceId, new ReplayGuard());
+            const st = this.state;
+            const ack: HelloAck = {
+                type: "hello_ack",
+                v: PROTOCOL_VERSION,
+                salt: this.salt,
+                hostId: st.deviceId,
+                hostName: st.deviceName,
+            };
+            this.sendTo(deviceId, ws, ack);
+        };
 
         ws.on("message", (data: unknown) => {
-            const frame = parseClientFrame(typeof data === "string" ? data : String(data));
+            const raw = typeof data === "string" ? data : String(data);
+
+            // ── 路径 1：明文握手 ──
+            const plain = parseClientFrame(raw) as (ClientFrame & { type: string }) | null;
+            if (plain && plain.type === "hello") {
+                handleHello(plain as unknown as Hello);
+                return;
+            }
+            // ── 路径 2：明文心跳 ──（未握手不发 pong）
+            if (plain && plain.type === "ping") {
+                if (!connId) return;
+                this.sendTo(connId, ws, { type: "pong", v: PROTOCOL_VERSION, seq: this.nextSeq(), serverTime: Date.now() });
+                const m = this.state.members.find((x) => x.deviceId === connId);
+                if (m) this.setState(rememberLeaf(this.getState(), { ...m, lastSeenAt: Date.now() }));
+                return;
+            }
+
+            // ── 路径 3：加密帧 ──
+            // 解不开就静默丢弃 —— 不告诉对方「你的密钥不对」，避免被拿来探测。
+            const frame = this.unsealFrame(connId, raw);
             if (!frame) return;
 
             // ── 配对 ──
             if (frame.type === "pair") {
+                this.pendingDeviceId = connId;
                 const f = frame as { deviceId: string; deviceName: string; token: string };
                 const deviceId = String(f.deviceId || "").trim();
                 const deviceName = String(f.deviceName || "未命名设备").trim().slice(0, 24);
@@ -291,7 +440,7 @@ export class HostServer {
                 if (known) {
                     const now = Date.now();
                     authedDeviceId = deviceId;
-                    clearTimeout(authTimeout);
+                    clearTimeout(helloTimeout);
                     this.clients.set(deviceId, ws);
                     this.onlineSince.set(deviceId, now);
                     this.setState(rememberLeaf(this.getState(), { ...known, lastSeenAt: now }));
@@ -342,7 +491,7 @@ export class HostServer {
                 }
 
                 authedDeviceId = deviceId;
-                clearTimeout(authTimeout);
+                clearTimeout(helloTimeout);
                 this.clients.set(deviceId, ws);
                 this.onlineSince.set(deviceId, now);
 
@@ -364,16 +513,6 @@ export class HostServer {
                     ws.close(1008, "not authenticated");
                 } catch {
                     // 忽略
-                }
-                return;
-            }
-
-            if (frame.type === "ping") {
-                // 心跳：回 pong，兼作「叶子还活着」的证据
-                this.send(ws, { type: "pong", v: PROTOCOL_VERSION, seq: this.nextSeq(), serverTime: Date.now() });
-                const m = this.state.members.find((x) => x.deviceId === authedDeviceId);
-                if (m) {
-                    this.setState(rememberLeaf(this.getState(), { ...m, lastSeenAt: Date.now() }));
                 }
                 return;
             }
@@ -416,7 +555,7 @@ export class HostServer {
         });
 
         ws.on("close", () => {
-            clearTimeout(authTimeout);
+            clearTimeout(helloTimeout);
             if (authedDeviceId && this.clients.get(authedDeviceId) === ws) {
                 this.clients.delete(authedDeviceId);
                 this.onlineSince.delete(authedDeviceId);

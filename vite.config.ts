@@ -27,6 +27,20 @@ export default defineConfig({
               external: ["better-sqlite3"],
             },
           },
+          define: {
+            // 组网密钥：构建期注入，编译进产物。
+            //
+            // 用 define 而不是 import.meta.env —— 这个值只在主进程用，
+            // 渲染层不该看到；define 直接替换成字符串字面量，运行时不留
+            // 任何「去环境变量里读」的痕迹。
+            //
+            // 取不到时注入空串，NET_ENABLED 为 false → 组网功能整体禁用。
+            // 这样 fork 后自行构建的人，产物里不会带着别人的密钥，
+            // 组网按钮也是灰的（见 electron/net/secure.ts）。
+            //
+            // CI 从 GitHub Secret 注入，本地用 .env.local（已 gitignore）。
+            __KIRARI_NET_SECRET__: JSON.stringify(process.env.KIRARI_NET_SECRET || ""),
+          },
         },
         async onstart({ startup }) {
           const env = { ...process.env };

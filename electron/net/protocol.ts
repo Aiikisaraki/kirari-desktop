@@ -47,6 +47,44 @@ export const SYNC_FIELDS: SyncField[] = ["model", "endpoint", "basePersona", "se
 /** 默认全部同步 —— 用户可以逐项取消。 */
 export const DEFAULT_SYNC_WHITELIST: SyncField[] = [...SYNC_FIELDS];
 
+// ── 加密信封（握手之后的帧都裹在这层里）────────────────────
+//
+// 线格式：{ e: 1, d: "<base64 密文>" }
+//   d 的内容 = iv(12) + authTag(16) + AES-256-GCM(明文 JSON)
+//
+// 为什么单独一层而不是直接改各帧的格式：
+//   握手/心跳保持明文、其余加密这条规则集中在一处，将来要调（比如加调试模式
+//   走明文）只改这一处，不必在每个帧上打补丁。
+//
+// 序号作用：防重放。GCM 能挡篡改，挡不住「抓一条密文反复重发」。
+export type SealedFrame = { e: 1; d: string };
+
+/** 叶子 → 主机：明文握手。带上 nonce 让主机能识别「这是新连接」而不是重放。 */
+export type Hello = {
+    type: "hello";
+    v: number;
+    deviceId: string;
+    deviceName: string;
+    /** 客户端随机数。主机用它判断是首次握手还是重发 */
+    nonce: string;
+};
+
+/**
+ * 主机 → 叶子：明文握手应答，携带 salt。
+ *
+ * 双方各自 scrypt(密钥, salt) 派生出同一个会话密钥。
+ * salt 每台主机不同 —— 这样同一把密钥在不同主机上派生出不同密钥，
+ * 一台被攻破不牵连其他主机。
+ */
+export type HelloAck = {
+    type: "hello_ack";
+    v: number;
+    salt: string;
+    /** 主机顺带把自己的 deviceId/deviceName 带上，省一次来回 */
+    hostId: string;
+    hostName: string;
+};
+
 // ── 客户端 → 主机 ────────────────────────────────────────────────
 
 /** 配对：用一次性配对码换一个长期凭据。 */
@@ -224,8 +262,9 @@ export type ServerFrame =
     | RelayResult
     | RelayBusy
     | RelayBackfillAck
-    | ConfigPush;
-export type ClientFrame = PairRequest | PingMessage | RelayRequest | RelayBackfill | ConfigReport;
+    | ConfigPush
+    | HelloAck;
+export type ClientFrame = Hello | PairRequest | PingMessage | RelayRequest | RelayBackfill | ConfigReport;
 
 /** 解析服务端发来的文本帧。非法 JSON / 缺 type 一律返回 null（不抛）。 */
 export function parseServerFrame(raw: unknown): ServerFrame | null {

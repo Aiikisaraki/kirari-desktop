@@ -20,7 +20,9 @@ import {
     parseServerFrame,
     SeqTracker,
 } from "./protocol";
-import type { MembersMessage, RelayResult, RelayBusy, RelayBackfill, ServerFrame, ConfigPush, SyncField } from "./protocol";
+import type { MembersMessage, RelayResult, RelayBusy, RelayBackfill, ServerFrame, ConfigPush, SyncField, Hello, HelloAck } from "./protocol";
+import { NET_ENABLED, NET_SECRET, deriveKey, seal, open, ReplayGuard } from "./secure";
+import { randomBytes } from "crypto";
 import { randomToken } from "./pairingCode";
 
 export type LeafStatus = "idle" | "connecting" | "paired" | "connected" | "fallback";
@@ -75,6 +77,21 @@ export class LeafClient {
     private connGeneration = 0;
     /** 建连超时定时器：CONNECTING 状态卡住时兜底 */
     private connectTimer: ReturnType<typeof setTimeout> | null = null;
+    /** 会话密钥（握手后由 密钥+salt 派生得到），握手前为 null */
+    private sessionKey: Buffer | null = null;
+    /** 主机给的 salt */
+    private hostSalt = "";
+    /** 加密帧自增序号（防重放） */
+    private txSeq = 0;
+    /** 收到帧的重放窗口 */
+    private rxGuard = new ReplayGuard();
+    /** 主机标识与名字（握手时拿到） */
+    private hostId = "";
+    private hostName = "";
+    /** 首次配对用的连接码（握手完成后发出一次即清空） */
+    private pendingToken = "";
+    /** 配对结果：由 attachMessage 的 pair_ok / pair_fail 分支落定，pair() 轮询取走 */
+    private pairResult: { ok: true; credential: string } | { ok: false; error: string } | null = null;
 
     /** 本轮连接是否是有意的（关闭组网时不算异常） */
     private closingIntentionally = false;
@@ -120,6 +137,88 @@ export class LeafClient {
     }
 
     /**
+     * 发一帧：握手完成后自动加密，心跳保持明文。
+     * 这是所有上行帧的唯一出口 —— 不要绕过它直接 ws.send。
+     */
+    private sendFrame(ws: WebSocket, payload: unknown): boolean {
+        if (ws.readyState !== 1) return false;
+        const type = (payload as { type?: string })?.type;
+        const keepPlain = type === "ping";
+        try {
+            if (!keepPlain && NET_ENABLED) {
+                if (!this.sessionKey) return false; // 握手没完，什么都不发
+                const body = seal(this.sessionKey, { ...(payload as object), _s: ++this.txSeq });
+                ws.send(JSON.stringify({ e: 1, d: body }));
+                return true;
+            }
+            ws.send(JSON.stringify(payload));
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    /** 明文发送（仅握手阶段使用） */
+    private sendRaw(ws: WebSocket, payload: unknown): void {
+        try {
+            ws.send(JSON.stringify(payload));
+        } catch {
+            // 忽略：随后会由 close/error 兜到
+        }
+    }
+
+    /**
+     * 处理服务端帧：握手应答走明文，其余解信封。
+     * 解不开一律当作没收到 —— 不暴露「密钥不对」这种信息。
+     */
+    private readFrame(raw: string): any | null {
+        let envelope: { type?: string; e?: number; d?: string; salt?: string; hostId?: string; hostName?: string };
+        try {
+            envelope = JSON.parse(raw);
+        } catch {
+            return null;
+        }
+        if (envelope?.type === "hello_ack") {
+            const ack = envelope as unknown as HelloAck;
+            if (typeof ack.salt !== "string" || !ack.salt) return null;
+            this.hostSalt = ack.salt;
+            this.sessionKey = deriveKey(NET_SECRET, ack.salt);
+            this.hostId = String(ack.hostId || "");
+            this.hostName = String(ack.hostName || "");
+            this.events.onLog?.(`[net] 密钥协商完成（主机盐 ${ack.salt.slice(0, 8)}…）`);
+            return { type: "handshake_ok" };
+        }
+        if (envelope?.e === 1 && typeof envelope.d === "string") {
+            if (!this.sessionKey) return null;
+            const opened = open(this.sessionKey, envelope.d);
+            if (!opened) {
+                this.events.onLog?.("[net] 收到无法解开的帧（密钥不一致或数据被改动）");
+                return null;
+            }
+            const seq = typeof opened._s === "number" ? opened._s : 0;
+            if (!this.rxGuard.accept(seq)) {
+                this.events.onLog?.(`[net] 丢弃重放帧 seq=${seq}`);
+                return null;
+            }
+            delete opened._s;
+            return opened;
+        }
+        return envelope as Record<string, unknown>;
+    }
+
+    /** 握手之前没收到任何东西时的超时（主机不回 hello_ack）。 */
+    private handshakeTimeout(ws: WebSocket, gen: number): void {
+        if (gen !== this.connGeneration || this.sessionKey) return;
+        this.events.onLog?.("[net] 密钥协商超时");
+        try {
+            ws.terminate();
+        } catch {
+            // 忽略
+        }
+        this.fallback("和主机对不上密钥，连不上");
+    }
+
+    /**
      * 挂上「断线即回退」的生命周期处理。
      *
      * ⚠️ 这段必须对**所有**连接路径生效 —— 首次配对（pair）与重连（connect）。
@@ -145,98 +244,40 @@ export class LeafClient {
 
     /**
      * 首次配对：用连接码里的口令换一个长期凭据。
+     *
+     * ⚠️ 刻意**复用 openSocket 那条连接路径**，不自己再写一套 WebSocket 逻辑。
+     *    之前这里是独立实现，结果配对成功的连接收不到心跳、成员、回复 ——
+     *    表现就是「配对成功但组网毫无反应」。新增连接逻辑时改一处就够。
+     *
      * @param code 解析好的连接码（见 pairingCode.parsePairingCode）
      */
     async pair(code: { host: string; port: number; token: string; name: string }): Promise<
         { ok: true; credential: string } | { ok: false; error: string }
     > {
+        if (!NET_ENABLED) {
+            return { ok: false, error: "这个版本没有包含组网密钥，无法接入" };
+        }
         this.host = code.host;
         this.port = code.port;
+        // 握手完成后由 attachMessage 里的 handshake_ok 分支发出这个码
+        this.pendingToken = code.token;
         this.closingIntentionally = false;
         this.setStatus("connecting", `正在连接 ${code.host}:${code.port}`);
 
-        return new Promise((resolve) => {
-            let settled = false;
-            const gen = ++this.connGeneration;
-            const ws = new WebSocket(`ws://${code.host}:${code.port}`);
-            this.ws = ws;
-            const timer = setTimeout(() => {
-                if (settled) return;
-                settled = true;
-                try {
-                    ws.close();
-                } catch {
-                    // 忽略
-                }
-                this.setStatus("idle");
-                resolve({ ok: false, error: "连不上主机，检查地址和防火墙，或者确认主机上的组网开关是开着的" });
-            }, 10000);
+        // 复用统一连接路径；结果由 pairResult 控制
+        this.pairResult = null;
+        this.openSocket();
 
-            ws.on("open", () => {
-                ws.send(
-                    JSON.stringify({
-                        type: "pair",
-                        v: PROTOCOL_VERSION,
-                        deviceId: this.deviceId,
-                        deviceName: this.deviceName,
-                        token: code.token,
-                        v2: PROTOCOL_VERSION,
-                    }),
-                );
-            });
-
-            ws.on("message", (data: unknown) => {
-                const frame = parseServerFrame(String(data));
-                if (!frame) return;
-                if (frame.type === "pair_ok") {
-                    clearTimeout(timer);
-                    settled = true;
-                    this.credential = frame.credential || "";
-                    this.setStatus("connected", `已连接到 ${code.name || code.host}`);
-                    // 关键：配对成功后这条连接就是长期连接了，
-                    // 必须补挂断线回退，否则掉线时桌宠会一直假装连着。
-                    this.attachLifecycle(ws, gen);
-                    // 关键：配对成功后这条连接就是长期连接了，
-                    // 后续所有广播（心跳、成员、回复）都要能处理，
-                    // 否则表现为「配对成功但组网一直没反应」。
-                    this.attachMessage(ws, gen);
-                    this.startHeartbeat();
-                    this.events.onLog?.(`[net] 配对成功，主机：${code.name || code.host}`);
-                    // 首次配对成功也可能带着历史待补
-                    this.flushBackfill();
-                    resolve({ ok: true, credential: this.credential });
-                } else if (frame.type === "pair_fail") {
-                    clearTimeout(timer);
-                    settled = true;
-                    const reason = frame.reason || "主机拒绝了这次配对";
-                    this.setStatus("idle", reason);
-                    try {
-                        ws.close();
-                    } catch {
-                        // 忽略
-                    }
-                    resolve({ ok: false, error: reason });
-                }
-            });
-
-            ws.on("error", () => {
-                if (!settled) {
-                    clearTimeout(timer);
-                    settled = true;
-                    this.setStatus("idle");
-                    resolve({ ok: false, error: "连不上主机，检查地址和防火墙，或者确认主机上的组网开关是开着的" });
-                }
-            });
-
-            ws.on("close", () => {
-                if (!settled) {
-                    clearTimeout(timer);
-                    settled = true;
-                    this.setStatus("idle");
-                    resolve({ ok: false, error: "连接被主机断开" });
-                }
-            });
-        });
+        // 等配对结果（由 attachMessage 的 pair_ok / pair_fail 分支落定）
+        for (let i = 0; i < 120; i++) {
+            if (this.pairResult) {
+                const r = this.pairResult;
+                this.pairResult = null;
+                return r;
+            }
+            await new Promise((r) => setTimeout(r, 100));
+        }
+        return { ok: false, error: "连不上主机或对方没有回应，检查地址和防火墙" };
     }
 
     /**
@@ -272,20 +313,24 @@ export class LeafClient {
         this.ws = ws;
 
         ws.on("open", () => {
-            this.setStatus("connected");
-            // 用长期凭据握手：主机校验通过才算真正连上
-            ws.send(
-                JSON.stringify({
-                    type: "pair",
-                    v: PROTOCOL_VERSION,
-                    deviceId: this.deviceId,
-                    deviceName: this.deviceName,
-                    // 长期凭据也走 pair 帧的 token 字段；主机优先按已配对设备校验
-                    token: this.credential,
-                    v2: PROTOCOL_VERSION,
-                }),
-            );
-            this.startHeartbeat();
+            // ⚠️ 握手未完成前不要直接发 pair —— 主机只收加密帧，
+            //    明文 pair 会被静默丢弃（表现为「连上了但永远配对不成功」）。
+            this.clearConnectTimeout();
+            this.setStatus("connecting", "正在与主机协商密钥");
+            this.sessionKey = null;
+            this.hostSalt = "";
+            this.txSeq = 0;
+            this.rxGuard.reset();
+            this.armConnectTimeout(ws, gen);
+            // 第一帧永远是明文 hello：主机用它回 salt，两边各自算出同一个会话密钥。
+            // 密钥本身不上网络 —— 抓到包的人看不到它。
+            this.sendRaw(ws, {
+                type: "hello",
+                v: PROTOCOL_VERSION,
+                deviceId: this.deviceId,
+                deviceName: this.deviceName,
+                nonce: randomBytes(8).toString("hex"),
+            });
         });
 
         this.attachMessage(ws, gen);
@@ -306,11 +351,30 @@ export class LeafClient {
     private attachMessage(ws: WebSocket, gen: number): void {
         ws.on("message", (data: unknown) => {
             // 过期连接的迟到帧：忽略，否则会污染当前状态
-            const frame = parseServerFrame(String(data));
+            // readFrame 负责解密 + 防重放；握手应答走明文，其余是信封
+            const frame = this.readFrame(String(data));
             if (!frame) return;
 
             // 收到任何帧都算「对方活着」，重置半开计时
             this.armPongTimeout();
+
+            // ── 握手完成：现在才发身份、启动心跳 ──
+            if (frame.type === "handshake_ok") {
+                this.setStatus("connected");
+                this.sendFrame(ws, {
+                    type: "pair",
+                    v: PROTOCOL_VERSION,
+                    deviceId: this.deviceId,
+                    deviceName: this.deviceName,
+                    // 首次配对用连接码，之后用长期凭据；主机优先按已配对设备校验
+                    token: this.pendingToken || this.credential,
+                    v2: PROTOCOL_VERSION,
+                });
+                this.pendingToken = "";
+                this.startHeartbeat();
+                this.flushBackfill();
+                return;
+            }
 
             if (frame.type === "pong") {
                 this.setStatus("connected");
@@ -324,14 +388,18 @@ export class LeafClient {
                 }
                 this.setStatus("connected");
                 this.armPongTimeout();
-                // 连上了：把断线期间的对话补传给主机（只记不重放）
                 this.flushBackfill();
+                // 首次配对：把结果交给 pair() 的等待循环
+                this.pairResult = { ok: true, credential: this.credential };
+                this.events.onLog?.(`[net] 配对成功`);
                 return;
             }
             if (frame.type === "pair_fail") {
                 // 凭据被吊销（主机移除了这台设备）→ 只能回独立工作
-                this.events.onLog?.(`[net] 主机拒绝了连接：${frame.reason || "未知原因"}`);
-                this.fallback(frame.reason || "主机不再接受这台设备");
+                const why = frame.reason || "主机不再接受这台设备";
+                this.events.onLog?.(`[net] 主机拒绝了连接：${why}`);
+                if (this.pendingToken) this.pairResult = { ok: false, error: why };
+                this.fallback(why);
                 return;
             }
             if (frame.type === "members") {
@@ -403,11 +471,7 @@ export class LeafClient {
         this.heartbeatTimer = setInterval(() => {
             const ws = this.ws;
             if (!ws || ws.readyState !== 1) return;
-            try {
-                ws.send(
-                    JSON.stringify({ type: "ping", v: PROTOCOL_VERSION, deviceId: this.deviceId }),
-                );
-            } catch {
+            if (!this.sendFrame(ws, { type: "ping", v: PROTOCOL_VERSION, deviceId: this.deviceId })) {
                 // 发送失败，等 close 事件
                 return;
             }
@@ -482,24 +546,17 @@ export class LeafClient {
      */
     sendRelay(content: string, sessionId: string, images?: string[], nickname?: string): boolean {
         const ws = this.ws;
-        if (!ws || ws.readyState !== 1) return false;
-        try {
-            ws.send(
-                JSON.stringify({
-                    type: "relay_request",
-                    v: PROTOCOL_VERSION,
-                    deviceId: this.deviceId,
-                    requestId: this.nextRequestId(),
-                    sessionId,
-                    content,
-                    images,
-                    nickname,
-                }),
-            );
-            return true;
-        } catch {
-            return false;
-        }
+        if (!ws || ws.readyState !== 1 || !this.sessionKey) return false;
+        return this.sendFrame(ws, {
+            type: "relay_request",
+            v: PROTOCOL_VERSION,
+            deviceId: this.deviceId,
+            requestId: this.nextRequestId(),
+            sessionId,
+            content,
+            images,
+            nickname,
+        });
     }
 
     /**
@@ -537,19 +594,12 @@ export class LeafClient {
             }
         }
         if (!has) return false;
-        try {
-            ws.send(
-                JSON.stringify({
-                    type: "config_report",
-                    v: PROTOCOL_VERSION,
-                    deviceId: this.deviceId,
-                    patch: clean,
-                }),
-            );
-            return true;
-        } catch {
-            return false;
-        }
+        return this.sendFrame(ws, {
+            type: "config_report",
+            v: PROTOCOL_VERSION,
+            deviceId: this.deviceId,
+            patch: clean,
+        });
     }
 
     /** 待补传的条数（给 UI 显示「有 N 条待同步」） */
@@ -564,20 +614,15 @@ export class LeafClient {
         if (!ws || ws.readyState !== 1) return;
         const deviceName = this.deviceName;
         for (const bucket of this.pendingBackfill) {
-            try {
-                ws.send(
-                    JSON.stringify({
-                        type: "relay_backfill",
-                        v: PROTOCOL_VERSION,
-                        deviceId: this.deviceId,
-                        sessionId: bucket.sessionId,
-                        nickname: deviceName,
-                        entries: bucket.entries,
-                    }),
-                );
-            } catch {
-                return; // 下次重连再试
-            }
+            const ok = this.sendFrame(ws, {
+                type: "relay_backfill",
+                v: PROTOCOL_VERSION,
+                deviceId: this.deviceId,
+                sessionId: bucket.sessionId,
+                nickname: deviceName,
+                entries: bucket.entries,
+            });
+            if (!ok) return; // 下次重连再试
         }
         this.events.onLog?.(`[net] 已补传 ${this.pendingBackfillCount()} 条离线对话`);
     }

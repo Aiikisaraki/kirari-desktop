@@ -43,6 +43,8 @@ const netApi = (window as any).netApi;
 const toast = useToast();
 
 const snap = ref<NetSnapshot | null>(null);
+/** 本构建是否带组网密钥（没有就整体禁用） */
+const netEnabled = ref(true);
 const addresses = ref<string[]>([]);
 const busy = ref(false);
 
@@ -126,6 +128,11 @@ async function load() {
     try {
         apply(await netApi.getState());
         addresses.value = (await netApi.addresses()) || [];
+        try {
+            netEnabled.value = (await netApi.enabled())?.enabled !== false;
+        } catch {
+            netEnabled.value = true;
+        }
     } catch {
         toast.error("读取组网状态失败");
     }
@@ -304,6 +311,11 @@ onUnmounted(() => {
             这样一份回复只会有一个，不会几台设备抢着回答。
         </p>
 
+        <!-- 没有密钥的构建：明确说清为什么不可用（灰显而非隐藏） -->
+        <div v-if="!netEnabled" class="settings-hint" style="margin-bottom: 8px">
+            当前这个版本没有包含组网密钥，无法使用组网功能。
+        </div>
+
         <!-- ── 总开关 ─────────────────────────────────────────── -->
         <div class="settings-row">
             <div class="settings-row__body">
@@ -328,7 +340,7 @@ onUnmounted(() => {
                     v-if="isOff"
                     type="button"
                     class="btn btn--primary btn--sm"
-                    :disabled="busy"
+                    :disabled="busy || !netEnabled"
                     @click="turnOn"
                 >
                     开启组网

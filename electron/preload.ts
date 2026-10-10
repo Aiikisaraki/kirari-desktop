@@ -46,6 +46,7 @@ type NetSnapshot = {
 contextBridge.exposeInMainWorld("netApi", {
     getState: (): Promise<NetSnapshot> => ipcRenderer.invoke("net:get-state"),
     addresses: (): Promise<string[]> => ipcRenderer.invoke("net:addresses"),
+    enabled: (): Promise<{ enabled: boolean }> => ipcRenderer.invoke("net:enabled"),
     startHost: (expiry: string): Promise<{ ok: boolean; code?: string; error?: string; snapshot?: NetSnapshot }> =>
         ipcRenderer.invoke("net:start-host", expiry),
     issuePairing: (expiry: string): Promise<{ ok: boolean; code?: string; snapshot?: NetSnapshot }> =>

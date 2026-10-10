@@ -87,15 +87,15 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Install backend dependencies (native module for Node 24 / ABI 137)
-        working-directory: _backend
-        run: npm ci
-
-      - name: Build & package Windows installers (frontend / integrated / full)
+      - name: Build & package Windows installer
         env:
-          PET_API_SOURCE_DIR: ${{ github.workspace }}/_backend
+          # 组网密钥：从 GitHub Secret 注入，构建期编译进产物。
+          # 没配置这个 Secret 时构建仍会成功，但产物的组网功能是禁用的
+          # （electron/net/secure.ts 里 NET_ENABLED 为 false）——
+          # 这样 fork 后自行构建的人不会带着别人的密钥分发。
+          KIRARI_NET_SECRET: ${{ secrets.KIRARI_NET_SECRET }}
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: npm run dist:all
+        run: npm run dist
 
       # 覆盖同名旧 Release：删除旧的 release 与 tag
       - name: Delete existing same-version release (overwrite)
