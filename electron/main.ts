@@ -15,7 +15,13 @@ import extract from "extract-zip";
 import { ChatSessionService, type ChatStateSnapshot } from "./chat-session-service";
 import { AdapterManager } from "./adapter/adapter-manager";
 import type { AdapterConfig, AdapterStatus } from "./adapter/types";
-import { initEngine, shutdownEngine } from "./ai/engine";
+import { initEngine, shutdownEngine, chat as engineChat, registerFrontendTools, registerPrivateKnowledge } from "./ai/engine";
+import { NetManager } from "./net/manager";
+import { setupNetIpc } from "./net/ipc";
+import type { NetSnapshot, HostExecutor } from "./net/manager";
+import type { ExpiryKey, PairingCode } from "./net/pairingCode";
+import type { RelayBackfill } from "./net/protocol";
+import { saveMessage as saveChatMessage, LOCAL_UID } from "./ai/db/storage";
 import * as frontendTools from "./frontend-tools";
 import { readModelConfigFile, writeModelConfigFile, onModelConfigChanged, startModelConfigWatch } from "./model-config";
 import { initAppLogger, getLogPath, isDebugMode } from "./app-logger";
@@ -620,6 +626,8 @@ let chatSessionService: ChatSessionService | null = null;
 let chatSessionStoragePath = "";
 // 私人知识库：本地文件存储（userData/knowledge.json），前端自主检索，后端零状态
 let localKnowledge: LocalKnowledge | null = null;
+/** 组网管理器（阶段 2-4）：主机/叶子两种角色，随时可换 */
+let netManager: NetManager | null = null;
 
 async function readApiResponse(response: Response) {
   const text = await response.text();
@@ -2005,6 +2013,75 @@ app.whenReady().then(async () => {
   // 初始化进程内 AI 引擎（本地数据库落在本机 userData）。
   // 桌宠自此不再依赖任何外部后端进程——大脑、知识库、历史全在本进程内。
   initEngine({ dbPath: path.join(app.getPath("userData"), "kirari.db") });
+
+  // 组网（活锁模型）：本机既可以作为主机（为其他设备提供出口），
+  // 也可以作为叶子（把请求上行给主机）。角色由用户在设置里选，随时可换。
+  netManager = new NetManager(app.getPath("userData"), {
+    onSnapshot: (snap) => {
+      for (const win of [petWindow, chatWindow, settingsWindow]) {
+        if (win && !win.isDestroyed()) win.webContents.send("net:state", snap);
+      }
+    },
+    onRelayResult: (frame) => {
+      // 全网广播：任何设备提问的回复，所有端都会收到。
+      // 请求方自己的发言本地已显示，这里只管把回复呈现出来。
+      const svc = chatSessionService;
+      if (svc) svc.applyRelayResult(frame);
+    },
+    onRelayBusy: (frame) => {
+      const svc = chatSessionService;
+      if (svc) svc.notifyRelayBusy(frame.reason);
+    },
+    onFallbackNotice: (message) => {
+      // 自动退出组网必须明确告知，否则用户会以为程序崩了
+      const svc = chatSessionService;
+      if (svc) svc.notifyNotice(message);
+      for (const win of [petWindow, chatWindow, settingsWindow]) {
+        if (win && !win.isDestroyed()) win.webContents.send("net:notice", message);
+      }
+    },
+    onLog: (m) => console.log(m),
+  });
+
+  /**
+   * 装上主机侧的模型执行器。
+   *
+   * 关键：组网内所有模型调用都由**主机自己的**凭证支付，叶子无需配置。
+   * 这里把本机 AI 引擎包装成执行器；引擎的会话历史按叶子传来的 sessionId 存放，
+   * 所以每台设备有自己的对话脉络，且叶子重连后上下文还在。
+   */
+  const hostExecutor: HostExecutor = async ({ sessionId, content, images }) => {
+    const cfg = readModelConfigFile();
+    const result = await engineChat({
+      settings: {
+        model: cfg.model || "",
+        endpoint: cfg.endpoint || "",
+        key: cfg.key || "",
+        searchProvider: cfg.searchProvider,
+        searchKey: cfg.searchKey,
+        searchEndpoint: cfg.searchEndpoint,
+        userid: LOCAL_UID,
+      },
+      sessionId,
+      text: content,
+      images,
+      // 组网场景下宁可给兜底语也不要让整条链路失败
+      allowFallback: true,
+    });
+    return { speech: result.speech, emotion: result.emotion };
+  };
+
+  /** 补传：把断线期间叶子独立产生的对话写进本机历史，只入库不重放 */
+  const backfillSink = async (msg: RelayBackfill) => {
+    for (const entry of msg.entries) {
+      await saveChatMessage(msg.sessionId, entry.role, entry.text);
+    }
+  };
+
+  netManager.attachHostExecutor(hostExecutor, backfillSink);
+
+  // 组网 IPC：设置窗口的全部入口
+  setupNetIpc(() => netManager);
 
   // 注册 pet:// 协议：打包后 loadFile 无 HTTP 服务器，
   // fetch('/pet/frames.json') 无法解析。通过自定义协议映射到精灵帧资源目录。

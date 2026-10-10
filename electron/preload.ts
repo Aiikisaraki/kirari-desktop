@@ -23,6 +23,56 @@ contextBridge.exposeInMainWorld("tokenApi", {
   },
 });
 
+// ── 组网（活锁模型）────────────────────────────────────────────
+// 桌宠既可以当主机（为其他设备提供出口），也可以当叶子（把请求上行给主机）。
+// 角色由用户在设置里选，随时可换；退出不清除任何配置。
+type NetRole = "off" | "host" | "leaf";
+
+type NetSnapshot = {
+    role: NetRole;
+    deviceId: string;
+    deviceName: string;
+    address: string;
+    port: number;
+    hostName?: string;
+    pairings: { id: string; name: string; expiresAt: number; remaining: string; usedBy: string | null; revoked: boolean }[];
+    members: { deviceId: string; name: string; online: boolean; since: number }[];
+    leafStatus?: string;
+    pendingBackfill?: number;
+    relay?: { running: number; queued: number; maxConcurrent: number; maxQueue: number } | null;
+};
+
+contextBridge.exposeInMainWorld("netApi", {
+    getState: (): Promise<NetSnapshot> => ipcRenderer.invoke("net:get-state"),
+    addresses: (): Promise<string[]> => ipcRenderer.invoke("net:addresses"),
+    startHost: (expiry: string): Promise<{ ok: boolean; code?: string; error?: string; snapshot?: NetSnapshot }> =>
+        ipcRenderer.invoke("net:start-host", expiry),
+    issuePairing: (expiry: string): Promise<{ ok: boolean; code?: string; snapshot?: NetSnapshot }> =>
+        ipcRenderer.invoke("net:issue-pairing", expiry),
+    join: (pairingText: string): Promise<{ ok: boolean; error?: string; snapshot?: NetSnapshot }> =>
+        ipcRenderer.invoke("net:join", pairingText),
+    resume: (): Promise<{ ok: boolean; error?: string; snapshot?: NetSnapshot }> =>
+        ipcRenderer.invoke("net:resume"),
+    stop: (): Promise<{ ok: boolean; snapshot?: NetSnapshot }> => ipcRenderer.invoke("net:stop"),
+    revokePairing: (id: string): Promise<{ ok: boolean; snapshot?: NetSnapshot }> =>
+        ipcRenderer.invoke("net:revoke-pairing", id),
+    prunePairings: (): Promise<{ ok: boolean; snapshot?: NetSnapshot }> =>
+        ipcRenderer.invoke("net:prune-pairings"),
+    removeDevice: (deviceId: string): Promise<{ ok: boolean; snapshot?: NetSnapshot }> =>
+        ipcRenderer.invoke("net:remove-device", deviceId),
+    leaveHost: (): Promise<{ ok: boolean; snapshot?: NetSnapshot }> => ipcRenderer.invoke("net:leave-host"),
+    renameSelf: (name: string): Promise<{ ok: boolean; snapshot?: NetSnapshot }> =>
+        ipcRenderer.invoke("net:rename-self", name),
+    flushBackfill: (): Promise<{ ok: boolean; snapshot?: NetSnapshot }> =>
+        ipcRenderer.invoke("net:flush-backfill"),
+    onState: (cb: (s: NetSnapshot) => void): void => {
+        ipcRenderer.on("net:state", (_e, s: NetSnapshot) => cb(s));
+    },
+    onNotice: (cb: (message: string) => void): void => {
+        ipcRenderer.on("net:notice", (_e, message: string) => cb(message));
+    },
+});
+
 // 自定义窗口控件（配合主进程 `window:control`）：最小化 / 关闭 / 最大化。
 contextBridge.exposeInMainWorld("windowApi", {
   minimize: (): void => ipcRenderer.send("window:control", "minimize"),

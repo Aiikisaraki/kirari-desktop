@@ -49,6 +49,23 @@ type ChatSessionOptions = {
     localKnowledge?: LocalKnowledge;
     // 模型配置读取器。缺省直接读 userData/config.json。
     readSettings?: () => AiModelSettings | null;
+    /**
+     * 组网出口：本机作为叶子时，把请求上行给主机。
+     * 返回 true 表示已成功上行（本地不再调模型，等广播回复）。
+     * 未提供 / 返回 false → 走本地独立调用。
+     */
+    relaySender?: (content: string, images: string[]) => boolean;
+};
+
+/** 主机广播回来的回复（结构见 net/protocol.ts） */
+export type RelayResultFrame = {
+    requestId: string;
+    speech: string;
+    emotion?: string | null;
+    fromDeviceId: string;
+    fromName?: string;
+    sessionId: string;
+    seq: number;
 };
 
 const WELCOME_MESSAGE = "今天也一起加油吧。";
@@ -99,6 +116,9 @@ export class ChatSessionService {
     private readonly emitState: (state: ChatStateSnapshot) => void;
     private readonly localKnowledge: LocalKnowledge | undefined;
     private readonly readSettings: () => AiModelSettings | null;
+    private readonly relaySender: ((content: string, images: string[]) => boolean) | undefined;
+    /** 已经显示过的广播回复（按 requestId 去重，防止重连重放时刷屏） */
+    private readonly shownRelayReplies = new Set<string>();
     private storagePath = "";
     private persistenceQueue: Promise<void> = Promise.resolve();
     private initialized = false;
@@ -121,6 +141,7 @@ export class ChatSessionService {
         this.userid = options.userid;
         this.emitState = options.emitState;
         this.localKnowledge = options.localKnowledge;
+        this.relaySender = options.relaySender;
         this.readSettings =
             options.readSettings ??
             (() => {
@@ -183,6 +204,13 @@ export class ChatSessionService {
         this.emit();
         this.armReplyTimeout();
 
+        // ── 组网：本机是叶子且已连上主机 ──
+        // 请求上行给主机，由主机（唯一出口）调用模型并把结果广播回来。
+        // 本地**不**再调模型 —— 这正是「一条消息只有一份回复」的落地方式。
+        if (this.relaySender && this.relaySender(text, images)) {
+            return true; // 等 applyRelayResult 收尾
+        }
+
         const controller = new AbortController();
         this.abortController = controller;
 
@@ -228,6 +256,55 @@ export class ChatSessionService {
         } finally {
             if (this.abortController === controller) this.abortController = null;
         }
+    }
+
+    /**
+     * 显示主机广播回来的回复。
+     *
+     * 活锁模型下，回复由主机生成一次、广播给全网，所以**每台设备都会收到** ——
+     * 包括别人问的问题（这是组网的社交感来源），也包括自己刚问的那条。
+     * 请求方的发言本地已经显示过了，这里只补上回复。
+     */
+    applyRelayResult(frame: RelayResultFrame): void {
+        if (this.disposed) return;
+        const text = String(frame.speech || "").trim();
+        if (!text) return;
+        // 同一 requestId 只显示一次：重连重放、主机重复广播都不会刷屏
+        if (this.shownRelayReplies.has(frame.requestId)) return;
+        this.shownRelayReplies.add(frame.requestId);
+        // 只保留最近 200 条，防止 Set 无限增长
+        if (this.shownRelayReplies.size > 200) {
+            const keep = [...this.shownRelayReplies].slice(-100);
+            this.shownRelayReplies.clear();
+            for (const id of keep) this.shownRelayReplies.add(id);
+        }
+
+        this.clearReplyTimeout();
+        const emotion: PetEmotion | null =
+            frame.emotion === "happy" || frame.emotion === "wave" ? frame.emotion : null;
+        this.state.messages.push(this.createMessage("pet", text, emotion));
+        this.state.waitingForReply = false;
+        this.state.lastError = "";
+        this.state.bubbleMessage = text.length <= 10 ? text : LONG_REPLY_PROMPT;
+        this.state.bubbleInteractive = text.length > 10;
+        this.persist();
+        this.emit();
+    }
+
+    /** 主机拒绝了这次请求（排队满 / 正在关停），给出可操作提示而不是干等 */
+    notifyRelayBusy(reason: string): void {
+        if (this.disposed) return;
+        this.clearReplyTimeout();
+        this.state.waitingForReply = false;
+        this.state.lastError = reason || "主机现在忙不过来，稍后再试";
+        this.emit();
+    }
+
+    /** 组网相关的告知（如自动退出组网），显示在聊天区顶部 */
+    notifyNotice(message: string): void {
+        if (this.disposed) return;
+        this.state.lastError = message;
+        this.emit();
     }
 
     /** 用户点「停止生成」：中断当前模型请求。 */

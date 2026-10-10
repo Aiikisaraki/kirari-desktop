@@ -12,6 +12,7 @@ import McpSettings from "./McpSettings.vue";
 import SkillSettings from "./SkillSettings.vue";
 import KnowledgeSettings from "./KnowledgeSettings.vue";
 import ProfileSettings from "./ProfileSettings.vue";
+import SyncSettings from "./SyncSettings.vue";
 import { SETTINGS_CONTEXT, type SettingsContext } from "./settingsContext";
 
 const error = ref("");
@@ -46,6 +47,8 @@ const activeComponent = computed(() => {
             return KnowledgeSettings;
         case "bot":
             return BotAdapterSettings;
+        case "sync":
+            return SyncSettings;
         default:
             return AppearanceSettings;
     }
@@ -122,6 +125,7 @@ const sections = computed(() => {
         { id: "skill", label: "技能", emoji: "🧩", hint: "行为模板与工具" },
         { id: "knowledge", label: "知识库", emoji: "📚", hint: "私人知识库（每日补充）" },
         { id: "bot", label: "机器人", emoji: "🤖", hint: "QQ / OneBot 接入" },
+        { id: "sync", label: "组网", emoji: "🔗", hint: "多台设备共用一个大脑" },
     );
     return list;
 });
