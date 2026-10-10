@@ -40,6 +40,7 @@ type NetSnapshot = {
     leafStatus?: string;
     pendingBackfill?: number;
     relay?: { running: number; queued: number; maxConcurrent: number; maxQueue: number } | null;
+    syncWhitelist?: string[];
 };
 
 contextBridge.exposeInMainWorld("netApi", {
@@ -65,6 +66,11 @@ contextBridge.exposeInMainWorld("netApi", {
         ipcRenderer.invoke("net:rename-self", name),
     flushBackfill: (): Promise<{ ok: boolean; snapshot?: NetSnapshot }> =>
         ipcRenderer.invoke("net:flush-backfill"),
+    syncWhitelist: (): Promise<{ whitelist: string[] }> => ipcRenderer.invoke("net:sync-whitelist"),
+    setSyncWhitelist: (fields: string[]): Promise<{ ok: boolean; whitelist: string[]; snapshot?: NetSnapshot }> =>
+        ipcRenderer.invoke("net:set-sync-whitelist", fields),
+    codeQr: (code: string): Promise<{ ok: boolean; dataUrl?: string; error?: string }> =>
+        ipcRenderer.invoke("net:code-qr", code),
     onState: (cb: (s: NetSnapshot) => void): void => {
         ipcRenderer.on("net:state", (_e, s: NetSnapshot) => cb(s));
     },

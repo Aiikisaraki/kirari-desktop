@@ -2028,6 +2028,23 @@ app.whenReady().then(async () => {
       const svc = chatSessionService;
       if (svc) svc.applyRelayResult(frame);
     },
+    onConfigChanged: (patch) => {
+      // 白名单内的配置改动落到本机：写盘 → 自动触发 onModelConfigChanged → 界面同步
+      try {
+        writeModelConfigFile(patch as Record<string, string>);
+        console.log(`[net] 已应用组网同步的配置：${Object.keys(patch).join("、")}`);
+      } catch (e) {
+        console.warn("[net] 应用同步配置失败:", (e as Error)?.message || e);
+      }
+    },
+    onConfigPush: (frame) => {
+      try {
+        writeModelConfigFile(frame.patch as Record<string, string>);
+        console.log(`[net] 收到主机下发的配置：${Object.keys(frame.patch).join("、")}`);
+      } catch (e) {
+        console.warn("[net] 写入主机下发配置失败:", (e as Error)?.message || e);
+      }
+    },
     onRelayBusy: (frame) => {
       const svc = chatSessionService;
       if (svc) svc.notifyRelayBusy(frame.reason);
@@ -2082,6 +2099,12 @@ app.whenReady().then(async () => {
 
   // 组网 IPC：设置窗口的全部入口
   setupNetIpc(() => netManager);
+
+  // 本机配置被用户改动：组网开启时交给 NetManager 决定是否传播。
+  // 主机 → 按白名单广播；叶子 → 无条件上报由主机裁决。
+  onModelConfigChanged((patch) => {
+    netManager?.notifyLocalConfigChanged(patch as Record<string, string>);
+  });
 
   // 注册 pet:// 协议：打包后 loadFile 无 HTTP 服务器，
   // fetch('/pet/frames.json') 无法解析。通过自定义协议映射到精灵帧资源目录。

@@ -9,8 +9,11 @@
 // 且不裸露 WebSocket / Token / 适配器这类术语。
 
 import { ipcMain } from "electron";
+import QRCode from "qrcode";
 import type { NetManager, NetSnapshot } from "./manager";
 import type { ExpiryKey, PairingCode } from "./pairingCode";
+import { SYNC_FIELDS } from "./protocol";
+import type { SyncField } from "./protocol";
 
 /** 允许的过期档位，防止非法值进来 */
 const EXPIRY_KEYS: ExpiryKey[] = ["1h", "1d", "7d", "30d", "forever"];
@@ -151,6 +154,46 @@ export function setupNetIpc(getManager: () => NetManager | null): void {
         withManager((m) => {
             m.flushBackfillNow();
             return { ok: true as const, snapshot: m.snapshot() };
+        }),
+    );
+
+    /**
+     * 读取配置同步白名单。
+     * 只有主机侧有内容；叶子侧返回空数组（叶子看不到也改不了这个开关）。
+     */
+    ipcMain.handle("net:sync-whitelist", withManager((m) => ({ whitelist: m.syncWhitelist() })));
+
+    /** 设置白名单。调整后立即生效，不需要叶子重新连接。 */
+    ipcMain.handle(
+        "net:set-sync-whitelist",
+        withManager((m, fields: unknown) => {
+            const clean = Array.isArray(fields) ? (fields.filter((f) => SYNC_FIELDS.includes(f)) as SyncField[]) : [];
+            m.setSyncWhitelist(clean);
+            return { ok: true as const, whitelist: m.syncWhitelist(), snapshot: m.snapshot() };
+        }),
+    );
+
+    /**
+     * 把连接码渲染成二维码（data URL）。
+     * 放主进程是为了不让 qrcode 进渲染层产物 —— 它只在「看一眼扫一扫」时用一次。
+     */
+    ipcMain.handle(
+        "net:code-qr",
+        withManager(async (_m, code: unknown) => {
+            const text = typeof code === "string" ? code.trim() : "";
+            if (!text) return { ok: false as const, error: "没有可生成的连接码" };
+            try {
+                const dataUrl = await QRCode.toDataURL(text, {
+                    width: 360,
+                    margin: 2,
+                    // 容错等级 M：打印/屏幕截图都能扫出来
+                    errorCorrectionLevel: "M",
+                    color: { dark: "#1f2937", light: "#ffffff" },
+                });
+                return { ok: true as const, dataUrl };
+            } catch (e) {
+                return { ok: false as const, error: `二维码生成失败：${(e as Error)?.message || e}` };
+            }
         }),
     );
 

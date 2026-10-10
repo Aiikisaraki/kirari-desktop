@@ -20,7 +20,7 @@ import {
     parseServerFrame,
     SeqTracker,
 } from "./protocol";
-import type { MembersMessage, RelayResult, RelayBusy, RelayBackfill, ServerFrame } from "./protocol";
+import type { MembersMessage, RelayResult, RelayBusy, RelayBackfill, ServerFrame, ConfigPush, SyncField } from "./protocol";
 import { randomToken } from "./pairingCode";
 
 export type LeafStatus = "idle" | "connecting" | "paired" | "connected" | "fallback";
@@ -40,6 +40,8 @@ export type LeafEvents = {
     onRelayResult?: (frame: RelayResult) => void;
     /** 主机拒绝了这次请求（排队满 / 正在关停） */
     onRelayBusy?: (frame: RelayBusy) => void;
+    /** 主机下发了配置（白名单内的字段），写进本机即生效 */
+    onConfigPush?: (frame: ConfigPush) => void;
     onLog?: (message: string) => void;
 };
 
@@ -358,6 +360,11 @@ export class LeafClient {
                 this.events.onRelayBusy?.(frame as RelayBusy);
                 return;
             }
+            if (frame.type === "config_push") {
+                // 主机批准下发的配置：写进本机即生效
+                this.events.onConfigPush?.(frame as ConfigPush);
+                return;
+            }
             if (frame.type === "relay_backfill_ack") {
                 // 主机确认收到补传，可以清本地待补队列了
                 this.pendingBackfill = [];
@@ -508,6 +515,40 @@ export class LeafClient {
             if (bucket.entries.length < 200) bucket.entries.push(entry);
         } else {
             this.pendingBackfill.push({ sessionId, entries: [entry] });
+        }
+    }
+
+    /**
+     * 上报配置改动给主机。
+     *
+     * **无条件上报**——叶子不判断该不该同步。判断在主机那边做（白名单是
+     * 主机侧的东西，叶子看不到也不该管）。这样用户调整白名单立刻生效。
+     * 返回 false 表示当前没连上主机。
+     */
+    reportConfigChange(patch: Partial<Record<SyncField, string>>): boolean {
+        const ws = this.ws;
+        if (!ws || ws.readyState !== 1) return false;
+        const clean: Partial<Record<SyncField, string>> = {};
+        let has = false;
+        for (const [k, v] of Object.entries(patch)) {
+            if (typeof v === "string") {
+                clean[k as SyncField] = v;
+                has = true;
+            }
+        }
+        if (!has) return false;
+        try {
+            ws.send(
+                JSON.stringify({
+                    type: "config_report",
+                    v: PROTOCOL_VERSION,
+                    deviceId: this.deviceId,
+                    patch: clean,
+                }),
+            );
+            return true;
+        } catch {
+            return false;
         }
     }
 

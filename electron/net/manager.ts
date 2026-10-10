@@ -27,13 +27,15 @@ import {
     attachToHost,
     removeMember,
     detachFromHost,
+    setSyncWhitelist,
+    filterWhitelisted,
     DEFAULT_EXPIRY,
 } from "./netStore";
 import type { NetState, NetRole, LeafCredential } from "./netStore";
 import { generatePairingCode, parsePairingCode, describeRemaining, randomToken } from "./pairingCode";
 import type { PairingCode, PairingRecord, ExpiryKey } from "./pairingCode";
-import { NET_PORT, PROTOCOL_VERSION } from "./protocol";
-import type { RelayResult, RelayBusy, RelayBackfill } from "./protocol";
+import { NET_PORT, PROTOCOL_VERSION, SYNC_FIELDS } from "./protocol";
+import type { RelayResult, RelayBusy, RelayBackfill, ConfigPush, SyncField } from "./protocol";
 import { RelayRouter } from "./relayRouter";
 import type { RelayExecutor } from "./relayRouter";
 
@@ -55,6 +57,8 @@ export type NetSnapshot = {
     pendingBackfill?: number;
     /** 主机侧：出口忙不忙 */
     relay?: { running: number; queued: number; maxConcurrent: number; maxQueue: number } | null;
+    /** 主机侧：配置同步白名单 */
+    syncWhitelist?: SyncField[];
 };
 
 export type NetManagerEvents = {
@@ -69,6 +73,13 @@ export type NetManagerEvents = {
     onRelayResult?: (frame: RelayResult) => void;
     /** 主机拒绝了请求 */
     onRelayBusy?: (frame: RelayBusy) => void;
+    /**
+     * 配置被组网同步：主机侧是「批准叶子改动后应用到本机」，
+     * 叶子侧是「收到主机下发后应用」。两者都落到同一个回调。
+     */
+    onConfigChanged?: (patch: Partial<Record<SyncField, string>>, fromDeviceId: string) => void;
+    /** 叶子收到主机下发的配置 */
+    onConfigPush?: (frame: ConfigPush) => void;
 };
 
 /**
@@ -167,6 +178,7 @@ export class NetManager {
             leafStatus: this.leaf?.getStatus(),
             pendingBackfill: this.leaf?.pendingBackfillCount(),
             relay: this.relayStats(),
+            syncWhitelist: this.state.role === "host" ? [...this.state.syncWhitelist] : undefined,
         };
     }
 
@@ -234,6 +246,13 @@ export class NetManager {
                     // 阶段 3：上行请求交给活锁路由
                     onRelayRequest: (req) => this.router?.handle(req) ?? false,
                     onRelayBackfill: (msg) => void this.router?.handleBackfill(msg),
+                    // 叶子上报配置改动：白名单内的字段应用到本机并转发给所有叶子
+                    onConfigReport: (msg, allowed) => {
+                        const fields = Object.keys(allowed) as SyncField[];
+                        this.events.onConfigChanged?.(allowed, msg.deviceId);
+                        this.log(`[net] 已批准 ${msg.deviceId.slice(0, 8)} 的配置改动：${fields.join("、")}`);
+                        this.broadcastConfig(allowed, msg.deviceId);
+                    },
                 },
             );
         }
@@ -272,6 +291,7 @@ export class NetManager {
                 onMembers: () => this.events.onSnapshot?.(this.snapshot()),
                 onRelayResult: (f) => this.events.onRelayResult?.(f),
                 onRelayBusy: (f) => this.events.onRelayBusy?.(f),
+                onConfigPush: (f) => this.events.onConfigPush?.(f),
                 onFallback: (reason) => {
                     // 关键：只改 role，不动地址与凭据 —— 退出不清除。
                     // 下次用户打开开关，凭持久化的信息自动归位，无需重新配对。
@@ -318,6 +338,7 @@ export class NetManager {
                 onMembers: () => this.events.onSnapshot?.(this.snapshot()),
                 onRelayResult: (f) => this.events.onRelayResult?.(f),
                 onRelayBusy: (f) => this.events.onRelayBusy?.(f),
+                onConfigPush: (f) => this.events.onConfigPush?.(f),
                 onFallback: (reason) => {
                     this.state = disableNetworking(this.state);
                     this.persist();
@@ -434,6 +455,56 @@ export class NetManager {
     /** 手动触发一次补传（用户在 UI 上点「立即同步」时用）。 */
     flushBackfillNow(): void {
         this.leaf?.flushBackfill();
+    }
+
+    /**
+     * 把配置广播给所有叶子（只带白名单内的字段）。
+     * @param fromDeviceId 谁改的（主机自己或某个叶子）
+     */
+    private broadcastConfig(patch: Partial<Record<SyncField, string>>, fromDeviceId: string): void {
+        const allowed = filterWhitelisted(this.state, patch);
+        if (!Object.keys(allowed).length) return;
+        const frame: ConfigPush = {
+            type: "config_push",
+            v: PROTOCOL_VERSION,
+            fromDeviceId,
+            patch: allowed,
+        };
+        this.host?.broadcast(frame);
+        // 主机自己也应用（叶子改了、白名单批准 → 主机的配置跟着变，保持全网一致）
+        this.events.onConfigChanged?.(allowed, fromDeviceId);
+    }
+
+    /**
+     * 本机配置被用户改动时的统一入口。
+     *
+     * 主机：白名单内的字段广播给所有叶子。
+     * 叶子：**无条件上报**给主机，由主机决定要不要传播（白名单是主机侧的东西）。
+     * 独立模式（没组网）：什么都不做。
+     */
+    notifyLocalConfigChanged(patch: Partial<Record<SyncField, string>>): void {
+        if (this.state.role === "host") {
+            this.broadcastConfig(patch, this.identity.deviceId);
+            return;
+        }
+        if (this.state.role === "leaf") {
+            this.leaf?.reportConfigChange(patch);
+        }
+    }
+
+    /** 当前同步白名单（只有主机侧有内容，叶子侧返回空数组）。 */
+    syncWhitelist(): SyncField[] {
+        return this.state.role === "host" ? [...this.state.syncWhitelist] : [];
+    }
+
+    /** 设置白名单（仅主机侧生效）。设置后立即生效，无需叶子重连。 */
+    setSyncWhitelist(fields: SyncField[]): void {
+        if (this.state.role !== "host") return;
+        const clean = fields.filter((f) => SYNC_FIELDS.includes(f));
+        this.state = setSyncWhitelist(this.state, clean);
+        this.persist();
+        // 白名单放开后，把当前值补推给所有叶子（否则用户要先改一次才生效）
+        this.events.onSnapshot?.(this.snapshot());
     }
 
     dispose(): void {

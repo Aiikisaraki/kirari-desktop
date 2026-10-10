@@ -34,6 +34,19 @@ export const CONNECT_TIMEOUT_MS = 8000;
  */
 export const PAIRING_SCHEME = "kirari://connect";
 
+/**
+ * 可以跟随主机的配置项。
+ *
+ * ⚠️ 刻意**不含** key / searchKey：组网内所有调用都用主机的凭证，
+ *    把钥匙下发出去等于让叶子能拿去别处用（ARCHITECTURE-PLAN 6.5）。
+ * ⚠️ 也不含 seeded：那是「本机是否已初始化过」的标记，各机自管。
+ */
+export type SyncField = "model" | "endpoint" | "basePersona" | "searchEndpoint" | "searchProvider";
+export const SYNC_FIELDS: SyncField[] = ["model", "endpoint", "basePersona", "searchEndpoint", "searchProvider"];
+
+/** 默认全部同步 —— 用户可以逐项取消。 */
+export const DEFAULT_SYNC_WHITELIST: SyncField[] = [...SYNC_FIELDS];
+
 // ── 客户端 → 主机 ────────────────────────────────────────────────
 
 /** 配对：用一次性配对码换一个长期凭据。 */
@@ -180,6 +193,29 @@ export type RelayBackfillAck = {
     count: number;
 };
 
+/**
+ * 叶子 → 主机：上报配置改动。
+ *
+ * 叶子**无条件上报**，不自己判断该不该同步 —— 白名单是主机侧的东西，
+ * 叶子看不到也不该管（ARCHITECTURE-PLAN 6.6）。主机收到后决定
+ * 是广播给全网还是丢弃，这样用户改白名单能立即生效，不必等叶子重连。
+ */
+export type ConfigReport = {
+    type: "config_report";
+    v: number;
+    deviceId: string;
+    patch: Partial<Record<SyncField, string>>;
+};
+
+/** 主机 → 叶子：下发配置。只会包含白名单内的字段。 */
+export type ConfigPush = {
+    type: "config_push";
+    v: number;
+    /** 来源："host" 或某个叶子 deviceId（叶子改了、主机批准后转发） */
+    fromDeviceId: string;
+    patch: Partial<Record<SyncField, string>>;
+};
+
 export type ServerFrame =
     | PairResponse
     | PongMessage
@@ -187,8 +223,9 @@ export type ServerFrame =
     | HostShutdown
     | RelayResult
     | RelayBusy
-    | RelayBackfillAck;
-export type ClientFrame = PairRequest | PingMessage | RelayRequest | RelayBackfill;
+    | RelayBackfillAck
+    | ConfigPush;
+export type ClientFrame = PairRequest | PingMessage | RelayRequest | RelayBackfill | ConfigReport;
 
 /** 解析服务端发来的文本帧。非法 JSON / 缺 type 一律返回 null（不抛）。 */
 export function parseServerFrame(raw: unknown): ServerFrame | null {

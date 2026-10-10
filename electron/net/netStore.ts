@@ -10,6 +10,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { PairingRecord, ExpiryKey } from "./pairingCode";
+import type { SyncField } from "./protocol";
+import { DEFAULT_SYNC_WHITELIST } from "./protocol";
 
 export type NetRole = "off" | "host" | "leaf";
 
@@ -39,6 +41,13 @@ export type NetState = {
     pairings: PairingRecord[];
     /** 已配对成功的叶子设备及其长期凭据（可单独吊销） */
     members: LeafCredential[];
+    /**
+     * 配置同步白名单：**只有主机侧有这个东西**，叶子看不到也改不了。
+     *
+     * 勾选的字段会下发给所有叶子；没勾的各设备自管，互不干扰。
+     * 刻意不含钥匙类字段 —— 组网内用主机的凭证就够。
+     */
+    syncWhitelist: SyncField[];
 
     // ── 叶子侧 ──
     /** 主机的地址与端口（从连接码解析而来） */
@@ -61,6 +70,7 @@ export function defaultNetState(deviceId: string, deviceName: string): NetState 
         homeId: "",
         pairings: [],
         members: [],
+        syncWhitelist: [...DEFAULT_SYNC_WHITELIST],
     };
 }
 
@@ -80,6 +90,7 @@ export function loadNetState(userDataDir: string, deviceId: string, deviceName: 
                     deviceName,
                     role: raw.role === "host" || raw.role === "leaf" ? raw.role : "off",
                     pairings: Array.isArray(raw.pairings) ? raw.pairings : [],
+                    syncWhitelist: Array.isArray(raw.syncWhitelist) ? raw.syncWhitelist : base.syncWhitelist,
                 };
             }
         }
@@ -185,6 +196,25 @@ export function detachFromHost(state: NetState): NetState {
         hostDisplayName: undefined,
         credential: undefined,
     };
+}
+
+/** 设置主机侧同步白名单。叶子侧调用会被忽略（白名单只在主机生效）。 */
+export function setSyncWhitelist(state: NetState, fields: SyncField[]): NetState {
+    return { ...state, syncWhitelist: [...fields] };
+}
+
+/** 取白名单内的字段（用于过滤上报/下发的 patch）。 */
+export function filterWhitelisted(
+    state: NetState,
+    patch: Partial<Record<SyncField, string>>,
+): Partial<Record<SyncField, string>> {
+    const out: Partial<Record<SyncField, string>> = {};
+    for (const key of Object.keys(patch) as SyncField[]) {
+        if (state.syncWhitelist.includes(key) && typeof patch[key] === "string") {
+            out[key] = patch[key];
+        }
+    }
+    return out;
 }
 
 /** 生成配对码时用到的默认过期档位。 */

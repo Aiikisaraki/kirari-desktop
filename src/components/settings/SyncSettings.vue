@@ -36,6 +36,7 @@ type NetSnapshot = {
     leafStatus?: string;
     pendingBackfill?: number;
     relay?: { running: number; queued: number; maxConcurrent: number; maxQueue: number } | null;
+    syncWhitelist?: string[];
 };
 
 const netApi = (window as any).netApi;
@@ -66,6 +67,31 @@ const EXPIRY_OPTIONS = [
     { value: "forever", label: "永不过期" },
 ];
 
+/**
+ * 可跟随主机的配置项。
+ * 刻意不含「钥匙」类字段：组网时本来就用主机的，下发过去反而是风险。
+ */
+const SYNC_ITEMS = [
+    { key: "model", label: "大脑型号", hint: "比如 gpt-5.4-mini" },
+    { key: "endpoint", label: "连接地址", hint: "大脑服务的地址" },
+    { key: "basePersona", label: "小灵的人格", hint: "说话风格与性格设定" },
+    { key: "searchEndpoint", label: "搜索地址", hint: "联网搜索用的服务地址" },
+    { key: "searchProvider", label: "搜索来源", hint: "用哪个搜索服务" },
+] as const;
+
+/** 当前白名单（只有主机侧有内容） */
+const whitelist = ref<string[]>([]);
+
+async function toggleSyncField(key: string, checked: boolean) {
+    const next = checked
+        ? [...new Set([...whitelist.value, key])]
+        : whitelist.value.filter((k) => k !== key);
+    const r = await netApi.setSyncWhitelist(next);
+    whitelist.value = r.whitelist || [];
+    if (r.snapshot) apply(r.snapshot);
+    toast.success(checked ? "其他设备会跟着这台设备走" : "各设备自己管，不互相影响");
+}
+
 const isHost = computed(() => snap.value?.role === "host");
 const isLeaf = computed(() => snap.value?.role === "leaf");
 const isOff = computed(() => snap.value?.role === "off");
@@ -87,6 +113,8 @@ const leafStatusText = computed(() => {
 function apply(s: NetSnapshot | null) {
     if (!s) return;
     snap.value = s;
+    // 白名单以主机侧为准（叶子侧恒为 undefined）
+    if (s.syncWhitelist) whitelist.value = [...s.syncWhitelist];
     if (!editingName.value) nameDraft.value = s.deviceName;
 }
 
@@ -110,6 +138,7 @@ async function openAsHost() {
         const r = await netApi.startHost(expiry.value);
         if (r.ok) {
             newCode.value = r.code || "";
+            qrDataUrl.value = "";
             apply(r.snapshot);
             toast.success("已开始提供出口，其他设备可以填连接码接入");
         } else {
@@ -184,6 +213,7 @@ async function issuePairing() {
         const r = await netApi.issuePairing(expiry.value);
         if (r.ok) {
             newCode.value = r.code || "";
+            qrDataUrl.value = "";
             apply(r.snapshot);
         }
     } finally {
@@ -199,6 +229,19 @@ async function copyCode() {
     } catch {
         toast.error("复制失败，手动选中复制吧");
     }
+}
+
+/** 二维码：内容就是连接码本身，生成在主进程（不让 qrcode 进渲染层产物） */
+const showQr = ref(false);
+const qrDataUrl = ref("");
+
+async function toggleQr() {
+    showQr.value = !showQr.value;
+    if (!showQr.value) return;
+    if (qrDataUrl.value) return;
+    const r = await netApi.codeQr(newCode.value);
+    if (r.ok && r.dataUrl) qrDataUrl.value = r.dataUrl;
+    else toast.error(r.error || "二维码生成失败");
 }
 
 async function revoke(id: string) {
@@ -370,9 +413,26 @@ onUnmounted(() => {
                     <div style="word-break: break-all; font-family: monospace; margin-bottom: 8px">
                         {{ newCode }}
                     </div>
-                    <div style="display: flex; gap: 8px; align-items: center">
+                    <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
                         <button type="button" class="btn btn--primary btn--sm" @click="copyCode">复制</button>
+                        <button type="button" class="btn btn--ghost btn--sm" @click="toggleQr">
+                            {{ showQr ? "收起二维码" : "看二维码" }}
+                        </button>
                         <span style="opacity: 0.75">只用来首次配对，配好后就不用再填了</span>
+                    </div>
+
+                    <!-- 二维码：内容就是连接码本身 -->
+                    <div v-if="showQr" style="margin-top: 12px">
+                        <img
+                            v-if="qrDataUrl"
+                            :src="qrDataUrl"
+                            alt="连接码二维码"
+                            style="width: 220px; height: 220px; border-radius: 8px; background: #fff"
+                        />
+                        <div v-else style="opacity: 0.7">正在生成…</div>
+                        <p style="margin-top: 8px; opacity: 0.85">
+                            <strong>这个二维码就是密码</strong>，扫到就等于把连接权限给了对方，别分享出去。
+                        </p>
                     </div>
                 </div>
 
@@ -448,6 +508,46 @@ onUnmounted(() => {
                 <div class="settings-hint" style="margin-top: 12px">
                     组网期间，<strong>其他设备的提问也会用这台设备的大脑额度</strong>。
                     所以只把连接码给家里信得过的人。
+                </div>
+
+                <!-- ── 同步白名单（只有主机有）─────────────────── -->
+                <div class="settings-row">
+                    <div class="settings-row__body">
+                        <span class="settings-row__icon" aria-hidden="true">📋</span>
+                        <div class="settings-row__text">
+                            <h4 class="settings-row__title">统一哪些配置</h4>
+                            <p class="settings-row__desc">
+                                勾上的项目会下发到所有设备，所有人跟着这台设备走；
+                                不勾的各管各的，互不干扰。
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                <div
+                    v-for="f in SYNC_ITEMS"
+                    :key="f.key"
+                    class="settings-row"
+                    style="padding-left: 32px"
+                >
+                    <div class="settings-row__body">
+                        <div class="settings-row__text">
+                            <h4 class="settings-row__title" style="font-weight: 500">{{ f.label }}</h4>
+                            <p class="settings-row__desc">{{ f.hint }}</p>
+                        </div>
+                    </div>
+                    <div class="settings-row__control">
+                        <label class="checkbox-row">
+                            <input
+                                type="checkbox"
+                                :checked="whitelist.includes(f.key)"
+                                @change="toggleSyncField(f.key, ($event.target as HTMLInputElement).checked)"
+                            />
+                            <span>跟随主机</span>
+                        </label>
+                    </div>
+                </div>
+                <div class="settings-hint">
+                    密钥不会下发 —— 组网时本来就用这台设备的，其他设备不用单独配置。
                 </div>
             </template>
 

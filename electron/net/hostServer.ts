@@ -12,7 +12,9 @@
 import { WebSocketServer, type WebSocket } from "ws";
 import * as os from "node:os";
 import { NET_PORT, PROTOCOL_VERSION, parseClientFrame } from "./protocol";
-import type { MembersMessage, PairResponse, PongMessage, HostShutdown, RelayRequest, RelayBackfill, RelayBusy } from "./protocol";
+import type { MembersMessage, PairResponse, PongMessage, HostShutdown, RelayRequest, RelayBackfill, RelayBusy, ConfigReport, ConfigPush } from "./protocol";
+import { filterWhitelisted } from "./netStore";
+import type { SyncField } from "./protocol";
 import { randomToken, verifyPairing } from "./pairingCode";
 import type { PairingRecord } from "./pairingCode";
 import type { NetState, LeafCredential } from "./netStore";
@@ -37,6 +39,13 @@ export type HostEvents = {
     onRelayRequest?: (req: RelayRequest) => boolean;
     /** 处理离线补传（只记对话，不调模型） */
     onRelayBackfill?: (msg: RelayBackfill) => void;
+    /**
+     * 叶子上报了配置改动。
+     *
+     * ⚠️ 白名单判定在**主机侧**做：叶子无条件上报，主机过滤后决定广播还是丢弃。
+     *    这样用户调整白名单立刻生效，不必等叶子重新连接。
+     */
+    onConfigReport?: (msg: ConfigReport, allowed: Partial<Record<SyncField, string>>) => void;
 };
 
 export class HostServer {
@@ -387,6 +396,21 @@ export class HostServer {
 
             if (frame.type === "relay_backfill") {
                 this.events.onRelayBackfill?.(frame);
+                return;
+            }
+
+            // ── 配置同步（白名单在主机侧判定）──
+            if (frame.type === "config_report") {
+                const msg = frame as ConfigReport;
+                // 只放行白名单内的字段；没勾的字段直接丢掉，不传播
+                const allowed = filterWhitelisted(this.state, msg.patch || {});
+                if (Object.keys(allowed).length) {
+                    this.events.onConfigReport?.(msg, allowed);
+                } else {
+                    this.events.onLog?.(
+                        `[net] 收到 ${msg.deviceId.slice(0, 8)} 的配置上报，但都不在同步范围内，已忽略`,
+                    );
+                }
                 return;
             }
         });
