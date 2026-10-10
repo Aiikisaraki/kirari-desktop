@@ -29,11 +29,13 @@
         "openai": "^7.31.0",
         "perfect-debounce": "^2.0.0",
         "pinia": "^4.0.2",
-        "vue": "^3.5.34"
+        "vue": "^3.5.34",
+        "ws": "^8.22.0"
     },
     "devDependencies": {
         "@types/better-sqlite3": "^9.6.0",
         "@types/node": "^24.12.3",
+        "@types/ws": "^8.18.2",
         "@vitejs/plugin-vue": "^6.0.6",
         "@vue/tsconfig": "^0.9.1",
         "electron": "^42.7.0",
