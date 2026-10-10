@@ -18,6 +18,16 @@ export default defineConfig({
     electron([
       {
         entry: "electron/main.ts",
+        // better-sqlite3 是原生模块：它的 .node 二进制无法被打包进 JS，
+        // 必须保持在 node_modules 里由运行时按路径加载（electron-builder 会把它
+        // 从 asar 中解包出来）。其余依赖照常内联。
+        vite: {
+          build: {
+            rollupOptions: {
+              external: ["better-sqlite3"],
+            },
+          },
+        },
         async onstart({ startup }) {
           const env = { ...process.env };
           delete env.ELECTRON_RUN_AS_NODE;

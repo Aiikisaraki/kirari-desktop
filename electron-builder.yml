@@ -1,8 +1,9 @@
-# electron-builder 配置：纯前端版（不打包后端 API，体积更小）
-# 适用：已部署好远程服务端的用户，仅安装桌面客户端并连接远程服务。
-# 构建：npm run dist:frontend
-# 与 integrated 的区别：extraResources 不含 pet-api（后端）与 backend-runtime（Node 运行时），
-# afterPack 钩子会检测到无后端而自动跳过 node_modules 复制。
+# electron-builder 配置：桌宠版（唯一交付物）
+#
+# 桌宠自带大脑（AI 内核跑在主进程内），不再随包携带任何后端，
+# 因此原来的 frontend / integrated / full 三套配置合并为这一套。
+#
+# 构建：npm run dist  （先 vite build，再打 NSIS 安装向导）
 appId: com.akisaki.kirari
 productName: Kirari绮莉
 # 二进制文件名用 ASCII，降低杀软对非 ASCII Electron exe 的启发式扫描/误报
@@ -13,7 +14,7 @@ copyright: Copyright © 2026 Aki
 # 明确禁用 electron-builder 自带的 GitHub 发布器：
 # 发版完全交给 GitHub Actions 的 softprops/action-gh-release 负责，这里只构建安装包、不发布，
 # 避免 electron-builder 尝试读取 GH_TOKEN 而报
-# “GitHub Personal Access Token is not set, neither programmatically, nor using env 'GH_TOKEN'”。
+# "GitHub Personal Access Token is not set, neither programmatically, nor using env 'GH_TOKEN'"。
 publish: null
 
 # 应用图标：嵌入 exe，决定任务栏 / 文件 / 标题栏（有边框窗口）图标
@@ -23,11 +24,25 @@ directories:
   output: release
   buildResources: build-resources
 
+# 禁止打包时自动 rebuild 原生模块。
+# better-sqlite3 v13 的预编译产物是 N-API（napi_register_module_v1，不含
+# NODE_MODULE_VERSION），ABI 与 Node/Electron 版本无关，Electron 42 可直接加载，
+# 无需 node-gyp 重新编译——也就不需要本机安装 Visual Studio 生成工具。
+npmRebuild: false
+
 # 随应用打包的前端产物（vite 输出 dist + 主进程 dist-electron）
 files:
   - dist
   - dist-electron
   - package.json
+  # 原生模块必须留在 node_modules 里由运行时加载（见 vite.config.ts 的 external 配置）。
+  # 它的 .node 二进制无法被打包进 asar，故在下方 asarUnpack 中解包出来。
+  - "node_modules/better-sqlite3/**"
+
+# 原生模块的二进制必须解包：asar 内的 .node 无法直接 dlopen。
+asarUnpack:
+  - "node_modules/better-sqlite3/prebuilds/**"
+  - "node_modules/better-sqlite3/build/**"
 
 # 桌面快捷方式使用的独立图标：打包进安装根目录，供 NSIS 创建桌面快捷方式时引用
 extraFiles:
@@ -37,21 +52,20 @@ extraFiles:
   - from: build-resources/install-avatars.ps1
     to: install-avatars.ps1
 
-# 额外资源：纯前端版仅打包官方皮肤，不打包后端 API 与 Node 运行时。
+# 官方皮肤：打包进安装包的 resources/official-avatars，
+# 安装阶段由 NSIS 脚本一次性释放到 userData/avatars。
+# 应用启动后不再替换皮肤（仅开发模式下首次启动且目录为空时兜底复制）。
 extraResources:
   - from: resources/official-avatars
     to: official-avatars
     filter:
       - "**/*"
 
-# 打包完成后钩子：检测到无后端时自动跳过 node_modules 复制（见 scripts/after-pack.cjs）
-afterPack: scripts/after-pack.cjs
-
 win:
   target:
     - nsis
   # ASCII 文件名，避免中文（productName 含中文 "Kirari绮莉"）被部分杀软启发式误报
-  artifactName: aki-kirari-pet-frontend-setup-${version}.${ext}
+  artifactName: aki-kirari-pet-setup-${version}.${ext}
 
 # Windows 安装向导：非一键安装，允许用户选择目录、创建桌面快捷方式。
 nsis:
@@ -69,5 +83,5 @@ nsis:
   installerLanguages:
     - zh_CN
     - en
-  # 自定义安装向导页：纯前端版不显示「模型配置」页，仅由 include 控制
+  # 自定义安装向导页（模型配置）：插入到"选择安装目录"之后、"开始安装"之前
   include: build-resources/installer.nsh

@@ -42,3 +42,7 @@ release
 scripts/_diag*.cjs
 yarn-debug.log*
 yarn-error.log*
+
+# 构建过程临时目录（WorkBuddy 安全删除 shim 拦截 rm -rf 时用 mv 暂存）
+dist_old_*/
+release_old_*/

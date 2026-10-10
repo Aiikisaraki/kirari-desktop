@@ -10,7 +10,7 @@
 #     （MUI2 最后一个预安装页的「下一步」按钮自动显示为「安装」）
 #
 # 收集值写入 $APPDATA\akisaki-kirari\config.json，
-# 主程序首次启动读取该文件并注入后端；勾选跳过则不写文件。
+# 主程序首次启动直接读取（桌宠自带大脑，不再经过后端）；勾选跳过则不写文件。
 # ============================================================================
 !include "LogicLib.nsh"
 !include "nsDialogs.nsh"
@@ -131,20 +131,20 @@ Function ModelConfigShow
   ; ── 标题 ──────────────────────────────────────────────────────
   ${NSD_CreateLabel} 0 0      100% 14u "模型配置"
 
-  ${NSD_CreateLabel} 0 16u    100% 18u "配置大模型连接信息。本地部署模式也需要填写（这是调用大模型的密钥，不是本地后端地址），留空可稍后在程序「设置」中填写。"
+  ${NSD_CreateLabel} 0 16u    100% 18u "填一下小灵的大脑要连到哪里。这是调用大模型的钥匙，只存在你自己的电脑上，留空也可以稍后在程序「设置」里填。"
 
-  ; ── API Endpoint（标签与输入框同行，节省垂直空间） ────────
-  ${NSD_CreateLabel}   0 40u   75u 12u "API Endpoint："
+  ; ── 大脑地址（标签与输入框同行，节省垂直空间） ────────
+  ${NSD_CreateLabel}   0 40u   75u 12u "连接地址："
   ${NSD_CreateText}    78u 38u  180u 16u "https://api.chatanywhere.tech/v1"
   Pop $ModelCfgEndpointBox
 
-  ; ── 模型名称 ─────────────────────────────────────────────────
-  ${NSD_CreateLabel}   0 60u   75u 12u "模型名称："
+  ; ── 大脑型号 ─────────────────────────────────────────────────
+  ${NSD_CreateLabel}   0 60u   75u 12u "大脑型号："
   ${NSD_CreateText}    78u 58u  180u 16u "gpt-5.4-mini"
   Pop $ModelCfgModelBox
 
-  ; ── API Key（明文文本框；NSD_CreatePassword 在部分环境下不可见，安装时仅本人可见） ──
-  ${NSD_CreateLabel}   0 80u   75u 12u "API Key："
+  ; ── 钥匙（明文文本框；NSD_CreatePassword 在部分环境下不可见，安装时仅本人可见） ──
+  ${NSD_CreateLabel}   0 80u   75u 12u "钥匙："
   ${NSD_CreateText}    78u 78u  180u 16u ""
   Pop $ModelCfgKeyBox
 
