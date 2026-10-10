@@ -156,17 +156,21 @@ async function handleSave() {
 }
 
 onMounted(() => {
-    if (mode.value === "local") {
-        // 本地模式：config.json 为权威配置，订阅外部编辑实时刷新
-        onModelConfigChanged((p) => {
-            applyProfile(p);
-            baseProfile.value = {
-                model: p.model,
-                apiEndpoint: p.apiEndpoint,
-                searchProvider: p.searchProvider,
-            };
-        });
-    }
+    // 订阅 config.json 的外部改动：用户在设置页之外改了文件（比如手动编辑、
+    // 组网时被主机同步过来），这里实时刷新，不用重开设置页。
+    //
+    // ⚠️ 早前这里还包了一层 `if (mode.value === "local")` —— 那是部署模式
+    //    时代的分支，0.8.0 移除远程模式后 `mode` 变量已被删掉，引用它会直接
+    //    抛 ReferenceError，整个组件渲染失败（表现是「点进模型页就卡死」）。
+    //    现在只有本机配置一种模式，直接订阅即可。
+    onModelConfigChanged((p) => {
+        applyProfile(p);
+        baseProfile.value = {
+            model: p.model,
+            apiEndpoint: p.apiEndpoint,
+            searchProvider: p.searchProvider,
+        };
+    });
     loadProfile();
 });
 
