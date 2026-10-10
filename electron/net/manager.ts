@@ -32,7 +32,13 @@ import {
     DEFAULT_EXPIRY,
 } from "./netStore";
 import type { NetState, NetRole, LeafCredential } from "./netStore";
-import { generatePairingCode, parsePairingCode, describeRemaining, randomToken } from "./pairingCode";
+import {
+    generatePairingCode,
+    parsePairingCode,
+    serializePairingCode,
+    describeRemaining,
+    randomToken,
+} from "./pairingCode";
 import type { PairingCode, PairingRecord, ExpiryKey } from "./pairingCode";
 import { NET_PORT, PROTOCOL_VERSION, SYNC_FIELDS } from "./protocol";
 import type { RelayResult, RelayBusy, RelayBackfill, ConfigPush, SyncField } from "./protocol";
@@ -430,8 +436,8 @@ export class NetManager {
 
     /** 序列化当前配对码（供 UI 复制 / 生成二维码）。 */
     serializePairing(code: PairingCode): string {
-        // 延迟引入避免循环依赖：pairingCode 是纯逻辑层
-        const { serializePairingCode } = require("./pairingCode") as typeof import("./pairingCode");
+        // 原先是 require() 延迟引入（注释写「避免循环依赖」），但 pairingCode
+        // 并不依赖 manager，没有环；require 在 ESM 下不可用，直接静态调用。
         return serializePairingCode(code);
     }
 

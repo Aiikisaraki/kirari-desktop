@@ -131,7 +131,12 @@ export function safeEqual(a: string, b: string): boolean {
 export class ReplayGuard {
     private highWater = 0;
     private seen: number[] = [];
-    constructor(private readonly windowSize = 256) {}
+    // 不用构造参数属性（parameter property）—— erasableSyntaxOnly 下不允许，
+    // 显式声明字段再赋值，行为完全一致。
+    private readonly windowSize: number;
+    constructor(windowSize = 256) {
+        this.windowSize = windowSize;
+    }
 
     /** 返回 true 表示这是首次出现、应当接受。 */
     accept(seq: number): boolean {

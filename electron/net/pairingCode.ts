@@ -12,8 +12,12 @@
 //
 // 本模块是纯逻辑，不碰文件系统与 electron，便于单测。
 
+// 与 secure.ts 一样直接静态 import：主进程构建目标就是 node，crypto 不会被
+// 内联进产物。原先这里用 `eval("require")` 间接拿 —— 那个 hack 在 ESM 环境下
+// 直接抛错（连单测都跑不起来），而且没必要（secure.ts 早就在静态 import 了）。
+import { createHash } from "crypto";
 import { NET_PORT, PAIRING_SCHEME, PROTOCOL_VERSION } from "./protocol";
-import { NET_SECRET, deriveKey, newSalt, seal, open } from "./secure";
+import { NET_SECRET, deriveKey, seal, open } from "./secure";
 
 /**
  * 连接码用的固定 salt。
@@ -77,7 +81,7 @@ export type PairingRecord = {
 /** 生成随机十六进制串。用于配对口令与长期凭据。 */
 export function randomToken(bytes = 24): string {
     // 浏览器与 Node 都有的取随机方式；Electron 主进程有 globalThis.crypto。
-    const c: Crypto | undefined = globalThis.crypto;
+    const c = globalThis.crypto;
     if (c && typeof c.getRandomValues === "function") {
         const arr = new Uint8Array(bytes);
         c.getRandomValues(arr);
@@ -93,7 +97,7 @@ export function randomToken(bytes = 24): string {
 
 /** 口令哈希。只存这个，不存明文。 */
 export function hashToken(token: string): string {
-    const c: Crypto | undefined = globalThis.crypto;
+    const c = globalThis.crypto;
     const text = `kirari-pair:${token}`;
     if (c && typeof c.subtle !== "undefined") {
         // subtle 是异步的，这里需要同步版本，故用 Node 的 crypto 走同步哈希。
@@ -109,17 +113,7 @@ export function hashToken(token: string): string {
  * 配对校验这种热路径不值得）。
  */
 function nodeSha256(text: string): string {
-    // 运行时按可用性选择实现，避免把 electron 应用打成纯 Node 专用。
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { createHash } = requireNodeCrypto();
     return createHash("sha256").update(text, "utf8").digest("hex");
-}
-
-function requireNodeCrypto(): { createHash: (alg: string) => { update: (s: string, e: string) => { digest: (e: string) => string } } } {
-    // 打包后 __dirname 变了，所以不能静态 import；这里用 eval 间接拿，
-    // 避免 vite 把 node:crypto 内联进产物导致 web 构建失败。
-    const req = eval("require") as NodeRequire;
-    return req("crypto");
 }
 
 /** 按档位算出绝对过期时间戳。forever → 0。 */

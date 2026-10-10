@@ -192,146 +192,150 @@ onMounted(() => {
         </p>
 
         <!-- 桌宠本机运行、免登录，模型配置（含钥匙）直接可填。 -->
-        <template>
-            <div class="field">
-                <label class="field-label" for="model">模型名称</label>
-                <input
-                    id="model"
-                    v-model="modelInput"
-                    class="text-input"
-                    type="text"
-                    autocomplete="off"
-                    placeholder="例如 gpt-5.4-mini"
-                    :disabled="isLoading"
-                />
-            </div>
-
-            <div class="field">
-                <label class="field-label" for="endpoint">模型 API 端点</label>
-                <input
-                    id="endpoint"
-                    v-model="apiEndpointInput"
-                    class="text-input"
-                    type="url"
-                    autocomplete="off"
-                    placeholder="https://api.chatanywhere.tech/v1"
-                    :disabled="isLoading"
-                />
-                <p class="settings-hint">
-                    这是大模型 API 地址，不是本地后端地址。
-                </p>
-                <p class="settings-hint">
-                    没有 API Key？可前往
-                    <a
-                        href="#"
-                        class="inline-link"
-                        @click.prevent="openExternal(freeKeyUrl)"
-                        >chatanywhere</a
-                    >
-                    免费领取（支持 gpt / deepseek /
-                    通义千问等常用模型，国内直连、免代理，每日有免费额度）。
-                </p>
-            </div>
-
-            <div class="field">
-                <label class="field-label" for="newToken">API Token</label>
-                <input
-                    id="newToken"
-                    v-model="newTokenInput"
-                    class="text-input"
-                    type="password"
-                    autocomplete="new-password"
-                    placeholder="输入新 Token 以替换（留空则不修改）"
-                    :disabled="isLoading"
-                />
-                <p v-if="hasToken" class="settings-hint">
-                    当前 Token：{{ tokenMasked }}（已加密保存，无需查看明文）
-                </p>
-            </div>
-
-            <div class="field">
-                <span class="field-label">联网搜索提供商</span>
-                <div class="provider-row">
-                    <label class="provider-option">
-                        <input type="radio" value="uapis" v-model="searchProvider" />
-                        <span>UAPI（内置免费）</span>
-                    </label>
-                    <label class="provider-option">
-                        <input type="radio" value="tavily" v-model="searchProvider" />
-                        <span>Tavily</span>
-                    </label>
-                    <label class="provider-option">
-                        <input
-                            type="radio"
-                            value="searxng"
-                            v-model="searchProvider"
-                        />
-                        <span>SearXNG（自建）</span>
-                    </label>
-                </div>
-                <p class="settings-hint">
-                    默认使用内置 UAPI 免费搜索，<strong>无需任何配置即可联网</strong>；选
-                    Tavily 需填其 API Key；选 SearXNG 需填自建实例地址（隐私可控、零成本）。
-                </p>
-            </div>
-
-            <div class="field">
-                <label class="field-label" for="searchCredential">{{
-                    credentialLabel
-                }}</label>
-                <input
-                    id="searchCredential"
-                    v-model="newCredentialInput"
-                    class="text-input"
-                    :type="credentialType"
-                    autocomplete="new-password"
-                    :placeholder="credentialPlaceholder"
-                    :disabled="isLoading"
-                />
-                <p v-if="!isSearxng && hasSearchKey" class="settings-hint">
-                    当前 Key：{{ searchKeyMasked }}（已加密保存，无需查看明文）
-                </p>
-                <p v-if="isSearxng && searchEndpoint" class="settings-hint">
-                    当前地址：{{ searchEndpoint }}
-                </p>
-                <p v-if="searchProvider === 'uapis'" class="settings-hint">
-                    免 key 即可用（匿名每月约 375 次）。在
-                    <a
-                        href="#"
-                        class="inline-link"
-                        @click.prevent="openExternal('https://uapis.cn')"
-                        >uapis.cn</a
-                    >
-                    登录获取令牌填到此处，额度可提升至约 875 次/月。
-                </p>
-                <p v-if="searchProvider === 'tavily'" class="settings-hint">
-                    Tavily 结果质量更高，在
-                    <a
-                        href="#"
-                        class="inline-link"
-                        @click.prevent="openExternal('https://tavily.com')"
-                        >Tavily</a
-                    >
-                    免费领取 Key。
-                </p>
-                <p v-if="searchProvider === 'searxng'" class="settings-hint">
-                    填后改用你自建的 SearXNG 实例（隐私可控、零成本）。需开启 JSON
-                    API：<code>settings.yml</code> 中
-                    <code>search.formats: [json]</code> 且
-                    <code>limiter: false</code>。
-                </p>
-            </div>
-
-            <button
-                type="button"
-                class="btn btn--primary btn--block"
+        <!--
+            ⚠️ 这里曾经有个 `<template>` 包裹（是 `v-if="mode === 'local'"` 时代留下的）。
+            不带任何指令的 `<template>` 会被编译成**原生 template 元素**，它的子节点
+            只存在于 .content 片段里、根本不进 DOM —— 表现就是页面上只剩标题，
+            下面一整张表单全是空的。删掉分支时必须连包裹一起删，不能只删 v-if。
+        -->
+        <div class="field">
+            <label class="field-label" for="model">模型名称</label>
+            <input
+                id="model"
+                v-model="modelInput"
+                class="text-input"
+                type="text"
+                autocomplete="off"
+                placeholder="例如 gpt-5.4-mini"
                 :disabled="isLoading"
-                @click="handleSave"
-            >
-                {{ isLoading ? "保存中..." : "保存设置" }}
-            </button>
-            <div v-if="saveSuccess" class="settings-success">保存成功</div>
-            <div v-if="error" class="settings-error">{{ error }}</div>
-        </template>
+            />
+        </div>
+
+        <div class="field">
+            <label class="field-label" for="endpoint">模型 API 端点</label>
+            <input
+                id="endpoint"
+                v-model="apiEndpointInput"
+                class="text-input"
+                type="url"
+                autocomplete="off"
+                placeholder="https://api.chatanywhere.tech/v1"
+                :disabled="isLoading"
+            />
+            <p class="settings-hint">
+                这是大模型 API 地址，不是本地后端地址。
+            </p>
+            <p class="settings-hint">
+                没有 API Key？可前往
+                <a
+                    href="#"
+                    class="inline-link"
+                    @click.prevent="openExternal(freeKeyUrl)"
+                    >chatanywhere</a
+                >
+                免费领取（支持 gpt / deepseek /
+                通义千问等常用模型，国内直连、免代理，每日有免费额度）。
+            </p>
+        </div>
+
+        <div class="field">
+            <label class="field-label" for="newToken">API Token</label>
+            <input
+                id="newToken"
+                v-model="newTokenInput"
+                class="text-input"
+                type="password"
+                autocomplete="new-password"
+                placeholder="输入新 Token 以替换（留空则不修改）"
+                :disabled="isLoading"
+            />
+            <p v-if="hasToken" class="settings-hint">
+                当前 Token：{{ tokenMasked }}（已加密保存，无需查看明文）
+            </p>
+        </div>
+
+        <div class="field">
+            <span class="field-label">联网搜索提供商</span>
+            <div class="provider-row">
+                <label class="provider-option">
+                    <input type="radio" value="uapis" v-model="searchProvider" />
+                    <span>UAPI（内置免费）</span>
+                </label>
+                <label class="provider-option">
+                    <input type="radio" value="tavily" v-model="searchProvider" />
+                    <span>Tavily</span>
+                </label>
+                <label class="provider-option">
+                    <input
+                        type="radio"
+                        value="searxng"
+                        v-model="searchProvider"
+                    />
+                    <span>SearXNG（自建）</span>
+                </label>
+            </div>
+            <p class="settings-hint">
+                默认使用内置 UAPI 免费搜索，<strong>无需任何配置即可联网</strong>；选
+                Tavily 需填其 API Key；选 SearXNG 需填自建实例地址（隐私可控、零成本）。
+            </p>
+        </div>
+
+        <div class="field">
+            <label class="field-label" for="searchCredential">{{
+                credentialLabel
+            }}</label>
+            <input
+                id="searchCredential"
+                v-model="newCredentialInput"
+                class="text-input"
+                :type="credentialType"
+                autocomplete="new-password"
+                :placeholder="credentialPlaceholder"
+                :disabled="isLoading"
+            />
+            <p v-if="!isSearxng && hasSearchKey" class="settings-hint">
+                当前 Key：{{ searchKeyMasked }}（已加密保存，无需查看明文）
+            </p>
+            <p v-if="isSearxng && searchEndpoint" class="settings-hint">
+                当前地址：{{ searchEndpoint }}
+            </p>
+            <p v-if="searchProvider === 'uapis'" class="settings-hint">
+                免 key 即可用（匿名每月约 375 次）。在
+                <a
+                    href="#"
+                    class="inline-link"
+                    @click.prevent="openExternal('https://uapis.cn')"
+                    >uapis.cn</a
+                >
+                登录获取令牌填到此处，额度可提升至约 875 次/月。
+            </p>
+            <p v-if="searchProvider === 'tavily'" class="settings-hint">
+                Tavily 结果质量更高，在
+                <a
+                    href="#"
+                    class="inline-link"
+                    @click.prevent="openExternal('https://tavily.com')"
+                    >Tavily</a
+                >
+                免费领取 Key。
+            </p>
+            <p v-if="searchProvider === 'searxng'" class="settings-hint">
+                填后改用你自建的 SearXNG 实例（隐私可控、零成本）。需开启 JSON
+                API：<code>settings.yml</code> 中
+                <code>search.formats: [json]</code> 且
+                <code>limiter: false</code>。
+            </p>
+        </div>
+
+        <button
+            type="button"
+            class="btn btn--primary btn--block"
+            :disabled="isLoading"
+            @click="handleSave"
+        >
+            {{ isLoading ? "保存中..." : "保存设置" }}
+        </button>
+        <div v-if="saveSuccess" class="settings-success">保存成功</div>
+        <div v-if="error" class="settings-error">{{ error }}</div>
     </section>
 </template>

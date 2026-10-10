@@ -12,6 +12,7 @@ import { ipcMain } from "electron";
 import QRCode from "qrcode";
 import type { NetManager, NetSnapshot } from "./manager";
 import type { ExpiryKey, PairingCode } from "./pairingCode";
+import { serializePairingCode } from "./pairingCode";
 import { SYNC_FIELDS } from "./protocol";
 import { NET_ENABLED } from "./secure";
 import type { SyncField } from "./protocol";
@@ -24,9 +25,8 @@ function pickExpiry(value: unknown): ExpiryKey {
 }
 
 function serializeCode(code: PairingCode): string {
-    // 延迟引入避免循环：pairingCode 是纯逻辑模块
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { serializePairingCode } = require("./pairingCode") as typeof import("./pairingCode");
+    // 原先这里用 require() 延迟引入「避免循环依赖」，但 pairingCode 并不反过来
+    // 依赖 ipc，根本没有环；而 require 在 ESM 下直接不可用（连单测都跑不起来）。
     return serializePairingCode(code);
 }
 
