@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.node.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.electron.tsbuildinfo",
+    // 主进程此前从未被类型检查覆盖过（只有 vite 打包，不做检查）。这里先让它进来，
+    // 但**暂时关掉未使用变量检查**：代码里有几处「赋值了但没人读」的预留字段
+    // （leafClient 的 hostId / hostName / hostSalt）和一个压根没被调用的
+    // handshakeTimeout()。这些要么该接上、要么该删，需要逐项单独评估，
+    // 不能顺手清掉 —— 先不因为它们拦住类型检查，真正的类型错误照样会报。
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  // 只收组网模块：electron/main.ts 那边还有一堆存量错误（含「DEFAULT_SKIN_DIR
+  // 在声明前使用」这类可能真有问题的地方），要单独一轮处理，别混在这里。
+  "include": ["electron/net/**/*.ts"]
+}

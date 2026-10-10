@@ -22,5 +22,6 @@
   },
   // src/knowledge/localKnowledge.ts 是主进程用的私人知识库实现（fs/path），
   // 放在 src/ 下但不属于渲染层，故在这里带 node 类型检查。
-  "include": ["vite.config.ts", "src/knowledge/localKnowledge.ts"]
+  // electron/ 目录下的主进程代码由 tsconfig.electron.json 单独检查。
+  "include": ["vite.config.ts", "vitest.config.ts", "src/knowledge/localKnowledge.ts"]
 }

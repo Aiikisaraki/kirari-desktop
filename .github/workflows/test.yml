@@ -1,0 +1,42 @@
+name: 检查与测试 (kirari-desktop)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 与 release.yml 分开：那边只在打 tag 时打包发布（要跑满 Windows/macOS/Linux
+# 三平台 Electron 构建，很慢），这边每次 push / PR 都跑，只做类型检查 + 单测，
+# 一分钟内出结果，用来挡回归。
+#
+# 之前 push 什么都不跑 —— 「点进模型页卡死」「表单整块不渲染」这类问题
+# 只能等人工点出来。这里就是补上那道关。
+# ─────────────────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: 类型检查 + 单测
+    runs-on: ubuntu-latest
+    env:
+      # 单测不启动 Electron，别下载百来 MB 的二进制，省时间也省流量。
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: 装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 单元测试
+        run: npm run test
