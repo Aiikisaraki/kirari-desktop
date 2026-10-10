@@ -287,7 +287,10 @@ export class NetManager {
         }
         const code = parsePairingCode(pairingText);
         if (!code) {
-            return { ok: false, error: "这个连接码看起来不完整。让主机那边重新复制一次，粘完整的那一串。" };
+            return {
+                ok: false,
+                error: "这个连接码解不开。整串重新复制一次（别漏字符），或者让主机扫一下二维码。",
+            };
         }
 
         this.state = enableNetworking(this.state, "leaf");

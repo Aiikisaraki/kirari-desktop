@@ -13,6 +13,23 @@
 // 本模块是纯逻辑，不碰文件系统与 electron，便于单测。
 
 import { NET_PORT, PAIRING_SCHEME, PROTOCOL_VERSION } from "./protocol";
+import { NET_SECRET, deriveKey, newSalt, seal, open } from "./secure";
+
+/**
+ * 连接码用的固定 salt。
+ *
+ * 刻意固定（而不是像组网会话那样每台主机一个）：连接码是**离线凭证**，
+ * 要能让任何一台 Kirari 独立解开 —— 它不知道该找谁要 salt。
+ * 用固定 salt + 程序内的组网密钥派生，谁装了同一个版本的程序谁都能解，
+ * 但外部的人（截图转发者）没有这个密钥，解不开就是一堆乱码。
+ */
+const PAIRING_SALT = "kirari-pairing-v1";
+
+/** 连接码的加密密钥。没带组网密钥的构建无法生成/解析连接码。 */
+function pairingKey(): Buffer | null {
+    if (!NET_SECRET) return null;
+    return deriveKey(NET_SECRET, PAIRING_SALT);
+}
 
 /** 过期档位（用户自选）。 */
 export const EXPIRY_PRESETS = [
@@ -146,22 +163,45 @@ export function generatePairingCode(opts: {
 }
 
 /**
- * 序列化成一条可复制 / 可生成二维码的字符串。
- * 之所以要序列化成 URL 而不是 JSON：二维码对短文本的密度更友好，
- * 且 URL 形式在聊天软件里点开也有机会被识别。
+ * 序列化成一条**密文**连接码。
+ *
+ * 形如：kirari://c?d=<base64 密文>
+ *   密文里包着 {host, port, token, name, expiresAt, v}
+ *
+ * 为什么整包加密而不是只保护 token：
+ *   - 主机地址、设备名同样属于「不该随便被外人看到」的信息
+ *     （暴露了地址就能直接扫端口）
+ *   - 整包密文还有个额外好处：**截图转发也没用**。别人拿到这串东西
+ *     没有你的组网密钥，解不开，填进去只会得到「这个连接码解不开」。
+ *   这正是「连接码即密码」的含义 —— 它本来就该是个秘密。
+ *
+ * 代价：用户肉眼看不出连接码对不对（地址错了也看不出来）。
+ * 界面上用二维码兜住这个问题，扫比手打靠谱。
  */
 export function serializePairingCode(code: PairingCode): string {
-    const q = new URLSearchParams();
-    q.set("host", code.host);
-    q.set("port", String(code.port));
-    q.set("token", code.token);
-    q.set("name", code.name);
-    q.set("exp", String(code.expiresAt));
-    q.set("v", String(code.v));
-    return `${PAIRING_SCHEME}?${q.toString()}`;
+    const key = pairingKey();
+    // 没有密钥就不给生成明文码 —— 与其悄悄降级成不安全，不如明确失败
+    if (!key) throw new Error("当前构建没有组网密钥，无法生成连接码");
+    const payload = {
+        h: code.host,
+        p: code.port,
+        t: code.token,
+        n: code.name,
+        e: code.expiresAt,
+        v: code.v,
+    };
+    // ⚠️ 必须 encodeURIComponent：base64 里的 "+" 会被 URLSearchParams
+    //    当成空格解码，"/" 也会破坏 URL 结构。不编码的话自己生成的码
+    //    自己都解不开（这正是下面测试发现的问题）。
+    return `${PAIRING_SCHEME}?d=${encodeURIComponent(seal(key, payload))}`;
 }
 
-/** 解析连接码。粘贴别人发来的串时走这里。失败返回 null（不抛）。 */
+/**
+ * 解析连接码 —— 现在**只会**认密文码。
+ *
+ * 不再保留明文解析的兼容分支：留一个「明文也能用」的后门等于加密白做。
+ * 旧码直接失效，让主人重新生成一个即可（成本很低）。
+ */
 export function parsePairingCode(raw: string): PairingCode | null {
     const text = String(raw || "").trim();
     if (!text.toLowerCase().startsWith(PAIRING_SCHEME)) return null;
@@ -171,19 +211,31 @@ export function parsePairingCode(raw: string): PairingCode | null {
     } catch {
         return null;
     }
-    const host = (q.get("host") || "").trim();
-    const token = (q.get("token") || "").trim();
+    const d = q.get("d");
+    if (!d) return null;
+
+    const key = pairingKey();
+    if (!key) return null;
+
+    const payload = open(key, d) as
+        | { h?: unknown; p?: unknown; t?: unknown; n?: unknown; e?: unknown; v?: unknown }
+        | null;
+    if (!payload) return null;
+
+    const host = typeof payload.h === "string" ? payload.h.trim() : "";
+    const token = typeof payload.t === "string" ? payload.t.trim() : "";
+    // 口令与地址缺一不可；name / exp / v 可缺（容错，老版本生成的码也能用）
     if (!host || !token) return null;
 
-    const portNum = Number(q.get("port") || NET_PORT);
-    const expNum = Number(q.get("exp") || 0);
-    const vNum = Number(q.get("v") || PROTOCOL_VERSION);
+    const portNum = Number(payload.p);
+    const expNum = Number(payload.e);
+    const vNum = Number(payload.v ?? PROTOCOL_VERSION);
 
     return {
         host,
         port: Number.isFinite(portNum) && portNum > 0 && portNum < 65536 ? portNum : NET_PORT,
         token,
-        name: (q.get("name") || "未命名设备").slice(0, 40),
+        name: typeof payload.n === "string" && payload.n.trim() ? payload.n.trim().slice(0, 40) : "未命名设备",
         expiresAt: Number.isFinite(expNum) && expNum >= 0 ? expNum : 0,
         v: Number.isFinite(vNum) && vNum > 0 ? vNum : PROTOCOL_VERSION,
     };

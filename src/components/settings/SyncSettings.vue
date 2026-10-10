@@ -404,7 +404,7 @@ onUnmounted(() => {
                             <h4 class="settings-row__title">连接码</h4>
                             <p class="settings-row__desc">
                                 其他设备填这一串就能接进来。<strong>一串码只能用一次</strong>，
-                                接一台设备生成一串。它同时也是密码，别发到公开的地方。
+                                接一台设备生成一串。
                             </p>
                         </div>
                     </div>
@@ -443,7 +443,7 @@ onUnmounted(() => {
                         />
                         <div v-else style="opacity: 0.7">正在生成…</div>
                         <p style="margin-top: 8px; opacity: 0.85">
-                            <strong>这个二维码就是密码</strong>，扫到就等于把连接权限给了对方，别分享出去。
+                            <strong>扫一下最稳。</strong>连接码是加密过的乱码，手动粘贴容易漏字符。
                         </p>
                     </div>
                 </div>
