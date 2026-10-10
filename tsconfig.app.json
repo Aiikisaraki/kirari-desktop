@@ -10,5 +10,9 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.vue"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.vue"],
+  // 私人知识库是主进程代码（用了 fs/path），由 electron/main.ts 引入；
+  // 渲染层 tsconfig 不加载 node 类型，放进来必然报「找不到 fs/path」，
+  // 因此排除掉，改由 tsconfig.node.json 检查。
+  "exclude": ["src/knowledge/localKnowledge.ts"]
 }

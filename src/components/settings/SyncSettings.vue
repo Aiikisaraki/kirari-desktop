@@ -251,6 +251,11 @@ async function toggleQr() {
     else toast.error(r.error || "二维码生成失败");
 }
 
+/** 还没作废的连接码：可以在这里撤销，撤销后别人再拿这串也接不进来 */
+const activePairings = computed(
+    () => (snap.value?.pairings ?? []).filter((p) => !p.revoked),
+);
+
 async function revoke(id: string) {
     apply((await netApi.revokePairing(id)).snapshot);
     toast.success("已撤销，之后不能用了");
@@ -445,6 +450,38 @@ onUnmounted(() => {
                         <p style="margin-top: 8px; opacity: 0.85">
                             <strong>扫一下最稳。</strong>连接码是加密过的乱码，手动粘贴容易漏字符。
                         </p>
+                    </div>
+                </div>
+
+                <!-- 已生成的连接码：可以逐个撤销 -->
+                <div v-if="activePairings.length" class="settings-hint" style="padding: 12px">
+                    <p style="margin: 0 0 8px; opacity: 0.85">
+                        已经生成过的连接码（撤销后立刻失效，已经接进来的设备不受影响）：
+                    </p>
+                    <div
+                        v-for="p in activePairings"
+                        :key="p.id"
+                        style="
+                            display: flex;
+                            gap: 8px;
+                            align-items: center;
+                            flex-wrap: wrap;
+                            margin-bottom: 6px;
+                        "
+                    >
+                        <span style="flex: 1; min-width: 160px">
+                            {{ p.name || "未命名" }}
+                            <span style="opacity: 0.7">· {{ p.remaining }}</span>
+                            <span v-if="p.usedBy" style="opacity: 0.7">· 已被 {{ p.usedBy }} 用过</span>
+                        </span>
+                        <button
+                            type="button"
+                            class="btn btn--ghost btn--sm"
+                            :disabled="busy"
+                            @click="revoke(p.id)"
+                        >
+                            撤销
+                        </button>
                     </div>
                 </div>
 

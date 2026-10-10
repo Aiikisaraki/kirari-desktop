@@ -86,7 +86,8 @@ function openEdit(e: KbEntry) {
 }
 
 function openEditRemote(e: RemoteKbSource) {
-    editingRemote.value = { ...e };
+    // RemoteKbSource.priority 是可选的，编辑表单要求必填，这里补默认值。
+    editingRemote.value = { ...e, priority: e.priority ?? 0 };
     showRemoteEditor.value = true;
 }
 

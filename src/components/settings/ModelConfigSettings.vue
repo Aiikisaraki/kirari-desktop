@@ -19,6 +19,11 @@ const tokenMasked = ref("");
 const hasToken = ref(false);
 const newTokenInput = ref("");
 const searchProvider = ref<"uapis" | "tavily" | "searxng">("uapis");
+// 主进程/缓存里的 searchProvider 是 string，落进联合类型前先归一化，
+// 认不出来的值一律回退到 uapis，避免界面上出现空选项。
+function normalizeProvider(v: string | undefined): "uapis" | "tavily" | "searxng" {
+    return v === "tavily" || v === "searxng" ? v : "uapis";
+}
 const newCredentialInput = ref("");
 const hasSearchKey = ref(false);
 const searchKeyMasked = ref("");
@@ -60,7 +65,7 @@ function applyProfile(p: {
     apiEndpointInput.value = p.apiEndpoint;
     tokenMasked.value = p.tokenMasked;
     hasToken.value = p.hasToken;
-    searchProvider.value = p.searchProvider || "uapis";
+    searchProvider.value = normalizeProvider(p.searchProvider);
     searchKeyMasked.value = p.searchKeyMasked ?? "";
     hasSearchKey.value = p.hasSearchKey === true;
     searchEndpoint.value = p.searchEndpoint ?? "";
@@ -141,7 +146,7 @@ async function handleSave() {
         searchKeyMasked.value = updated.searchKeyMasked;
         hasSearchKey.value = updated.hasSearchKey;
         searchEndpoint.value = updated.searchEndpoint;
-        if (updated.searchProvider) searchProvider.value = updated.searchProvider;
+        if (updated.searchProvider) searchProvider.value = normalizeProvider(updated.searchProvider);
         baseProfile.value = {
             model: updated.model,
             apiEndpoint: updated.apiEndpoint,

@@ -13,16 +13,16 @@ const DEFAULT_AVATAR: AvatarConfig = {
   src: "avatar://kirari/frames.json",
 };
 
+// require('electron') 拿到的模块一定带 ipcRenderer，这里标成必选；
+// 之前写成可选，导致每个 `w.require("electron").ipcRenderer.invoke(...)` 都报 TS2532。
 type ElectronApi = {
-  ipcRenderer?: {
+  ipcRenderer: {
     invoke: (channel: string, ...args: unknown[]) => Promise<unknown>;
     on: (channel: string, listener: (...args: unknown[]) => void) => void;
   };
-  importAvatarZip?: () => Promise<unknown>;
-  rescanAvatars?: () => Promise<unknown>;
-  openAvatarsFolder?: () => Promise<void>;
 };
 
+// 与 electron/preload.ts 暴露的 windowApi 保持一致（方法名缺一个就会报 TS2339）。
 function getWindow() {
   return window as unknown as {
     windowApi?: {
@@ -30,6 +30,9 @@ function getWindow() {
       getCustomAvatars?: () => Promise<unknown>;
       setAvatar?: (cfg: AvatarConfig) => Promise<unknown>;
       importAvatarFolder?: () => Promise<unknown>;
+      importAvatarZip?: () => Promise<unknown>;
+      rescanAvatars?: () => Promise<unknown>;
+      openAvatarsFolder?: () => Promise<void>;
       onAvatarChanged?: (cb: (payload: unknown) => void) => void;
     };
     require?: (mod: string) => ElectronApi;
@@ -112,7 +115,8 @@ export const useAvatarStore = defineStore("avatar", () => {
     // 回退到默认形象或列表第一个，避免设置页下拉框显示空白。
     const allAvatars = list.value;
     const validIds = new Set(allAvatars.map((a) => a.id));
-    if (allAvatars.length > 0 && !validIds.has(current.value.id)) {
+    // AvatarConfig.id 是可选的（老数据可能没有），查表前先兜底成空串。
+    if (allAvatars.length > 0 && !validIds.has(current.value.id ?? "")) {
       const fallback =
         allAvatars.find((a) => a.id === DEFAULT_AVATAR.id) ||
         allAvatars[0] ||

@@ -1,15 +1,19 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useChatSocket } from '../../composables/useChatSocket'
 import { usePetStore } from '../../stores/pet'
 import { useAvatarStore } from '../../stores/avatar'
 import type { PetEmotion } from '../../stores/chat'
 import type { AvatarState } from '../../pet/avatar/types'
+import type { BridgeIpcRenderer } from '../../types/electronBridge'
 import PetAvatar from './PetAvatar.vue'
 import PetBubble from './PetBubble.vue'
 import PetQuickMenu from './PetQuickMenu.vue'
 import { getActiveRenderer } from '../../pet/avatar/types'
-type DesktopPetChannel =
+// 本窗口会发出的频道（收窄成联合类型，写错频道名编译期就能发现）。
+// 注意与下面 PetIpc 配套：全局桥是 string，这里只在本文件内收窄。
+type DesktopPetSendChannel =
   | 'desktop-pet:drag-start'
   | 'desktop-pet:drag-move'
   | 'desktop-pet:drag-end'
@@ -17,27 +21,20 @@ type DesktopPetChannel =
   | 'desktop-pet:show-context-menu'
   | 'desktop-pet:open-settings'
   | 'desktop-pet:hide'
+  | 'desktop-pet:reset-position'
   | 'desktop-pet:set-ignore-mouse'
+  | 'desktop-pet:diag'
 
-type DesktopPetIpc = {
-  send(channel: DesktopPetChannel, ...args: unknown[]): void
-  on(channel: string, listener: (...args: unknown[]) => void): void
-  off(channel: string, listener: (...args: unknown[]) => void): void
-}
-
-type ElectronApi = {
-  ipcRenderer: DesktopPetIpc
-}
-
-declare global {
-  interface Window {
-    require?: (module: 'electron') => ElectronApi
-  }
+type PetIpc = Omit<BridgeIpcRenderer, 'send'> & {
+  send(channel: DesktopPetSendChannel, ...args: unknown[]): void
 }
 
 const petStore = usePetStore()
 const avatarStore = useAvatarStore()
-const { isVisible, message, setMessage } = petStore
+// 必须走 storeToRefs：pet store 是 setup store，直接解构拿到的是解包后的值
+// （isVisible 是 boolean 而非 Ref），`isVisible.value` 恒为 undefined —— 气泡永远不显示。
+const { isVisible, message } = storeToRefs(petStore)
+const { setMessage } = petStore
 const {
   bubbleMessage,
   bubbleInteractive,
@@ -49,7 +46,7 @@ const {
   chatWindowOpen,
 } = useChatSocket()
 const electron = window.require?.('electron')
-const ipcRenderer = electron?.ipcRenderer
+const ipcRenderer = electron?.ipcRenderer as PetIpc | undefined
 
 /* ===================== 状态机调度器 ===================== */
 // 优先级：说话 > 情绪类(excited/happy/sad/surprised) > 交互类(wave/bow/nod/shake) > 思考 > 害羞 > 瞌睡 > 眨眼/伸懒腰 > 待机。
@@ -277,7 +274,6 @@ function onChatOpened() {
 /* ===================== 打瞌睡 ===================== */
 // 闲置 3~5 分钟无交互进入；任意交互立即打断回 idle（并小概率惊喜跳跃）。
 let sleepTimer: ReturnType<typeof setTimeout> | null = null
-let lastActivity = Date.now()
 
 function scheduleSleepy() {
   if (sleepTimer) clearTimeout(sleepTimer)
@@ -292,7 +288,6 @@ function scheduleSleepy() {
 }
 
 function markActivity() {
-  lastActivity = Date.now()
   scheduleSleepy()
   if (avatarStore.currentState === 'sleepy') {
     avatarStore.setState('idle') // 惊醒
@@ -599,8 +594,10 @@ function evaluateClickThrough(clientX: number, clientY: number) {
 }
 
 // 接收主进程广播的光标位置（已是相对桌宠窗口的视口坐标，与 getBoundingClientRect 同坐标系）。
-function onCursorPos(_e: unknown, pt: { x: number; y: number }) {
-  evaluateClickThrough(pt.x, pt.y)
+// listener 形参是 unknown，这里不能收窄（逆变会报 TS2345），内部再做类型断言。
+function onCursorPos(_e: unknown, pt: unknown) {
+  const p = pt as { x: number; y: number }
+  evaluateClickThrough(p.x, p.y)
 }
 </script>
 

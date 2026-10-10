@@ -71,9 +71,7 @@ export class SpriteRenderer implements AvatarRenderer {
     private last = 0;
     private raf = 0;
     private running = false;
-    private scale = 1;
     private baseDir = "";
-    private configSrc = "";
 
     async load(config: AvatarConfig): Promise<void> {
         // ---- 加载 frames.json：先尝试 fetch（自定义协议），失败则走 IPC 兜底 ----
@@ -94,7 +92,6 @@ export class SpriteRenderer implements AvatarRenderer {
             json = (await res.json()) as SpriteManifest;
         }
 
-        this.configSrc = config.src;
         // sheet 相对 frames.json 所在目录解析
         const idx = config.src.lastIndexOf("/");
         this.baseDir = idx >= 0 ? config.src.slice(0, idx + 1) : "";
@@ -140,8 +137,8 @@ export class SpriteRenderer implements AvatarRenderer {
             this.sheets[key] = arr;
         }
 
-        if (typeof config.scale === "number" && config.scale > 0)
-            this.scale = config.scale;
+        // 注意：精灵形象的 scale 目前不参与绘制（帧尺寸由 frames.json 决定），
+        // 与 Live2DRenderer 一致，setScale 保留接口但为空实现。
     }
 
     /** 双通道加载 manifest：fetch 优先，失败则 IPC 兜底 */
@@ -237,14 +234,18 @@ export class SpriteRenderer implements AvatarRenderer {
         try {
             const w = window as unknown as {
                 require?: (m: string) => {
-                    ipcRenderer: { invoke: (...a: unknown[]) => unknown };
+                    ipcRenderer: {
+                        invoke: (ch: string, ...a: unknown[]) => Promise<unknown>;
+                    };
                 };
             };
             if (w.require) return w.require("electron").ipcRenderer;
             // 部分窗口通过 windowApi 暴露（preload 注入）
             const api = w as unknown as {
                 electronApi?: {
-                    ipcRenderer: { invoke: (...a: unknown[]) => unknown };
+                    ipcRenderer: {
+                        invoke: (ch: string, ...a: unknown[]) => Promise<unknown>;
+                    };
                 };
             };
             if (api.electronApi) return api.electronApi.ipcRenderer;
@@ -284,9 +285,8 @@ export class SpriteRenderer implements AvatarRenderer {
         this.acc = 0;
     }
 
-    setScale(scale: number): void {
-        this.scale = scale > 0 ? scale : 1;
-        this.draw();
+    setScale(_scale: number): void {
+        /* 精灵形象按素材原尺寸绘制，缩放交由窗口/画布尺寸处理 */
     }
 
     // 返回各状态动画时长（ms）：一次性动画 = 所有变体中最长的 frames/fps，loop 状态 = 0。

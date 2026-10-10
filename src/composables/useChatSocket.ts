@@ -1,5 +1,6 @@
 import { storeToRefs } from 'pinia'
 import { useChatStore, type ChatStateSnapshot } from '../stores/chat'
+import type { BridgeIpcRenderer } from '../types/electronBridge'
 
 type DesktopPetChannel =
   | 'chat:send-message'
@@ -18,13 +19,10 @@ type DesktopPetIpc = {
   on(channel: DesktopPetEventChannel, listener: (...args: unknown[]) => void): void
 }
 
-declare global {
-  interface Window {
-    require?: (module: 'electron') => { ipcRenderer: DesktopPetIpc }
-  }
-}
-
-const ipcRenderer = window.require?.('electron').ipcRenderer
+// Window.require 的全局声明统一在 src/types/electronBridge.ts，此处只做频道收窄。
+const ipcRenderer = window.require?.('electron').ipcRenderer as
+  | (Omit<BridgeIpcRenderer, 'send' | 'invoke'> & DesktopPetIpc)
+  | undefined
 let initialized = false
 
 // 把主进程推送的状态桥接到 Pinia store；跨窗口的“对话框打开”也走这里。
@@ -32,8 +30,10 @@ function ensureInitialized() {
   if (initialized || !ipcRenderer) return
 
   const store = useChatStore()
-  ipcRenderer.on('chat:state', (_event: unknown, nextState: ChatStateSnapshot) => {
-    store.applyState(nextState)
+  // 回调签名是 (...args: unknown[])，参数不能在这里收窄成具体类型，
+  // 否则与 listener 的 unknown 形参逆变冲突（TS2345）。
+  ipcRenderer.on('chat:state', (_event: unknown, nextState: unknown) => {
+    store.applyState(nextState as ChatStateSnapshot)
   })
   ipcRenderer.on('chat:open-changed', (_event: unknown, open: unknown) => {
     store.setChatWindowOpen(open === true)

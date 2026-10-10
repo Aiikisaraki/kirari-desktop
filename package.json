@@ -11,7 +11,7 @@
         "write-edition-nsh": "node scripts/write-edition-nsh.cjs integrated",
         "pack": "npm run write-edition-nsh && electron-builder --dir --config electron-builder.yml",
         "dist": "npm run build && npm run write-edition-nsh && electron-builder --config electron-builder.yml --publish=never",
-        "typecheck": "vue-tsc --noEmit -p tsconfig.app.json"
+        "typecheck": "vue-tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json"
     },
     "dependencies": {
         "@types/katex": "^0.16.8",

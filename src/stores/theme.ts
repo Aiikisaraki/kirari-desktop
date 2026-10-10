@@ -22,7 +22,7 @@ const DEFAULT_THEME: ThemeName = "aurora-glass";
 const ALLOWED: ThemeName[] = ["aurora-glass", "pet-pink", "mint-soft", "lavender-mist"];
 
 type ElectronApi = {
-  ipcRenderer?: {
+  ipcRenderer: {
     invoke: (channel: string, ...args: unknown[]) => Promise<unknown>;
     on: (channel: string, listener: (...args: unknown[]) => void) => void;
   };

@@ -10,11 +10,9 @@ export class ImageRenderer implements AvatarRenderer {
   private canvas: HTMLCanvasElement | null = null;
   private ctx: CanvasRenderingContext2D | null = null;
   private img: HTMLImageElement | null = null;
-  private config: AvatarConfig | null = null;
   private scale = 1;
 
   async load(config: AvatarConfig): Promise<void> {
-    this.config = config;
     if (typeof config.scale === "number" && config.scale > 0) {
       this.scale = config.scale;
     }
@@ -73,7 +71,6 @@ export class ImageRenderer implements AvatarRenderer {
     this.ctx = null;
     this.canvas = null;
     this.img = null;
-    this.config = null;
     if (getActiveRenderer() === this) setActiveRenderer(null);
   }
 

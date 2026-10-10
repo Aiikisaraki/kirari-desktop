@@ -42,14 +42,14 @@ function escapeForRegex(str: string): string {
  */
 function protectCodeBlocks(text: string, codeSlots: ProtectedSlot[]): string {
     //  fenced code blocks：保留 ``` 和语言标记
-    text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (match, lang, content) => {
+    text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_match, lang, content) => {
         const id = nextSlotId();
         codeSlots.push({ id, html: htmlEscape(content) });
         return `\`\`\`${lang}\n${id}\n\`\`\``;
     });
 
     // 行内代码：保留首尾反引号
-    text = text.replace(CODE_INLINE_RE, (match, content) => {
+    text = text.replace(CODE_INLINE_RE, (_match, content) => {
         const id = nextSlotId();
         codeSlots.push({ id, html: htmlEscape(content) });
         return `\`${id}\``;

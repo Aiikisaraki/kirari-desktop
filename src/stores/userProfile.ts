@@ -6,7 +6,7 @@ import { ref } from "vue";
 // 选中图片由主进程复制到本地并持久化到 pet-client.config.json。
 
 type ElectronApi = {
-  ipcRenderer?: {
+  ipcRenderer: {
     invoke: (channel: string, ...args: unknown[]) => Promise<unknown>;
     on: (channel: string, listener: (...args: unknown[]) => void) => void;
   };

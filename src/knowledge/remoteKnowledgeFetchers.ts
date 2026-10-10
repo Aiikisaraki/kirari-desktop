@@ -68,9 +68,12 @@ async function fetchMediaWiki(
         const contentUrl = `${apiUrl}?action=query&format=json&prop=extracts&exintro=1&explaintext=1&titles=${encodeURIComponent(title)}`;
         try {
             const cr = await fetch(contentUrl, { signal });
-            const cd = await cr.json();
-            const pages = cd.query?.pages || {};
-            const page = Object.values(pages)[0] as any;
+            // node 类型下 Response.json() 返回 unknown，这里显式断言出 MediaWiki 的结构。
+            const cd = (await cr.json()) as
+                | { query?: { pages?: Record<string, { extract?: string }> } }
+                | null;
+            const pages = cd?.query?.pages || {};
+            const page = Object.values(pages)[0];
             const extract = page?.extract || snippets[i] || '';
             results.push({
                 text: `【${title}】${extract.slice(0, 500)}`,
