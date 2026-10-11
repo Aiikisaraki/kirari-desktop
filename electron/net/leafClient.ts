@@ -14,16 +14,15 @@
 import WebSocket from "ws";
 import {
     CONNECT_TIMEOUT_MS,
+    HANDSHAKE_TIMEOUT_MS,
     HEARTBEAT_INTERVAL_MS,
     HEARTBEAT_TIMEOUT_MS,
     PROTOCOL_VERSION,
-    parseServerFrame,
     SeqTracker,
 } from "./protocol";
-import type { MembersMessage, RelayResult, RelayBusy, RelayBackfill, ServerFrame, ConfigPush, SyncField, Hello, HelloAck } from "./protocol";
+import type { MembersMessage, RelayResult, RelayBusy, RelayBackfill, ConfigPush, SyncField, HelloAck } from "./protocol";
 import { NET_ENABLED, NET_SECRET, deriveKey, seal, open, ReplayGuard } from "./secure";
 import { randomBytes } from "crypto";
-import { randomToken } from "./pairingCode";
 
 export type LeafStatus = "idle" | "connecting" | "paired" | "connected" | "fallback";
 
@@ -79,15 +78,15 @@ export class LeafClient {
     private connectTimer: ReturnType<typeof setTimeout> | null = null;
     /** 会话密钥（握手后由 密钥+salt 派生得到），握手前为 null */
     private sessionKey: Buffer | null = null;
-    /** 主机给的 salt */
-    private hostSalt = "";
-    /** 加密帧自增序号（防重放） */
+    /**
+     * 加密帧自增序号（防重放）。
+     * 注：握手时拿到的 salt / 主机 id / 主机名都不在这里存 —— salt 只在派生
+     * 会话密钥那一刻用，重连会重新握手；主机名给界面看的是 state.hostDisplayName
+     * （连接码里带过来的），跟握手无关。原先存了三个字段却没人读。
+     */
     private txSeq = 0;
     /** 收到帧的重放窗口 */
     private rxGuard = new ReplayGuard();
-    /** 主机标识与名字（握手时拿到） */
-    private hostId = "";
-    private hostName = "";
     /** 首次配对用的连接码（握手完成后发出一次即清空） */
     private pendingToken = "";
     /** 配对结果：由 attachMessage 的 pair_ok / pair_fail 分支落定，pair() 轮询取走 */
@@ -181,10 +180,7 @@ export class LeafClient {
         if (envelope?.type === "hello_ack") {
             const ack = envelope as unknown as HelloAck;
             if (typeof ack.salt !== "string" || !ack.salt) return null;
-            this.hostSalt = ack.salt;
             this.sessionKey = deriveKey(NET_SECRET, ack.salt);
-            this.hostId = String(ack.hostId || "");
-            this.hostName = String(ack.hostName || "");
             this.events.onLog?.(`[net] 密钥协商完成（主机盐 ${ack.salt.slice(0, 8)}…）`);
             return { type: "handshake_ok" };
         }
@@ -206,8 +202,18 @@ export class LeafClient {
         return envelope as Record<string, unknown>;
     }
 
+    /** 武装握手超时（复用 connectTimer 这个槽位：同一时刻只会有一个超时在手）。 */
+    private armHandshakeTimeout(ws: WebSocket, gen: number): void {
+        this.clearConnectTimeout();
+        this.connectTimer = setTimeout(
+            () => this.handshakeTimeout(ws, gen),
+            HANDSHAKE_TIMEOUT_MS,
+        );
+    }
+
     /** 握手之前没收到任何东西时的超时（主机不回 hello_ack）。 */
     private handshakeTimeout(ws: WebSocket, gen: number): void {
+        this.connectTimer = null; // 槽位已触发，清掉以维持「非 null ⟺ 有超时在等」
         if (gen !== this.connGeneration || this.sessionKey) return;
         this.events.onLog?.("[net] 密钥协商超时");
         try {
@@ -237,7 +243,9 @@ export class LeafClient {
                 this.fallback("和主机断开了");
             }
         });
-        ws.on("error", (err: any) => {
+        // 关掉心跳即可：ws 的 error 之后必然跟一个 close，
+        // 回退统一由上面的 close 分支负责（避免同一件事提示两遍）。
+        ws.on("error", (_err: unknown) => {
             this.stopHeartbeat();
         });
     }
@@ -311,6 +319,11 @@ export class LeafClient {
             return;
         }
         this.ws = ws;
+        // 建连超时必须**在 new WebSocket 之后立刻**武装：此刻 readyState 是
+        // CONNECTING，被静默丢弃的 SYN 才会被这个定时器兜住。
+        // （原先唯一的调用点在下面 open 回调里，那时早就 OPEN 了，定时器一进来
+        //  就 `readyState !== 0` 直接返回 —— 等于这个保护从没生效过。）
+        this.armConnectTimeout(ws, gen);
 
         ws.on("open", () => {
             // ⚠️ 握手未完成前不要直接发 pair —— 主机只收加密帧，
@@ -318,10 +331,12 @@ export class LeafClient {
             this.clearConnectTimeout();
             this.setStatus("connecting", "正在与主机协商密钥");
             this.sessionKey = null;
-            this.hostSalt = "";
             this.txSeq = 0;
             this.rxGuard.reset();
-            this.armConnectTimeout(ws, gen);
+            // 已经是 OPEN 了，接下来等的是 hello_ack —— 换成握手超时。
+            // （原先这里 re-arm 的是建连超时，而它一进来就 readyState !== 0 直接
+            //  返回，等于握手阶段没有任何超时保护，见 protocol.ts 的说明。）
+            this.armHandshakeTimeout(ws, gen);
             // 第一帧永远是明文 hello：主机用它回 salt，两边各自算出同一个会话密钥。
             // 密钥本身不上网络 —— 抓到包的人看不到它。
             this.sendRaw(ws, {
@@ -350,7 +365,10 @@ export class LeafClient {
      */
     private attachMessage(ws: WebSocket, gen: number): void {
         ws.on("message", (data: unknown) => {
-            // 过期连接的迟到帧：忽略，否则会污染当前状态
+            // 过期连接的迟到帧：忽略，否则会污染当前状态（重连后旧 socket 缓存的
+            // 帧会重置新连接的半开计时、甚至覆盖状态）。
+            // 注释一直这么写，但 gen 以前只是传进来没用上，等于没校验。
+            if (gen !== this.connGeneration) return;
             // readFrame 负责解密 + 防重放；握手应答走明文，其余是信封
             const frame = this.readFrame(String(data));
             if (!frame) return;
@@ -360,6 +378,7 @@ export class LeafClient {
 
             // ── 握手完成：现在才发身份、启动心跳 ──
             if (frame.type === "handshake_ok") {
+                this.clearConnectTimeout(); // 撤销握手超时，别在正常连上之后把它掐了
                 this.setStatus("connected");
                 this.sendFrame(ws, {
                     type: "pair",

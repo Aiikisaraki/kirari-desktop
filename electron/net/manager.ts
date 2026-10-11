@@ -31,7 +31,7 @@ import {
     filterWhitelisted,
     DEFAULT_EXPIRY,
 } from "./netStore";
-import type { NetState, NetRole, LeafCredential } from "./netStore";
+import type { NetState, NetRole } from "./netStore";
 import {
     generatePairingCode,
     parsePairingCode,
@@ -39,7 +39,7 @@ import {
     describeRemaining,
     randomToken,
 } from "./pairingCode";
-import type { PairingCode, PairingRecord, ExpiryKey } from "./pairingCode";
+import type { PairingCode, ExpiryKey } from "./pairingCode";
 import { NET_PORT, PROTOCOL_VERSION, SYNC_FIELDS } from "./protocol";
 import type { RelayResult, RelayBusy, RelayBackfill, ConfigPush, SyncField } from "./protocol";
 import { RelayRouter } from "./relayRouter";

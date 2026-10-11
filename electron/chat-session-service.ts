@@ -102,7 +102,11 @@ function downscaleImageDataUrl(dataUrl: string): string {
             width: Math.max(1, Math.round(size.width * scale)),
             height: Math.max(1, Math.round(size.height * scale)),
         });
-        const out = resized.toDataURL("image/jpeg", IMAGE_JPEG_QUALITY);
+        // ⚠️ 别用 toDataURL("image/jpeg", quality)：Electron 的 toDataURL 只认
+        //    { scaleFactor }，多传的参数被忽略，实际吐出来的是 PNG（无损、大）。
+        //    要真的压成 JPEG 得走 toJPEG(quality 0~100)，它是下面这种 Buffer。
+        const jpeg = resized.toJPEG(Math.round(IMAGE_JPEG_QUALITY * 100));
+        const out = `data:image/jpeg;base64,${jpeg.toString("base64")}`;
         if (!out) return dataUrl;
         // 罕见情况：小尺寸高噪点图压缩后反而更大，保留更小者
         return out.length >= dataUrl.length ? dataUrl : out;

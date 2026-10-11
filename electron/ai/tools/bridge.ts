@@ -12,12 +12,6 @@ import type { ToolResultSink } from "../types";
 /** 前端工具执行器：由主进程实现，负责真正跑 MCP 工具 / skill。 */
 export type FrontendToolInvoker = (name: string, args: Record<string, unknown>) => Promise<unknown>;
 
-/** 一次挂起的前端工具调用。 */
-type PendingCall = {
-    resolve: (value: string) => void;
-    reject: (reason: Error) => void;
-    timer: ReturnType<typeof setTimeout>;
-};
 
 const FRONTEND_TOOL_TIMEOUT_MS = 30000;
 

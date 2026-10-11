@@ -231,7 +231,6 @@ async function callStdioMcp(cfg: McpServerConfig): Promise<Array<{ name: string;
       const child = spawn(cfg.command!, cfg.args ?? [], { stdio: ["pipe", "pipe", "pipe"] });
       let buf = "";
       const tools: Array<{ name: string; description?: string; inputSchema?: unknown }> = [];
-      let step = 0;
       const send = (obj: unknown) => child.stdin.write(JSON.stringify(obj) + "\n");
       child.stdout.on("data", (d: Buffer) => {
         buf += d.toString();
@@ -253,7 +252,7 @@ async function callStdioMcp(cfg: McpServerConfig): Promise<Array<{ name: string;
           }
         }
       });
-      child.on("error", (e) => reject(e));
+      child.on("error", (e: Error) => reject(e));
       send({
         jsonrpc: "2.0",
         id: 1,

@@ -13,12 +13,11 @@ import { WebSocketServer, type WebSocket } from "ws";
 import * as os from "node:os";
 import { NET_PORT, PROTOCOL_VERSION, parseClientFrame } from "./protocol";
 import type { Hello, HelloAck } from "./protocol";
-import { NET_ENABLED, NET_SECRET, deriveKey, newSalt, seal, open, safeEqual, ReplayGuard } from "./secure";
-import type { MembersMessage, PairResponse, PongMessage, HostShutdown, RelayRequest, RelayBackfill, RelayBusy, ConfigReport, ConfigPush, ClientFrame } from "./protocol";
+import { NET_ENABLED, NET_SECRET, deriveKey, newSalt, seal, open, ReplayGuard } from "./secure";
+import type { MembersMessage, PairResponse, PongMessage, HostShutdown, RelayRequest, RelayBackfill, RelayBusy, ConfigReport, ClientFrame } from "./protocol";
 import { filterWhitelisted } from "./netStore";
 import type { SyncField } from "./protocol";
 import { randomToken, verifyPairing } from "./pairingCode";
-import type { PairingRecord } from "./pairingCode";
 import type { NetState, LeafCredential } from "./netStore";
 import { rememberLeaf, removeMember } from "./netStore";
 
@@ -369,7 +368,8 @@ export class HostServer {
          */
         const handleHello = (hello: Hello): void => {
             const deviceId = String(hello.deviceId || "").trim();
-            const deviceName = String(hello.deviceName || "未命名设备").trim().slice(0, 24);
+            // hello 里的 deviceName 不用取 —— 真正的设备名在随后的加密 pair 帧里，
+            // 那边会校验并入库（这里原先取了一次却没人用，是死代码）。
             if (!deviceId) {
                 try {
                     ws.close(1008, "bad hello");

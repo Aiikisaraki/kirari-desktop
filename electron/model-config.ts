@@ -44,7 +44,9 @@ export function writeModelConfigFile(patch: Partial<ModelConfigFile>): ModelConf
     for (const k of Object.keys(patch) as (keyof ModelConfigFile)[]) {
         const v = patch[k];
         if (typeof v !== "string") continue;
-        if (v.trim() !== "") next[k] = v.trim();
+        // k 是 keyof 联合，直接索引赋值时 TS 会把目标类型收成所有字段的交集
+        // （string & boolean & undefined → undefined），只能显式断言。
+        if (v.trim() !== "") (next as Record<string, string>)[k] = v.trim();
         else delete (next as Partial<ModelConfigFile>)[k];
     }
     try {

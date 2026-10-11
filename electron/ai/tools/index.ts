@@ -325,7 +325,8 @@ async function tavilySearch(
             .slice(0, 3)
             .map((u) => `![相关图片](${u})`)
             .join("\n");
-        return `搜索结果：\n${items || "（无结果）"}${imgs ? "\n\n" + imgs : ""}`;
+        // answer 是搜索源给的摘要，之前算出来却没拼进结果（白白丢掉）。
+        return `搜索结果：\n${answer}${items || "（无结果）"}${imgs ? "\n\n" + imgs : ""}`;
     } catch (e) {
         return `搜索出错：${e instanceof Error ? e.message : String(e)}`;
     }
@@ -358,6 +359,7 @@ async function searxngSearch(
             .slice(0, 3)
             .map((u) => `![相关图片](${u})`)
             .join("\n");
+        // SearXNG 的 JSON 结果里没有 answer 字段，只有 results，故这里无摘要可拼。
         return `搜索结果：\n${items || "（无结果）"}${imgs ? "\n\n" + imgs : ""}`;
     } catch (e) {
         return `搜索出错：${e instanceof Error ? e.message : String(e)}`;

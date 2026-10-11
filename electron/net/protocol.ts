@@ -29,6 +29,21 @@ export const HEARTBEAT_TIMEOUT_MS = 5000;
 export const CONNECT_TIMEOUT_MS = 8000;
 
 /**
+ * 握手超时：socket 已经连上、但主机迟迟不回 hello_ack 最多等这么久。
+ *
+ * 和建连超时是**两件事**，不能合并：
+ *   - 建连超时管的是 CONNECTING 阶段（连不上）
+ *   - 握手超时管的是已 OPEN、hello 发出去但没回音
+ *     （主机密钥不一致把它静默丢了 / 主机卡住 / 中间设备丢包）
+ *
+ * ⚠️ 之前这个保护是断的：open 之后又重新武装了「建连超时」，而那个定时器一进来
+ *    就 `if (ws.readyState !== 0) return` —— 此时 readyState 早就是 OPEN 了，
+ *    于是直接返回、什么也不做。症状是叶子永远停在「正在与主机协商密钥」，
+ *    既不成功也不回退，正是历史上修过的「一直硬卡着」的同一类问题。
+ */
+export const HANDSHAKE_TIMEOUT_MS = 8000;
+
+/**
  * 配对码格式版本。用于将来扩展字段时区分旧码。
  * 形如：kirari://connect?host=192.168.57.23&port=19760&token=xxx&name=Aki-台式机&exp=1789xxxxxx&v=1
  */

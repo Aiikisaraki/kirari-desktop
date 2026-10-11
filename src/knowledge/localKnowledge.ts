@@ -38,6 +38,15 @@ export interface RetrievedPassage {
     score: number;
     tier: string;
     priority: number;
+    /**
+     * 来源链接。本地条目用它的 source（导入时记下的原始 URL），
+     * 远程源用抓取地址。
+     *
+     * 之前没有这个字段，而 chat-session-service 那边一直在读 `r.url` 想把它
+     * 透给内核 —— 类型对不上、运行拿到的永远是 undefined，等于私人知识库的
+     * 「出处」一直丢着。
+     */
+    url?: string;
 }
 
 export class LocalKnowledge {
@@ -161,6 +170,7 @@ export class LocalKnowledge {
                     score: 1 / (i + 1),
                     tier: 'A',
                     priority: 5,
+                    url: r.source, // 导入时记下的原始 URL（可能没有）
                 }))
             );
         }
@@ -180,6 +190,7 @@ export class LocalKnowledge {
                         score: f.score * 0.9,  // 远程源略低于本地
                         tier: 'A',
                         priority: src.priority || 6,
+                        url: src.url, // 抓取地址即出处
                     }));
                 } catch {
                     return [];

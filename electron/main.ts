@@ -1,7 +1,7 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, protocol, screen, shell, Tray } from "electron";
+import type { OpenDialogOptions, ProtocolResponse } from "electron";
 import fs from "fs";
 import path from "path";
-import { createHash } from "crypto";
 
 // 将自定义协议注册为「标准安全协议」，使渲染进程可以直接用
 // fetch() / new Image() / CSS url() 等方式加载 avatar:// / pet:// 资源，
@@ -15,11 +15,10 @@ import extract from "extract-zip";
 import { ChatSessionService, type ChatStateSnapshot } from "./chat-session-service";
 import { AdapterManager } from "./adapter/adapter-manager";
 import type { AdapterConfig, AdapterStatus } from "./adapter/types";
-import { initEngine, shutdownEngine, chat as engineChat, registerFrontendTools, registerPrivateKnowledge } from "./ai/engine";
+import { initEngine, shutdownEngine, chat as engineChat } from "./ai/engine";
 import { NetManager } from "./net/manager";
 import { setupNetIpc } from "./net/ipc";
-import type { NetSnapshot, HostExecutor } from "./net/manager";
-import type { ExpiryKey, PairingCode } from "./net/pairingCode";
+import type { HostExecutor } from "./net/manager";
 import type { RelayBackfill } from "./net/protocol";
 import { saveMessage as saveChatMessage, LOCAL_UID } from "./ai/db/storage";
 import * as frontendTools from "./frontend-tools";
@@ -52,6 +51,16 @@ type AvatarConfig = {
   builtin?: boolean;
 };
 type AvatarMeta = AvatarConfig & { id: string; name: string; builtin?: boolean };
+
+// 默认（内置）皮肤在 userData/avatars 下的文件夹名。
+//
+// ⚠️ 必须在 DEFAULT_AVATAR 之前声明。原先它被放在 330 行开外（getAvatarsRoot 旁边），
+//    而 DEFAULT_AVATAR 是模块顶层常量、构造时就要读它 —— 打包器把 const 降级成 var
+//    后不会抛错，于是 DEFAULT_AVATAR 悄悄变成了
+//      id = "custom-undefined"、src = "avatar://undefined/frames.json"
+//    结果：形象兜底/重置都会写入这个错值，migrateLegacyAvatar 里
+//    `saved.src === DEFAULT_AVATAR.src` 的比较也永远匹配不上（老用户迁移失效）。
+const DEFAULT_SKIN_DIR = "kirari";
 
 const DEFAULT_AVATAR: AvatarConfig = {
   id: "custom-" + DEFAULT_SKIN_DIR,
@@ -328,8 +337,7 @@ function getAvatarsRoot(): string {
   return path.join(app.getPath("userData"), "avatars");
 }
 
-// 默认（内置）皮肤在 userData/avatars 下的文件夹名。
-const DEFAULT_SKIN_DIR = "kirari";
+// （DEFAULT_SKIN_DIR 已上移到文件顶部、DEFAULT_AVATAR 之前 —— 见那里的说明。）
 
 // 形象目录文件系统监听器：用户/外部程序直接向 userData/avatars 增删形象文件夹时，
 // 主进程自动重新扫描并广播 avatar:changed，设置页无需手动刷新即可看到新形象。
@@ -629,14 +637,6 @@ let localKnowledge: LocalKnowledge | null = null;
 /** 组网管理器（阶段 2-4）：主机/叶子两种角色，随时可换 */
 let netManager: NetManager | null = null;
 
-async function readApiResponse(response: Response) {
-  const text = await response.text();
-  try {
-    return text ? JSON.parse(text) as Record<string, unknown> : {};
-  } catch {
-    return { message: `后端返回了非 JSON 响应（HTTP ${response.status}）` };
-  }
-}
 
 // 统一「带超时」的 HTTP 请求封装（避免后端无响应时无限挂起）。实现见 ./http。
 import { fetchWithTimeout } from "./http";
@@ -744,11 +744,18 @@ ipcMain.handle("user-avatar:get", () => clientConfig.userAvatar || null);
 
 // 选择图片 → 复制到 userData/user-avatar/ → 持久化 → 广播。返回协议地址或 null。
 ipcMain.handle("user-avatar:pick", async () => {
-  const result = await dialog.showOpenDialog(BrowserWindow.getFocusedWindow() ?? undefined, {
+  // showOpenDialog 的两个重载分别是 (window, options) 和 (options)，
+  // 传 (undefined, options) 匹配到第一个重载、类型不合法；没有聚焦窗口时
+  // （比如从托盘打开）应当走无窗口那个重载。
+  const pickerOptions: OpenDialogOptions = {
     title: "选择你的头像",
     properties: ["openFile"],
     filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] }],
-  });
+  };
+  const focusedWindow = BrowserWindow.getFocusedWindow();
+  const result = focusedWindow
+    ? await dialog.showOpenDialog(focusedWindow, pickerOptions)
+    : await dialog.showOpenDialog(pickerOptions);
   if (result.canceled || !result.filePaths[0]) return null;
   const src = result.filePaths[0];
   const dir = path.join(app.getPath("userData"), "user-avatar");
@@ -962,7 +969,9 @@ function syncCurrentAvatarFromScan(): void {
         // 旧硬编码值直接丢弃；否则以皮肤声明为准（缺省则沿用当前值）
         if (isLegacyHardcoded) {
           if (freshVal !== cur.chatAvatar) {
-            next.chatAvatar = freshVal;
+            // key 是联合类型，TS 不会因为进了 key === "chatAvatar" 分支就收窄
+            // freshVal 的类型，这里显式断言（此分支下它确实是 string | undefined）。
+            next.chatAvatar = freshVal as string | undefined;
             changed = true;
           }
           continue;
@@ -1490,7 +1499,7 @@ function persistWindowPosition(win: PetWindow) {
 
 // 校验坐标是否落在任一显示器的可见区域内（左上角在某块屏幕 bounds 内即可），
 // 防止多显示器/分辨率变化后持久化坐标跑到屏幕外导致桌宠"消失"。
-function isPositionOnScreen(x: number, y: number, w: number, h: number): boolean {
+function isPositionOnScreen(x: number, y: number, _w: number, _h: number): boolean {
   return screen.getAllDisplays().some((d) => {
     const b = d.bounds;
     return x >= b.x && x < b.x + b.width && y >= b.y && y < b.y + b.height;
@@ -1546,19 +1555,6 @@ function ensureChatSessionService() {
   return chatSessionService;
 }
 
-// 按当前部署模式 / 登录态重建聊天服务并立即连接。
-// token:login 登录成功后必须调用：旧连接已被放弃，若不重建则聊天窗口停留在断开态，
-// 直到用户手动发消息才惰性触发连接（即“登录后不自动连接”的旧问题）。
-function reconnectChatSession(): void {
-  if (chatSessionService) {
-    chatSessionService.dispose();
-    chatSessionService = null;
-    chatServiceUserid = null;
-  }
-  // 身份（模式/服务端/uid）可能已变化，重算隔离路径，避免加载到别的身份的聊天记录。
-  chatSessionStoragePath = resolveChatStoragePath();
-  void ensureChatSessionService().init(chatSessionStoragePath);
-}
 
 function ensurePetWindow() {
   if (!petWindow || petWindow.isDestroyed()) {
@@ -2113,7 +2109,7 @@ app.whenReady().then(async () => {
     try {
       const rel = decodeURIComponent(request.url.replace("pet://", ""));
       const assetDir = getOfficialAvatarsSource();
-      callback({ filePath: path.join(assetDir, rel) });
+      callback({ filePath: path.join(assetDir, rel) } as unknown as ProtocolResponse);
     } catch {
       callback({ error: -100 });
     }
@@ -2123,7 +2119,7 @@ app.whenReady().then(async () => {
   protocol.registerFileProtocol("avatar", (request, callback) => {
     try {
       const rel = decodeURIComponent(request.url.replace("avatar://", ""));
-      callback({ filePath: path.join(app.getPath("userData"), "avatars", rel) });
+      callback({ filePath: path.join(app.getPath("userData"), "avatars", rel) } as unknown as ProtocolResponse);
     } catch {
       callback({ error: -100 });
     }
@@ -2135,7 +2131,7 @@ app.whenReady().then(async () => {
     try {
       const rel = decodeURIComponent(request.url.replace("useravatar://", ""));
       const safe = rel.replace(/^(\.\.[/\\])+/, ""); // 防目录穿越
-      callback({ filePath: path.join(app.getPath("userData"), "user-avatar", safe) });
+      callback({ filePath: path.join(app.getPath("userData"), "user-avatar", safe) } as unknown as ProtocolResponse);
     } catch {
       callback({ error: -100 });
     }
@@ -2190,7 +2186,7 @@ app.whenReady().then(async () => {
     current.id === "kirari-sprite" ||
     current.src === "pet://frames.json" ||
     (current.src?.startsWith("avatar://kirari/") && current.id !== "custom-kirari") ||
-    !registeredIds.has(current.id)
+    !registeredIds.has(current.id ?? "")
   ) {
     clientConfig.avatar = { ...DEFAULT_AVATAR };
     saveClientConfig();

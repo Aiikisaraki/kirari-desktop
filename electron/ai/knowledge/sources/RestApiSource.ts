@@ -45,7 +45,7 @@ const PARSERS: Record<string, RestParser> = {
         url: (q) =>
             `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${encodeURIComponent(q)}&retmode=json&retmax=3`,
         // 两步：esearch 拿 pmids → efetch 拿摘要文本
-        extract: async (q, data, fetchFn) => {
+        extract: async (_q, data, fetchFn) => {
             const ids = (data as { esearchresult?: { idlist?: string[] } })?.esearchresult?.idlist;
             if (!Array.isArray(ids) || !ids.length) return null;
             const text = await fetchFn(
