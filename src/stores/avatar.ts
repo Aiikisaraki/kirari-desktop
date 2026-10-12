@@ -87,25 +87,34 @@ export const useAvatarStore = defineStore("avatar", () => {
   async function init() {
     const w = getWindow();
 
-    // 1) 先读形象列表（确保后续校验时列表已就绪）
+    // 1) 先读形象列表（确保后续校验时列表已就绪）。
+    //    聊天窗口 nodeIntegration:true + contextIsolation:false → contextBridge 不生效，
+    //    windowApi 是 undefined，必须走 ipcRenderer 兜底（否则列表读不到，当前形象被误判失效）。
     try {
+      let custom: unknown = null;
       if (w.windowApi?.getCustomAvatars) {
-        const custom = await w.windowApi.getCustomAvatars();
-        if (Array.isArray(custom)) customAvatars.value = custom as AvatarMeta[];
+        custom = await w.windowApi.getCustomAvatars();
+      } else if (w.require) {
+        custom = await w.require("electron").ipcRenderer.invoke("avatar:custom-get");
       }
+      if (Array.isArray(custom)) customAvatars.value = custom as AvatarMeta[];
     } catch (e) {
       console.warn("[avatar] 读取形象列表失败:", e);
     }
 
-    // 2) 再读持久化的当前形象
+    // 2) 再读持久化的当前形象（同样需要 ipcRenderer 兜底，理由同上——
+    //    没有这一步，聊天窗口的当前形象永远停在无头像的默认值上，聊天页只能显示首字母）。
     try {
+      let saved: unknown = null;
       if (w.windowApi?.getAvatar) {
-        const saved = await w.windowApi.getAvatar();
-        if (saved) {
-          const cfg = normalizeConfig(saved);
-          console.log("[avatar] init 读取当前形象:", cfg.id, cfg.name);
-          apply(cfg);
-        }
+        saved = await w.windowApi.getAvatar();
+      } else if (w.require) {
+        saved = await w.require("electron").ipcRenderer.invoke("avatar:get");
+      }
+      if (saved) {
+        const cfg = normalizeConfig(saved);
+        console.log("[avatar] init 读取当前形象:", cfg.id, cfg.name);
+        apply(cfg);
       }
     } catch (e) {
       console.warn("[avatar] 读取当前形象失败:", e);

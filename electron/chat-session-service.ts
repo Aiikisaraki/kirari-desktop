@@ -3,9 +3,10 @@ import path from "path";
 import { nativeImage } from "electron";
 import * as frontendTools from "./frontend-tools";
 import * as engine from "./ai/engine";
+import * as db from "./ai/db/storage";
 import type { AiModelSettings } from "./ai/aiContext";
 import { readModelConfigFile } from "./model-config";
-import type { LocalKnowledge } from "../src/knowledge/localKnowledge";
+import type { LocalKnowledge, RetrievedPassage } from "../src/knowledge/localKnowledge";
 
 export type ChatAuthor = "user" | "pet" | "system";
 
@@ -35,7 +36,14 @@ export type ChatStateSnapshot = {
     bubbleInteractive: boolean;
 };
 
-type PersistedChatState = {
+/**
+ * 旧版聊天记录的磁盘格式（chat-session.json）。
+ *
+ * 2026-10-12 起聊天记录统一改用数据库（用户拍板），这个类型只用于**一次性迁移**：
+ * 启动时发现文件存在就把内容导进 messages 表，然后改名备份，之后不再读写。
+ * 保留定义是为了让迁移代码有明确的形状可校验。
+ */
+type LegacyPersistedChatState = {
     sessionId: string;
     messages: ChatMessage[];
     bubbleMessage: string;
@@ -45,6 +53,12 @@ type PersistedChatState = {
 type ChatSessionOptions = {
     userid: number;
     emitState: (state: ChatStateSnapshot) => void;
+    /**
+     * 本机会话 id（userData/local-session.json 里那一份，见 ai/local-session.ts）。
+     * 传入后桌宠就固定用这个会话 —— 重启不换、与核心版控制台共用同一段对话。
+     * 不传（旧调用方 / 测试）则退化为进程内随机 id，行为同历史版本。
+     */
+    sessionId?: string;
     // 私人知识库：发消息前本地检索，结果直接进入内核的私有知识库通道
     localKnowledge?: LocalKnowledge;
     // 模型配置读取器。缺省直接读 userData/config.json。
@@ -52,9 +66,11 @@ type ChatSessionOptions = {
     /**
      * 组网出口：本机作为叶子时，把请求上行给主机。
      * 返回 true 表示已成功上行（本地不再调模型，等广播回复）。
+     * 第三参 kbContext 是本机私人知识库的检索结果 —— 主机没有我们的本地
+     * 知识库，不带就等于白配了（回答准确度全靠它）。
      * 未提供 / 返回 false → 走本地独立调用。
      */
-    relaySender?: (content: string, images: string[]) => boolean;
+    relaySender?: (content: string, images: string[], kbContext: RetrievedPassage[]) => boolean;
 };
 
 /** 主机广播回来的回复（结构见 net/protocol.ts） */
@@ -120,13 +136,15 @@ export class ChatSessionService {
     private readonly emitState: (state: ChatStateSnapshot) => void;
     private readonly localKnowledge: LocalKnowledge | undefined;
     private readonly readSettings: () => AiModelSettings | null;
-    private readonly relaySender: ((content: string, images: string[]) => boolean) | undefined;
+    private readonly relaySender:
+        | ((content: string, images: string[], kbContext: RetrievedPassage[]) => boolean)
+        | undefined;
     /** 已经显示过的广播回复（按 requestId 去重，防止重连重放时刷屏） */
     private readonly shownRelayReplies = new Set<string>();
-    private storagePath = "";
-    private persistenceQueue: Promise<void> = Promise.resolve();
     private initialized = false;
     private disposed = false;
+    /** 欢迎语是否已写入数据库（避免重启后重复补一条） */
+    private welcomePersisted = false;
     // 本轮生成的取消控制器：用户点「停止」时中断模型请求。
     private abortController: AbortController | null = null;
     // 发送消息后的回复超时定时器：到点仍未收到回应则兜底结束等待态。
@@ -144,6 +162,9 @@ export class ChatSessionService {
     constructor(options: ChatSessionOptions) {
         this.userid = options.userid;
         this.emitState = options.emitState;
+        // 会话 id 由外部（main.ts 从 local-session.json）给定 —— 不再每次启动重掷，
+        // 否则重启就换会话、上一段对话永远读不回来。
+        if (options.sessionId) this.state.sessionId = options.sessionId;
         this.localKnowledge = options.localKnowledge;
         this.relaySender = options.relaySender;
         this.readSettings =
@@ -162,22 +183,140 @@ export class ChatSessionService {
             });
     }
 
-    async init(storagePath: string) {
+    /**
+     * 初始化聊天服务。
+     *
+     * @param legacyJsonPath 旧版 chat-session.json 的路径。传了才会做一次性迁移；
+     *   不传（或传空串）就是纯数据库模式。迁移成功后该文件会被改名成 .bak 留着，
+     *   **不删** —— 用户自己的聊天记录，宁可留个备份也不能弄丢。
+     */
+    async init(legacyJsonPath?: string) {
         if (this.initialized) {
             return;
         }
 
         this.initialized = true;
-        this.storagePath = storagePath;
-        await this.loadFromDisk();
+        if (legacyJsonPath) {
+            await this.migrateLegacyJson(legacyJsonPath);
+        }
+        await this.loadFromDb();
         this.ensureBubbleState();
         // 进程内引擎：把前端托管工具与私有知识库注入内核，并检查大脑是否就绪
         this.prepareEngine();
         this.emit();
     }
 
+    /**
+     * 一次性迁移：把旧版 chat-session.json 的内容导进 messages 表。
+     *
+     * 幂等且保守：
+     *   · 文件不存在 / 解析失败 → 什么都不做（当没旧数据）；
+     *   · 那个会话在库里已有消息 → 不导入（避免重复灌一遍，比如迁移后又回滚）；
+     *   · 成功后把文件改名成 <名字>.migrated-<时间戳>.bak，不删。
+     */
+    private async migrateLegacyJson(jsonPath: string): Promise<void> {
+        let legacy: LegacyPersistedChatState | null = null;
+        try {
+            const text = await fs.readFile(jsonPath, "utf-8");
+            const parsed = JSON.parse(text) as LegacyPersistedChatState;
+            if (parsed && typeof parsed === "object" && Array.isArray(parsed.messages)) {
+                legacy = parsed;
+            }
+        } catch {
+            return; // 没有旧文件或读不出来：纯新装，无需迁移
+        }
+        if (!legacy) return;
+
+        const sessionId = legacy.sessionId || crypto.randomUUID();
+        const existing = await db.getSessionMessages(sessionId, 1);
+        if (existing.length > 0) {
+            // 库里已有这个会话的记录：说明迁移已经做过（或用户又在库里聊过了），跳过
+            console.log("[chat-session] 数据库里已有该会话记录，跳过旧文件迁移");
+        } else {
+            let imported = 0;
+            for (const m of legacy.messages) {
+                if (!m || typeof m.text !== "string" || !m.text.trim()) continue;
+                await db.saveMessage(sessionId, m.author === "pet" ? "assistant" : "user", m.text, {
+                    emotion: m.emotion ?? null,
+                    images: Array.isArray(m.images) ? m.images : undefined,
+                });
+                imported++;
+            }
+            console.log(`[chat-session] 已把旧聊天记录导入数据库（${imported} 条，会话 ${sessionId.slice(0, 8)}…）`);
+        }
+
+        // 备份旧文件：改名而非删除。用户数据宁可留一份多余的，不能因迁移出 bug 就没了。
+        try {
+            const backup = `${jsonPath}.migrated-${Date.now()}.bak`;
+            await fs.rename(jsonPath, backup);
+            console.log(`[chat-session] 旧聊天记录文件已备份为 ${path.basename(backup)}`);
+        } catch (e) {
+            console.warn("[chat-session] 旧文件备份失败（不影响使用）:", (e as Error)?.message || e);
+        }
+    }
+
+    /** 从数据库加载当前会话的完整历史（聊天界面的记录真源）。 */
+    private async loadFromDb(): Promise<void> {
+        try {
+            const rows = await db.getSessionMessages(this.state.sessionId, 200);
+            if (rows.length > 0) {
+                this.state.messages = rows.map((r) => this.uiMessageToChat(r));
+                const lastPet = [...rows].reverse().find((r) => r.role === "assistant");
+                this.lastPetSpeech = lastPet && typeof lastPet.content === "string" ? lastPet.content : "";
+            }
+        } catch (e) {
+            console.warn("[chat-session] 读取聊天记录失败（从空历史开始）:", (e as Error)?.message || e);
+        }
+    }
+
+    /** 数据库行 → 界面消息。role 只用 user/assistant，作者名按桌宠语义映射。 */
+    private uiMessageToChat(row: db.UiMessage): ChatMessage {
+        // content 可能是纯文本，也可能是 [text, image_url] 多模态数组（带图的那几条）。
+        // 数组时必须把 text 段捞出来，否则带图消息在界面上只剩图片、文字全没了。
+        let text = "";
+        const inlineImages: string[] = [];
+        if (typeof row.content === "string") {
+            text = row.content;
+        } else if (Array.isArray(row.content)) {
+            for (const part of row.content) {
+                if (!part || typeof part !== "object") continue;
+                const p = part as { type?: string; text?: string; image_url?: { url?: string } };
+                if (p.type === "text" && typeof p.text === "string") text += p.text;
+                else if (p.type === "image_url" && p.image_url?.url) inlineImages.push(p.image_url.url);
+            }
+        }
+        const images = [...inlineImages, ...(Array.isArray(row.images) ? row.images : [])];
+        return {
+            id: row.id,
+            author: row.role === "assistant" ? "pet" : row.role === "user" ? "user" : "system",
+            text,
+            timestamp: row.timestamp,
+            emotion: (row.emotion as PetEmotion | null) ?? null,
+            images: images.length ? images : undefined,
+        };
+    }
+
+    /**
+     * 重新从数据库读一遍当前会话历史（不改会话 id）。
+     *
+     * 为什么需要：启动时旧聊天记录迁移（chat-session.json / 旧 kirari.db）跑在
+     * 本服务 init 之后，而 local-session 的「收口」又会把那些刚写进来的旧会话
+     * 并进本机会话 —— 合并完必须重新读一次，界面才看得到这批历史。
+     */
+    async refreshHistory(): Promise<void> {
+        if (this.disposed) return;
+        await this.loadFromDb();
+        this.ensureBubbleState();
+        this.emit();
+    }
+
     getSnapshot() {
         return this.cloneState();
+    }
+
+    /** 当前会话 id（组网上行时要用；state 本身是私有的，只放行这一个字段） */
+    getSessionId(): string {
+        return this.state.sessionId;
     }
 
     async sendMessage(payload: { text: string; images?: string[] }) {
@@ -208,10 +347,22 @@ export class ChatSessionService {
         this.emit();
         this.armReplyTimeout();
 
+        // ── 私人知识库检索（一次检索，两条路共用）──
+        // 上行组网时带给主机；本地回答时注入引擎，跳过重复检索。
+        // 失败静默降级为空 —— 知识库只是提高准确度的加分项，绝不能阻断聊天。
+        let kbContext: RetrievedPassage[] = [];
+        if (this.localKnowledge && text) {
+            try {
+                kbContext = await this.localKnowledge.search(text);
+            } catch (e) {
+                console.warn("[chat] 知识库检索失败（已忽略）：", (e as Error)?.message || e);
+            }
+        }
+
         // ── 组网：本机是叶子且已连上主机 ──
         // 请求上行给主机，由主机（唯一出口）调用模型并把结果广播回来。
         // 本地**不**再调模型 —— 这正是「一条消息只有一份回复」的落地方式。
-        if (this.relaySender && this.relaySender(text, images)) {
+        if (this.relaySender && this.relaySender(text, images, kbContext)) {
             return true; // 等 applyRelayResult 收尾
         }
 
@@ -226,6 +377,7 @@ export class ChatSessionService {
                 images,
                 persona: frontendTools.collectBasePersona() || null,
                 skillPrompts: frontendTools.collectSkillPrompts(),
+                kbContext: kbContext.length > 0 ? kbContext : null,
                 signal: controller.signal,
             });
             if (this.disposed) return true;
@@ -368,11 +520,26 @@ export class ChatSessionService {
     }
 
     // 清空聊天记录（UI 的"清空"）：同时清 UI 历史与内核上下文历史。
+    /**
+     * 清空聊天记录（UI 的"清空"）。
+     *
+     * 同时清三处：内核上下文（旧会话的 db 行）、界面列表、以及数据库里的历史。
+     * 旧实现只清了引擎（走 chat-session.json 时那份文件靠整体重写覆盖），
+     * 现在数据库是真源，必须显式删掉旧 session_id 的行，否则清完刷新又全回来了。
+     */
     async clearHistory(): Promise<void> {
         await engine.clearHistory(this.state.sessionId);
-        this.state.sessionId = crypto.randomUUID();
+        try {
+            await db.clearSession(this.state.sessionId);
+        } catch (e) {
+            console.warn("[chat-session] 清空数据库历史失败（不影响继续用）:", (e as Error)?.message || e);
+        }
+        // ⚠️ 不再换 sessionId。以前这里会重掷一个随机 id，等于「清空」顺便把会话
+        //    也换了族 —— 核心版控制台、组网补传都按本机会话 id 找记录，换了就各说各话。
+        //    清空就是清空：会话还是那一个，只是里面的消息没了。
         this.state.messages = [];
         this.lastPetSpeech = "";
+        this.welcomePersisted = false;
         this.ensureBubbleState();
         this.persist();
         this.emit();
@@ -517,15 +684,6 @@ export class ChatSessionService {
         };
     }
 
-    private snapshotForDisk(): PersistedChatState {
-        return {
-            sessionId: this.state.sessionId,
-            messages: this.state.messages.map((message) => ({ ...message })),
-            bubbleMessage: this.state.bubbleMessage,
-            bubbleInteractive: this.state.bubbleInteractive,
-        };
-    }
-
     private cloneState(): ChatStateSnapshot {
         return {
             sessionId: this.state.sessionId,
@@ -542,38 +700,28 @@ export class ChatSessionService {
         this.emitState(this.cloneState());
     }
 
+    /**
+     * 把当前状态落库。
+     *
+     * 2026-10-12 起聊天记录的**唯一真源是数据库**（用户拍板），不再写 chat-session.json。
+     * 消息的入库由各产生点直接调 db.saveMessage 完成（engine.chat 存对话双方、
+     * applyRelayResult 存广播回复、injectExternalMessage 存跨端注入）——
+     * 那样情绪和图片能一并写进扩展列，走 UI 消息列表反推会丢掉这些字段。
+     *
+     * 所以这里只剩两件事要做：
+     *   1. 保证会话在库里有记录（新会话的首条欢迎语也得有个落脚点）；
+     *   2. 欢迎语这种「界面独有、不经引擎」的消息补一条入库。
+     * 其余消息不重复写 —— 双写会让历史里每条出现两次。
+     */
     private persist() {
-        if (!this.storagePath) {
-            return;
-        }
-
-        const payload = `${JSON.stringify(this.snapshotForDisk(), null, 2)}\n`;
-        this.persistenceQueue = this.persistenceQueue
-            .then(() => fs.mkdir(path.dirname(this.storagePath), { recursive: true }))
-            .then(() => fs.writeFile(this.storagePath, payload, "utf-8"))
-            .catch((error) => {
-                console.error("❌ 保存聊天会话失败:", error);
+        // 欢迎语：界面生成的兜底话，不经引擎，需要在这里补库
+        const welcome = this.state.messages.find((m) => m.author === "pet" && m.text === WELCOME_MESSAGE);
+        if (welcome && !this.welcomePersisted) {
+            this.welcomePersisted = true;
+            void db.saveMessage(this.state.sessionId, "assistant", WELCOME_MESSAGE).catch((e) => {
+                console.warn("[chat-session] 写入欢迎语失败（不影响聊天）:", (e as Error)?.message || e);
+                this.welcomePersisted = false;
             });
-    }
-
-    private async loadFromDisk() {
-        try {
-            const fileText = await fs.readFile(this.storagePath, "utf-8");
-            const persisted = JSON.parse(fileText) as PersistedChatState;
-            if (persisted.sessionId) {
-                this.state.sessionId = persisted.sessionId;
-            }
-            if (Array.isArray(persisted.messages) && persisted.messages.length > 0) {
-                this.state.messages = persisted.messages.map((message) => ({ ...message }));
-            }
-            if (typeof persisted.bubbleMessage === "string") {
-                this.state.bubbleMessage = persisted.bubbleMessage;
-            }
-            if (typeof persisted.bubbleInteractive === "boolean") {
-                this.state.bubbleInteractive = persisted.bubbleInteractive;
-            }
-        } catch {
-            this.persist();
         }
     }
 }

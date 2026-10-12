@@ -1,39 +1,25 @@
-import { defineConfig, loadEnv } from "vite";
+import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import electron from "vite-plugin-electron";
+import { createRequire } from "node:module";
 
-export default defineConfig(({ mode }) => {
-    // ── 组网密钥：三个来源，优先级从高到低 ──
-    //   1) 进程环境变量（CI 的 GitHub Secret 就是走这条）
-    //   2) 项目内 .env.local（本地开发，已 gitignore）
-    //   3) 空 —— 组网功能整体禁用
-    //
-    // ⚠️ 必须用 loadEnv 显式读文件：vite 只会把 VITE_ 前缀的变量自动塞进
-    //    import.meta.env，**不会**写进 process.env。所以直接读
-    //    process.env.KIRARI_NET_SECRET 在本地永远是空的（CI 才对），
-    //    症状是「本地打的包组网开不了，CI 打的能开」。
-    //    第三个参数传空串 = 不限前缀，全读。
-    const fileEnv = loadEnv(mode, process.cwd(), "");
-    const netSecret = (process.env.KIRARI_NET_SECRET || fileEnv.KIRARI_NET_SECRET || "").trim();
-    const netSecretOk = netSecret.length >= 16;
-    const netSecretFrom = process.env.KIRARI_NET_SECRET ? "环境变量" : fileEnv.KIRARI_NET_SECRET ? ".env.local" : "未提供";
+// 渲染层要用 package.json 的版本号（设置页左下角）。构建期注入，永不手改。
+const requirePkg = createRequire(import.meta.url);
+const pkgVersion = requirePkg("./package.json").version;
 
-    // 构建时就把结论打印出来 —— 打包后不必再猜「这个包到底带没带密钥」。
-    if (netSecretOk) {
-        console.log(`\x1b[32m[组网]\x1b[0m 密钥已注入（来源：${netSecretFrom}，长度 ${netSecret.length}）→ 组网功能可用`);
-    } else if (netSecret) {
-        console.log(
-            `\x1b[33m[组网]\x1b[0m 密钥太短（${netSecret.length} 位，至少要 16 位）→ 组网功能会被禁用`,
-        );
-    } else {
-        console.log(
-            `\x1b[33m[组网]\x1b[0m 未找到密钥 → 本次构建的组网功能是禁用的。\x1b[0m\n` +
-                `        本地：在项目根建 .env.local 写一行 KIRARI_NET_SECRET=你的密钥（≥16 位）\n` +
-                `        CI：在 GitHub 仓库 Settings → Secrets and variables → Actions 添加 KIRARI_NET_SECRET`,
-        );
-    }
+// 组网密钥**不在这里注入**。
+//
+// 两端在网络里的地位完全一样，谁也不带密钥出厂：本机当主机时自己签一把，
+// 当叶子时凭一张邀请码在配对那一刻领（enroll）。所以构建期没有任何密钥可注入 ——
+// 同一个安装包发出去，是互不相通、也互不可见的若干个网。
+// 想彻底禁掉组网能力的发行版，显式调 NetManager.setAutoProvisionSecret(false)。
 
+export default defineConfig(() => {
     return {
+        // 渲染层构建常量（主进程那份在 electron/ 里对应还有一份，互不相通）
+        define: {
+            __APP_VERSION__: JSON.stringify(pkgVersion),
+        },
         server: {
             // 强制 IPv4 回环。Windows 上 localhost 常被解析为 IPv6 ::1，
             // 而绑定 ::1 会报 EACCES: permission denied，改用 127.0.0.1 规避。
@@ -57,12 +43,6 @@ export default defineConfig(({ mode }) => {
                             rollupOptions: {
                                 external: ["better-sqlite3"],
                             },
-                        },
-                        define: {
-                            // 用 define 而不是 import.meta.env —— 这个值只在主进程用，
-                            // 渲染层不该看到；define 直接替换成字符串字面量，运行时不留
-                            // 任何「去环境变量里读」的痕迹。
-                            __KIRARI_NET_SECRET__: JSON.stringify(netSecret),
                         },
                     },
                     async onstart({ startup }) {

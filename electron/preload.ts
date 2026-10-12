@@ -21,6 +21,14 @@ contextBridge.exposeInMainWorld("tokenApi", {
   onModelConfigChanged: (cb: (cfg: ModelConfigFile) => void): void => {
     ipcRenderer.on("config:changed", (_event, cfg: ModelConfigFile) => cb(cfg));
   },
+  // 多模型：列表（掩码）/ 添加 / 编辑 / 删除 / 设为当前
+  listModels: (): Promise<unknown> => ipcRenderer.invoke("models:list"),
+  addModel: (p: { name: string; endpoint: string; model: string; key: string }): Promise<number> =>
+    ipcRenderer.invoke("models:add", p),
+  updateModel: (id: number, patch: { name?: string; endpoint?: string; model?: string; key?: string }): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke("models:update", { id, ...patch }),
+  deleteModel: (id: number): Promise<{ ok: boolean; list: unknown }> => ipcRenderer.invoke("models:delete", id),
+  activateModel: (id: number): Promise<{ ok: boolean; list: unknown }> => ipcRenderer.invoke("models:activate", id),
 });
 
 // ── 组网（活锁模型）────────────────────────────────────────────

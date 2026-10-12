@@ -60,11 +60,14 @@ export type StreamedCompletion = {
  * reasoning_content（思考过程）与 content（最终答案）。这里统一走 stream:true 拉 chunks，
  * 累积成与 ChatCompletion 同形的对象返回，下游（choices[0].message / usage / model）
  * 无需改动。对非流式供应商同样兼容：拿到流后累积等价于一次完整响应。
+ *
+ * onDelta：正文（content）每到一个增量就回调一次，给上层做逐字展示用。
+ * 回调抛异常会被吞掉（流式展示是锦上添花，绝不能因为它打断生成）。
  */
 export async function streamChatCompletion(
     openai: OpenAI,
     params: Record<string, unknown>,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; onDelta?: ((text: string) => void) | null } = {},
 ): Promise<StreamedCompletion> {
     const stream = (await openai.chat.completions.create(
         { ...params, stream: true, stream_options: { include_usage: true } } as never,
@@ -90,7 +93,16 @@ export async function streamChatCompletion(
             const d = choice.delta;
             if (d) {
                 if (d.role) role = d.role;
-                if (typeof d.content === "string" && d.content.length) content += d.content;
+                if (typeof d.content === "string" && d.content.length) {
+                    content += d.content;
+                    if (options.onDelta) {
+                        try {
+                            options.onDelta(d.content);
+                        } catch {
+                            /* 流式展示失败不影响生成 */
+                        }
+                    }
+                }
                 if (typeof d.reasoning_content === "string" && d.reasoning_content.length)
                     reasoningContent += d.reasoning_content;
                 if (Array.isArray(d.tool_calls)) {
@@ -161,6 +173,7 @@ export async function polishToolResult(
     userText: string,
     controller: AbortController,
     systemPromptOverride?: string,
+    onDelta?: ((text: string) => void) | null,
 ): Promise<PolishedResult> {
     // 润色任务只聚焦「当前用户问题 + 工具数据」，不引入完整对话历史。
     // 完整历史容易让模型把上一轮的反问/确认当成当前任务，导致"请稍等我获取"、"天气还是时间"等幻觉。
@@ -177,7 +190,7 @@ export async function polishToolResult(
     const completion = await streamChatCompletion(
         aiContext.openai,
         { model: aiContext.model, messages, max_tokens: 800 },
-        { signal: controller.signal },
+        { signal: controller.signal, onDelta },
     );
     console.log(`[polish] LLM 润色返回 @${Date.now()}`);
 

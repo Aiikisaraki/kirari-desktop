@@ -6,7 +6,7 @@
 // 精简依据（见 ARCHITECTURE-PLAN 阶段 0）：桌宠端不再有账户系统与远程客户端，
 // 凭证改由用户自持并存在 userData/config.json，因此删掉三张表：
 //   - users        （注册/登录，桌宠本地形态不需要）
-//   - api_tokens   （凭证与配置档案，改由 config.json + safeStorage 承担）
+//   - api_tokens   （凭证与配置档案，改由 userData/config.json 承担；**明文存，未加密**）
 //   - api_clients  （远程客户端公钥登记）
 // 保留：
 //   - messages     对话记录
@@ -50,8 +50,27 @@ export function initDatabase(dbPath?: string): DB {
     db = new Database(target);
     dbPathUsed = target;
     db.pragma("journal_mode = WAL");
+    // 与核心版共用同一个 pet_sessions.db 时必须设：核心版（本地模式是主进程拉起的
+    // 子进程）同时在写。没有 busy_timeout，一端写时另一端立刻 SQLITE_BUSY 报错。
+    db.pragma("busy_timeout = 5000");
     db.exec(SCHEMA);
+    migrateUiColumns();
     return db;
+}
+
+/**
+ * messages 表的 UI 扩展列（emotion / images_json）。
+ *
+ * 为什么加：这张表现在同时是**桌宠聊天界面的记录真源**（用户拍板：聊天记录统一用
+ * 数据库，废掉 chat-session.json）。界面要显示情绪动画标签和图片，而内核上下文
+ * 只需要 role + content —— 两类需求共用一列 content 会互相污染，所以单开两列。
+ * 核心版读历史时原样带回，两端记录完全互通。
+ */
+function migrateUiColumns(): void {
+    if (!db) return;
+    const cols = (db.prepare("PRAGMA table_info(messages)").all() as { name: string }[]).map((c) => c.name);
+    if (!cols.includes("emotion")) db.exec("ALTER TABLE messages ADD COLUMN emotion TEXT");
+    if (!cols.includes("images_json")) db.exec("ALTER TABLE messages ADD COLUMN images_json TEXT");
 }
 
 /** 取得数据库实例；未显式初始化时用兜底路径（会告警，但不阻塞）。 */
@@ -85,7 +104,9 @@ const SCHEMA = `
     session_id TEXT NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    -- 桌宠聊天界面需要的两个扩展字段（可空），见 migrateUiColumns。
+    emotion TEXT, images_json TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_session_id ON messages(session_id);
 
@@ -120,8 +141,28 @@ export type StoredMessage = {
     content: string | ContentPart[];
 };
 
-/** 每个会话保留的最大消息条数（与内核原行为一致，避免上下文无限膨胀） */
-const MAX_MESSAGES_PER_SESSION = 10;
+/**
+ * 聊天界面用的完整消息（比 StoredMessage 多出界面需要的字段）。
+ * 与核心版 dbStorage.getSessionMessages 返回的形状一致 —— 两端记录互通。
+ */
+export type UiMessage = {
+    id: string;
+    role: string;
+    content: string | ContentPart[];
+    emotion: string | null;
+    images: string[];
+    timestamp: number;
+};
+
+/**
+ * 每个会话保留的最大消息条数。
+ *
+ * 原为 10 —— 那时这张表只当「上下文窗口」用，删旧的没关系。
+ * 现在它同时是**桌宠聊天界面的记录真源**（用户拍板：聊天记录统一用数据库），
+ * 10 条等于翻不了历史，所以提高到 500。
+ * 上下文仍由 getRecentMessages 按需取最近几条，存得久不等于喂给模型的多。
+ */
+const MAX_MESSAGES_PER_SESSION = 500;
 
 export async function initSession(sessionId: string): Promise<StoredMessage[]> {
     return getSession(sessionId);
@@ -129,20 +170,39 @@ export async function initSession(sessionId: string): Promise<StoredMessage[]> {
 
 export async function getSession(sessionId: string): Promise<StoredMessage[]> {
     const rows = getDb()
-        .prepare("SELECT role, content FROM messages WHERE session_id = ? ORDER BY id ASC")
-        .all(sessionId) as { role: string; content: string }[];
+        .prepare("SELECT role, content, emotion, images_json FROM messages WHERE session_id = ? ORDER BY id ASC")
+        .all(sessionId) as { role: string; content: string; emotion: string | null; images_json: string | null }[];
     return rows.map((m) => ({ role: toRole(m.role), content: parseContent(m.content) }));
 }
 
+/**
+ * 存一条消息。
+ *
+ * @param extras 界面需要的额外信息（情绪标签、图片）。引擎上下文只用 content，
+ *   UI 历史用 extras —— 分开存，互不污染。不传就是纯上下文消息（组网补传等场景）。
+ */
 export async function saveMessage(
     sessionId: string,
     role: string,
     content: string | unknown[],
+    extras?: { emotion?: string | null; images?: string[] },
 ): Promise<StoredMessage[]> {
     // content 可能是纯文本字符串，或 [text, image_url] 多模态数组；后者序列化为 JSON 存储。
     const c = typeof content === "string" ? content : JSON.stringify(content);
+    const emotion =
+        extras && typeof extras.emotion === "string" && extras.emotion.trim() ? extras.emotion.trim() : null;
+    const imagesJson =
+        extras && Array.isArray(extras.images) && extras.images.length
+            ? JSON.stringify(extras.images.filter((x) => typeof x === "string" && x.trim()))
+            : null;
     const d = getDb();
-    d.prepare("INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)").run(sessionId, role, c);
+    d.prepare("INSERT INTO messages (session_id, role, content, emotion, images_json) VALUES (?, ?, ?, ?, ?)").run(
+        sessionId,
+        role,
+        c,
+        emotion,
+        imagesJson,
+    );
     const ids = d
         .prepare("SELECT id FROM messages WHERE session_id = ? ORDER BY id DESC")
         .all(sessionId) as { id: number }[];
@@ -151,6 +211,40 @@ export async function saveMessage(
         d.prepare(`DELETE FROM messages WHERE id IN (${stale.map(() => "?").join(",")})`).run(...stale);
     }
     return getSession(sessionId);
+}
+
+/**
+ * 全量会话历史（聊天界面用）。
+ *
+ * 与 getSession 的区别：返回形状面向 UI（带 id / 时间戳 / 情绪 / 图片），
+ * 而不是面向模型上下文（只要 role + content）。
+ */
+export async function getSessionMessages(sessionId: string, limit = 200): Promise<UiMessage[]> {
+    // ⚠️ 取的是**最近** limit 条（先倒序取再翻回正序）。
+    // 直接 `ORDER BY id ASC LIMIT n` 拿到的是最老的 n 条 —— 会话长过 limit 时
+    // 聊天界面永远停在开头，新消息反而看不到。
+    const n = Math.min(500, Math.max(1, limit));
+    const rows = getDb()
+        .prepare(
+            "SELECT id, role, content, emotion, images_json, timestamp FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+        )
+        .all(sessionId, n)
+        .reverse() as {
+        id: number;
+        role: string;
+        content: string;
+        emotion: string | null;
+        images_json: string | null;
+        timestamp: string;
+    }[];
+    return rows.map((m) => ({
+        id: String(m.id),
+        role: m.role,
+        content: parseContent(m.content),
+        emotion: m.emotion || null,
+        images: parseImages(m.images_json),
+        timestamp: toEpochMs(m.timestamp),
+    }));
 }
 
 export async function getRecentMessages(sessionId: string, limit = 5): Promise<StoredMessage[]> {
@@ -165,12 +259,38 @@ export async function clearSession(sessionId: string): Promise<void> {
     getDb().prepare("DELETE FROM messages WHERE session_id = ?").run(sessionId);
 }
 
-/** 列出全部会话 id（按最近消息时间倒序） */
+/**
+ * 列出全部会话 id（最近有消息的排前面）。
+ *
+ * ⚠️ 排序键用自增 id 而不是 timestamp：timestamp 是秒级精度，
+ * 同一秒里写入的多条（欢迎语+首轮问答、迁移批量导入等）时间完全相同，
+ * 按时间排会产生平局、顺序不确定 —— 「采纳最近一段对话」就可能挑错会话。
+ * 自增 id 严格单调，没有这个问题。
+ */
 export async function listSessions(): Promise<string[]> {
     const rows = getDb()
-        .prepare("SELECT session_id, MAX(timestamp) AS t FROM messages GROUP BY session_id ORDER BY t DESC")
+        .prepare("SELECT session_id, MAX(id) AS mx FROM messages GROUP BY session_id ORDER BY mx DESC")
         .all() as { session_id: string }[];
     return rows.map((r) => r.session_id);
+}
+
+/**
+ * 把若干会话的消息并进目标会话（只改 session_id，消息本身、时间戳、自增 id
+ * 全都原样不动，所以时间顺序天然保持）。
+ *
+ * 用途：修复「同一段本机对话被拆成好几个会话」的历史数据 —— 旧版本每次启动
+ * 重掷一个随机 sessionId，聊一次就多一个孤儿会话。
+ */
+export async function mergeSessions(fromSessionIds: string[], intoSessionId: string): Promise<number> {
+    const from = (Array.isArray(fromSessionIds) ? fromSessionIds : []).filter(
+        (s) => typeof s === "string" && s && s !== intoSessionId,
+    );
+    if (!from.length) return 0;
+    const d = getDb();
+    const stmt = d.prepare("UPDATE messages SET session_id = ? WHERE session_id = ?");
+    let moved = 0;
+    for (const s of from) moved += stmt.run(intoSessionId, s).changes;
+    return moved;
 }
 
 function parseContent(raw: string): string | ContentPart[] {
@@ -182,6 +302,27 @@ function parseContent(raw: string): string | ContentPart[] {
         // 非 JSON → 纯文本，保持原样
         return raw;
     }
+}
+
+/** images_json 列 → string[]；坏 JSON 当空数组（历史记录不该让界面崩）。 */
+function parseImages(raw: string | null): string[] {
+    if (typeof raw !== "string" || !raw.trim()) return [];
+    try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+    } catch {
+        return [];
+    }
+}
+
+/**
+ * SQLite 的 CURRENT_TIMESTAMP 是 UTC "YYYY-MM-DD HH:MM:SS"，转成毫秒时间戳。
+ * 桌宠界面按毫秒排序/显示，与旧 chat-session.json 里的 timestamp 同单位。
+ */
+function toEpochMs(ts: string | null): number {
+    if (ts == null) return Date.now();
+    const parsed = Date.parse(`${String(ts).replace(" ", "T")}Z`);
+    return Number.isFinite(parsed) ? parsed : Date.now();
 }
 
 /** 数据库读出的 role 统一收敛为合法的 MessageRole */

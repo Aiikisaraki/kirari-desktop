@@ -42,8 +42,8 @@ function makeNetApi(snapshot: Snapshot) {
         getState: vi.fn(async () => snapshot),
         addresses: vi.fn(async () => ["192.168.57.10"]),
         enabled: vi.fn(async () => ({ enabled: true })),
-        startHost: vi.fn(async () => ({ ok: true, code: "kirari://connect?d=xxx", snapshot })),
-        issuePairing: vi.fn(async () => ({ ok: true, code: "kirari://connect?d=xxx", snapshot })),
+        startHost: vi.fn(async () => ({ ok: true, code: "kirari://join?d=xxx", snapshot })),
+        issuePairing: vi.fn(async () => ({ ok: true, code: "kirari://join?d=xxx", snapshot })),
         join: vi.fn(async () => ({ ok: true, snapshot })),
         resume: vi.fn(async () => ({ ok: true, snapshot })),
         stop: vi.fn(async () => ({ ok: true, snapshot })),
@@ -125,7 +125,7 @@ describe("组网设置页 · 同步白名单交互", () => {
 
     it("白名单选项里没有密钥类条目（页面下方的说明文字不算）", async () => {
         const { wrapper } = await mountPage(baseSnapshot({ role: "host", syncWhitelist: ["model"] }));
-        // 只取带勾选框的行 —— 页面底部还有一句「密钥不会下发」的说明，不能拿来断言。
+        // 只取带勾选框的行 —— 页面底部还有一句关于「钥匙」的说明，不能拿来断言。
         const rows = wrapper
             .findAll(".settings-row")
             .filter((r) => r.find('input[type="checkbox"]').exists());

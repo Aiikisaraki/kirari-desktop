@@ -47,3 +47,6 @@ yarn-error.log*
 dist_old_*/
 dist-electron_old_*/
 release_old_*/
+
+# vitest 隔离测试的临时目录
+.tmp-test/

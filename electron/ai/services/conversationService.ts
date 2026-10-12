@@ -49,6 +49,13 @@ export type GetReplyOptions = {
     kbContext?: RetrievedPassage[] | null;
     /** 外部取消（用户点了停止生成） */
     signal?: AbortSignal;
+    /**
+     * 正文逐字回调（上层做流式展示）。约定：
+     *   onDelta(text) —— 追加一段正文增量
+     *   onDelta(null) —— 前面流出的内容作废（工具轮碎片/换收尾路径），调用方应清空
+     * 回调抛出的异常一律吞掉：流式展示是锦上添花，绝不能因为它打断生成。
+     */
+    onDelta?: ((text: string | null) => void) | null;
 };
 
 export type ReplyResult = {
@@ -70,7 +77,11 @@ export type ReplyResult = {
  * 用 tools:undefined + 一句强指令强制模型直接产出最终文本（不再调用任何工具）。
  * 自带独立 AbortController（不与主请求共享），避免主超时已触发导致救回也一并被掐断。
  */
-async function salvageAsText(aiContext: AiContext, messages: unknown[]): Promise<string> {
+async function salvageAsText(
+    aiContext: AiContext,
+    messages: unknown[],
+    onDelta?: ((text: string | null) => void) | null,
+): Promise<string> {
     const ctrl = new AbortController();
     const tid = setTimeout(() => ctrl.abort(), 60000);
     try {
@@ -90,10 +101,18 @@ async function salvageAsText(aiContext: AiContext, messages: unknown[]): Promise
         const patched = cleaned.map((m) =>
             m.role === "system" ? { ...m, content: (m.content || "") + FORCE } : m,
         );
+        // 前面流出去的碎片已作废（主请求没产出可用 content），先让调用方清空
+        if (onDelta) {
+            try {
+                onDelta(null);
+            } catch {
+                /* ignore */
+            }
+        }
         const completion = await streamChatCompletion(
             aiContext.openai,
             { model: aiContext.model, messages: patched, max_tokens: 1500 },
-            { signal: ctrl.signal },
+            { signal: ctrl.signal, onDelta },
         );
         return completion.choices?.[0]?.message?.content || "";
     } finally {
@@ -112,6 +131,7 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
         skillPrompts = [],
         persona = null,
         kbContext = null,
+        onDelta = null,
         signal,
     } = options;
 
@@ -180,7 +200,7 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
         if (preflight.setLocation) {
             const raw = buildLocationSetRaw(preflight.setLocation.location, preflight.setLocation.ambiguous);
             try {
-                const c = await polishToolResult(raw, aiContext, sessionId, text, controller, sys.locationSet);
+                const c = await polishToolResult(raw, aiContext, sessionId, text, controller, sys.locationSet, onDelta);
                 confirmSpeech = c.speech;
             } catch (e) {
                 console.warn("[aiReply] 位置设置确认润色失败，回退到预设提示语：", (e as Error)?.message || e);
@@ -213,6 +233,7 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
                     polishUserText,
                     controller,
                     sys.polish,
+                    onDelta,
                 );
                 if (confirmSpeech) {
                     // 合并句：时间/天气答复 + 位置设置确认（两者均经 LLM 润色）
@@ -360,7 +381,7 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
                         tool_choice: useTools ? toolChoice : undefined,
                         max_tokens: 1500,
                     },
-                    { signal: controller.signal },
+                    { signal: controller.signal, onDelta },
                 );
             } catch (e) {
                 const err = e as Error & { name?: string };
@@ -373,14 +394,14 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
                     completion = await streamChatCompletion(
                         aiContext.openai,
                         { model: aiContext.model, messages, max_tokens: 1500 },
-                        { signal: controller.signal },
+                        { signal: controller.signal, onDelta },
                     );
                 } else if (aborted) {
                     // 主请求超时/中断：用 salvageAsText（独立 60s 控制器）强制纯文本收尾，
                     // 实在救不回才冒泡到外层兜底，避免直接崩成"还在学习中"。
                     console.warn(`[aiReply] 主请求超时/中断（${errMsg}），尝试纯文本收尾`);
                     try {
-                        const salvaged = await salvageAsText(aiContext, messages);
+                        const salvaged = await salvageAsText(aiContext, messages, onDelta);
                         if (salvaged && salvaged.trim()) {
                             const { speech, emotion } = parseModelReply(salvaged.trim());
                             if (speech) {
@@ -427,7 +448,7 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
                         `[aiReply] round=${round} 内容为空，尝试强制纯文本收尾 model=${aiContext.model}`,
                     );
                     try {
-                        const salvaged = await salvageAsText(aiContext, messages);
+                        const salvaged = await salvageAsText(aiContext, messages, onDelta);
                         if (salvaged && salvaged.trim()) {
                             const { speech, emotion, images: parsedImages } = parseModelReply(salvaged.trim());
                             if (speech) {
@@ -466,7 +487,15 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
                 };
             }
 
-            // 有工具调用 → 执行并回灌
+            // 有工具调用 → 这轮吐过的正文碎片全部作废（那不是最终回复），让调用方清空。
+            // 然后执行工具并回灌，下一轮重新流。
+            if (onDelta) {
+                try {
+                    onDelta(null);
+                } catch {
+                    /* ignore */
+                }
+            }
             for (const tc of msg.tool_calls) {
                 let result: unknown;
                 try {

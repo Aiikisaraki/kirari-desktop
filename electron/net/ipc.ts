@@ -7,27 +7,25 @@
 //
 // 设计原则（ARCHITECTURE-PLAN 6.7）：错误提示要说清「下一步该做什么」，
 // 且不裸露 WebSocket / Token / 适配器这类术语。
+//
+// ⚠️ 发给用户的「连接码」一律走 `m.serializePairing()`（**邀请码**），
+//    不要直接调 kirari-net 的 `serializePairingCode()`：那个是密文码，要求对方
+//    事先就有同一把组网密钥 —— 而两端都不预置密钥，用了它别的设备根本接不进来
+//    （对方会得到「这个连接码解不开」）。邀请码则不需要对方有任何密钥，
+//    密钥在配对那一刻才下发（enroll）。
 
 import { ipcMain } from "electron";
 import QRCode from "qrcode";
-import type { NetManager, NetSnapshot } from "./manager";
-import type { ExpiryKey, PairingCode } from "./pairingCode";
-import { serializePairingCode } from "./pairingCode";
-import { SYNC_FIELDS } from "./protocol";
-import { NET_ENABLED } from "./secure";
-import type { SyncField } from "./protocol";
+// 组网实现来自独立包 kirari-net（桌面端与核心版共用同一份，见 ARCHITECTURE-PLAN §1.2）。
+// 本文件只保留「电子端专属」的部分：IPC 注册与二维码渲染 —— 那两样都离不开 electron。
+import { SYNC_FIELDS } from "kirari-net";
+import type { NetManager, NetSnapshot, ExpiryKey, SyncField } from "kirari-net";
 
 /** 允许的过期档位，防止非法值进来 */
 const EXPIRY_KEYS: ExpiryKey[] = ["1h", "1d", "7d", "30d", "forever"];
 
 function pickExpiry(value: unknown): ExpiryKey {
     return EXPIRY_KEYS.includes(value as ExpiryKey) ? (value as ExpiryKey) : "7d";
-}
-
-function serializeCode(code: PairingCode): string {
-    // 原先这里用 require() 延迟引入「避免循环依赖」，但 pairingCode 并不反过来
-    // 依赖 ipc，根本没有环；而 require 在 ESM 下直接不可用（连单测都跑不起来）。
-    return serializePairingCode(code);
 }
 
 export function setupNetIpc(getManager: () => NetManager | null): void {
@@ -46,8 +44,13 @@ export function setupNetIpc(getManager: () => NetManager | null): void {
     /** 本机可用于组网的地址（页面提示「用哪个地址连」） */
     ipcMain.handle("net:addresses", withManager((m) => m.addresses()));
 
-    /** 本构建是否带组网密钥（UI 据此决定开关能不能点） */
-    ipcMain.handle("net:enabled", withManager(() => ({ enabled: NET_ENABLED })));
+    /**
+     * 这个版本能不能用组网（UI 据此决定开关能不能点）。
+     *
+     * ⚠️ 不能拿「本机现在有没有密钥」当判据 —— 两端都不预置密钥，
+     *    刚装好的机器手上当然是空的，但它完全可以自己开一个网（自签）。
+     */
+    ipcMain.handle("net:enabled", withManager((m) => ({ enabled: m.canStartNetworking() })));
 
     /**
      * 作为主机开启组网，并生成第一个连接码。
@@ -58,7 +61,7 @@ export function setupNetIpc(getManager: () => NetManager | null): void {
         withManager(async (m, expiry: unknown) => {
             const r = await m.startHosting(pickExpiry(expiry));
             if (!r.ok) return r;
-            return { ok: true as const, code: serializeCode(r.code), snapshot: m.snapshot() };
+            return { ok: true as const, code: m.serializePairing(r.code), snapshot: m.snapshot() };
         }),
     );
 
@@ -67,7 +70,7 @@ export function setupNetIpc(getManager: () => NetManager | null): void {
         "net:issue-pairing",
         withManager((m, expiry: unknown) => ({
             ok: true as const,
-            code: serializeCode(m.issuePairing(pickExpiry(expiry))),
+            code: m.serializePairing(m.issuePairing(pickExpiry(expiry))),
             snapshot: m.snapshot(),
         })),
     );

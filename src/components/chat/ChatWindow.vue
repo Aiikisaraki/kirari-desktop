@@ -833,11 +833,11 @@ async function saveImage(src: string) {
     user-select: none;
 }
 
-/* 消息行：头像 + 气泡列（头像与气泡底部对齐，配合底部气泡尾巴） */
+/* 消息行：头像 + 气泡列（头像顶边与气泡顶边对齐，正好指向收紧的小圆角） */
 .msg-row {
     display: flex;
     gap: 10px;
-    align-items: flex-end;
+    align-items: flex-start;
 }
 
 .msg-row.is-pet {

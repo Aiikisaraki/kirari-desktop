@@ -16,6 +16,24 @@ interface TokenApiBridge {
     getModelConfig(): Promise<ModelConfigFile>;
     setModelConfig(patch: Partial<ModelConfigFile>): Promise<ModelConfigFile>;
     onModelConfigChanged(cb: (cfg: ModelConfigFile) => void): void;
+    // 多模型
+    listModels(): Promise<{ items: ModelListItem[]; activeId: number | null }>;
+    addModel(p: { name: string; endpoint: string; model: string; key: string }): Promise<number>;
+    updateModel(
+        id: number,
+        patch: { name?: string; endpoint?: string; model?: string; key?: string },
+    ): Promise<{ ok: boolean }>;
+    deleteModel(id: number): Promise<{ ok: boolean; list: { items: ModelListItem[]; activeId: number | null } }>;
+    activateModel(id: number): Promise<{ ok: boolean; list: { items: ModelListItem[]; activeId: number | null } }>;
+}
+
+interface ModelListItem {
+    id: number;
+    name: string;
+    endpoint: string;
+    model: string;
+    keyMasked: string;
+    hasKey: boolean;
 }
 
 declare global {
@@ -32,13 +50,14 @@ function getBridge() {
 
 // 本地缓存：保存最近一次读到的模型配置，作为打开设置界面时的「即时显示」，
 // 避免表单闪现硬编码默认值。
-const PROFILE_CACHE_KEY = 'kirari.profile.cache.v1';
+// 字段命名与 config.json / 核心版控制台 API 三处统一：endpoint / keyMasked / hasKey / searchKey...
+const PROFILE_CACHE_KEY = 'kirari.profile.cache.v2';
 
 interface ProfileCache {
     model?: string;
-    apiEndpoint?: string;
-    tokenMasked?: string;
-    hasToken?: boolean;
+    endpoint?: string;
+    keyMasked?: string;
+    hasKey?: boolean;
     searchKeyMasked?: string;
     hasSearchKey?: boolean;
     searchEndpoint?: string;
@@ -116,6 +135,54 @@ export function useApiToken() {
         }
     }
 
+    // ---- 多模型 ----
+    async function listModels() {
+        return getBridge().listModels();
+    }
+    async function addModel(p: { name: string; endpoint: string; model: string; key: string }) {
+        isLoading.value = true;
+        error.value = '';
+        try {
+            return await getBridge().addModel(p);
+        } catch (err) {
+            error.value = err instanceof Error ? err.message : '添加失败';
+            throw err;
+        } finally {
+            isLoading.value = false;
+        }
+    }
+    async function updateModel(id: number, patch: { name?: string; endpoint?: string; model?: string; key?: string }) {
+        isLoading.value = true;
+        error.value = '';
+        try {
+            return await getBridge().updateModel(id, patch);
+        } catch (err) {
+            error.value = err instanceof Error ? err.message : '保存失败';
+            throw err;
+        } finally {
+            isLoading.value = false;
+        }
+    }
+    async function deleteModel(id: number) {
+        error.value = '';
+        try {
+            return await getBridge().deleteModel(id);
+        } catch (err) {
+            error.value = err instanceof Error ? err.message : '删除失败';
+            throw err;
+        }
+    }
+    async function activateModel(id: number) {
+        error.value = '';
+        try {
+            // 切换后主进程会广播 config:changed → 表单自动刷新成新套的值
+            return await getBridge().activateModel(id);
+        } catch (err) {
+            error.value = err instanceof Error ? err.message : '切换失败';
+            throw err;
+        }
+    }
+
     return {
         isLoading,
         error,
@@ -123,6 +190,11 @@ export function useApiToken() {
         getModelConfig,
         setModelConfig,
         onModelConfigChanged,
+        listModels,
+        addModel,
+        updateModel,
+        deleteModel,
+        activateModel,
     };
 }
 
@@ -132,12 +204,12 @@ function normalize(data: ModelConfigFile) {
     const searchKey = typeof data.searchKey === 'string' ? data.searchKey : '';
     return {
         model: typeof data.model === 'string' && data.model.trim() ? data.model.trim() : DEFAULT_MODEL,
-        apiEndpoint:
+        endpoint:
             typeof data.endpoint === 'string' && data.endpoint.trim()
                 ? data.endpoint.trim()
                 : DEFAULT_ENDPOINT,
-        tokenMasked: key ? maskKey(key) : '',
-        hasToken: !!key,
+        keyMasked: key ? maskKey(key) : '',
+        hasKey: !!key,
         searchKeyMasked: searchKey ? maskKey(searchKey) : '',
         hasSearchKey: !!searchKey,
         searchEndpoint: typeof data.searchEndpoint === 'string' ? data.searchEndpoint : '',

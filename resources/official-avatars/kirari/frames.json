@@ -4,7 +4,6 @@
   "author": "Aki",
   "version": "1.1.0",
   "chatAvatar": "kirari.jpg",
-
   "personality": {
     "greeting": [
       "早安~主人！",
@@ -114,7 +113,6 @@
       "emotion": "wave"
     }
   },
-
   "idle": {
     "sheet": "idle.png",
     "frameW": 360,
@@ -167,7 +165,7 @@
     "sheet": "bow.png",
     "frameW": 360,
     "frameH": 480,
-    "frames": 60,
+    "frames": 68,
     "fps": 12,
     "loop": false
   },
@@ -175,7 +173,7 @@
     "sheet": "excited.png",
     "frameW": 360,
     "frameH": 480,
-    "frames": 61,
+    "frames": 69,
     "fps": 12,
     "loop": false
   },
@@ -183,7 +181,7 @@
     "sheet": "nod.png",
     "frameW": 360,
     "frameH": 480,
-    "frames": 49,
+    "frames": 57,
     "fps": 12,
     "loop": false
   },
@@ -191,7 +189,7 @@
     "sheet": "sad.png",
     "frameW": 360,
     "frameH": 480,
-    "frames": 73,
+    "frames": 81,
     "fps": 12,
     "loop": false
   },
@@ -199,7 +197,7 @@
     "sheet": "shake.png",
     "frameW": 360,
     "frameH": 480,
-    "frames": 48,
+    "frames": 56,
     "fps": 12,
     "loop": false
   },
@@ -207,7 +205,7 @@
     "sheet": "shy.png",
     "frameW": 360,
     "frameH": 480,
-    "frames": 49,
+    "frames": 57,
     "fps": 12,
     "loop": false
   },
@@ -215,7 +213,7 @@
     "sheet": "stretch.png",
     "frameW": 360,
     "frameH": 480,
-    "frames": 61,
+    "frames": 69,
     "fps": 12,
     "loop": false
   },
@@ -223,7 +221,7 @@
     "sheet": "surprised.png",
     "frameW": 360,
     "frameH": 480,
-    "frames": 49,
+    "frames": 57,
     "fps": 12,
     "loop": false
   },
@@ -231,7 +229,7 @@
     "sheet": "thinking.png",
     "frameW": 360,
     "frameH": 480,
-    "frames": 73,
+    "frames": 81,
     "fps": 12,
     "loop": false
   }

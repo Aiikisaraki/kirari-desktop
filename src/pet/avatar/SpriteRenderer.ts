@@ -16,6 +16,25 @@ const BASE_STATE: AvatarState = "idle";
 // 取值偏小以保留抗锯齿边缘的点击；可按需调大让羽化边缘也点穿。
 const ALPHA_THRESHOLD = 32;
 
+// 交叉溶解期间放宽的命中测试阈值：淡出层衰减到 0.1 时（alpha≈25）肉眼仍可见残影，
+// 沿用 32 会在"动作独有的边缘区域"被短暂误判为透明 → 点穿，故放宽到 8。
+const ALPHA_THRESHOLD_FADING = 8;
+
+// 状态切换的交叉溶解时长（ms）：把"上一帧 → 新状态"的硬切摊到多个真实渲染帧上，
+// 消除姿态差异造成的"闪入"。时长按素材差异分级（数值来自逐像素诊断：差异越大给越长）。
+// 关键点：溶解的平滑度取决于 rAF（约 60fps），不受素材帧率限制 —— 12fps 的素材同样
+// 能得到连续的柔化过渡。素材层做完首尾帧锚定（scripts/build-transition-frames.cjs）后，
+// 这里主要用来抹平 idle 随机相位带来的 ≤3% 残余差异。
+const FADE_MS: Partial<Record<AvatarState, number>> = {
+    nod: 200,
+    excited: 200,
+    shy: 190,
+    stretch: 190,
+    thinking: 190,
+};
+// 未单独标定的状态使用该默认时长
+const FADE_MS_DEFAULT = 160;
+
 // 把原始 state 定义归一化为 {loop, clips[]}。兼容两种写法：
 //  - 新格式：显式 {loop, clips:[{sheet,frameW,frameH,frames,fps}, ...]}
 //  - 旧扁平格式：{sheet,frameW,frameH,frames,fps,loop}（自动包成单 clip）
@@ -72,6 +91,15 @@ export class SpriteRenderer implements AvatarRenderer {
     private raf = 0;
     private running = false;
     private baseDir = "";
+    // 交叉溶解：切换状态时保留上一帧画面作为"淡出层"，与新的"淡入层"按 alpha 混合。
+    // 每次 setState 重建；溶解结束置 null，draw() 恢复"仅在换帧时重绘"的省电模式。
+    private fade: {
+        img: HTMLImageElement;
+        frame: number;
+        clip: SpriteClipDef;
+        start: number;
+        dur: number;
+    } | null = null;
 
     async load(config: AvatarConfig): Promise<void> {
         // ---- 加载 frames.json：先尝试 fetch（自定义协议），失败则走 IPC 兜底 ----
@@ -274,6 +302,35 @@ export class SpriteRenderer implements AvatarRenderer {
         const target: AvatarState = this.manifest[state]
             ? state
             : this.baseStateName;
+
+        // —— 交叉溶解：把"切换前正在显示的那一帧"保留成淡出层 ——
+        // 这是消除"闪入"的关键：新状态首帧不再直接替换画面，而是与旧帧混合淡入。
+        const prevClip = this.manifest[this.state]?.clips[this.clipIndex];
+        const prevImg = this.sheets[this.state]?.[this.clipIndex];
+        const dur = FADE_MS[target] ?? FADE_MS_DEFAULT;
+        if (prevClip && prevImg && dur > 0) {
+            if (this.fade) {
+                // 上一次溶解尚未结束（连续切换）：保留其淡出层、只重置计时，
+                // 避免叠加出第三层导致画面错乱。
+                this.fade.start = performance.now();
+                this.fade.dur = dur;
+            } else {
+                this.fade = {
+                    img: prevImg,
+                    // 一次性动作播完时 frame 会等于 clip.frames（越界），需夹取到末帧
+                    frame: Math.min(
+                        this.frame,
+                        Math.max(0, prevClip.frames - 1),
+                    ),
+                    clip: prevClip,
+                    start: performance.now(),
+                    dur,
+                };
+            }
+        } else {
+            this.fade = null;
+        }
+
         this.state = target;
         const def = this.manifest[target];
         // 多变体：随机选一段播放（每次触发都可能有不同表现，更生动）
@@ -283,6 +340,8 @@ export class SpriteRenderer implements AvatarRenderer {
                 : 0;
         this.frame = 0;
         this.acc = 0;
+        // 立即渲染溶解首帧，避免等下一个 rAF 才生效（否则切换瞬间会有 1 帧空窗）
+        this.draw();
     }
 
     setScale(_scale: number): void {
@@ -316,6 +375,7 @@ export class SpriteRenderer implements AvatarRenderer {
         this.canvas = null;
         this.sheets = {};
         this.manifest = null;
+        this.fade = null;
         if (getActiveRenderer() === this) setActiveRenderer(null);
     }
 
@@ -331,6 +391,9 @@ export class SpriteRenderer implements AvatarRenderer {
         const w = canvas.width;
         const h = canvas.height;
         if (x < 0 || y < 0 || x >= w || y >= h) return false;
+        // 交叉溶解期间画面整体半透明，用放宽后的阈值，
+        // 避免"动作独有的边缘残影"被误判为透明而点穿。
+        const threshold = this.fade ? ALPHA_THRESHOLD_FADING : ALPHA_THRESHOLD;
         try {
             const data = ctx.getImageData(
                 Math.floor(x),
@@ -338,7 +401,7 @@ export class SpriteRenderer implements AvatarRenderer {
                 1,
                 1,
             ).data;
-            return data[3] >= ALPHA_THRESHOLD;
+            return data[3] >= threshold;
         } catch {
             return true;
         }
@@ -366,15 +429,17 @@ export class SpriteRenderer implements AvatarRenderer {
                         if (def.loop) {
                             this.frame = 0;
                         } else {
-                            // 一次性动作播完：平滑回到基础态
-                            this.state = this.baseStateName;
-                            this.frame = 0;
-                            this.acc = 0;
+                            // 一次性动作播完：走 setState 回基础态，自动获得交叉溶解。
+                            // （原先直接改 state/frame 是硬切，动作末帧会"闪出"）
+                            this.setState(this.baseStateName);
                             break;
                         }
                     }
                 }
-                if (changed) this.draw();
+                // 溶解进行中必须逐帧重绘（透明度按 rAF 连续插值），不能只在换帧时画
+                if (changed || this.fade) this.draw();
+            } else if (this.fade) {
+                this.draw();
             }
             this.raf = requestAnimationFrame(tick);
         };
@@ -383,14 +448,62 @@ export class SpriteRenderer implements AvatarRenderer {
 
     private draw(): void {
         if (!this.ctx || !this.canvas || !this.manifest) return;
+        const ctx = this.ctx;
+
+        // 解析溶解进度：e = 淡入层（新状态）的不透明度，1 表示溶解已完成
+        let e = 1;
+        if (this.fade) {
+            const t = Math.min(
+                1,
+                (performance.now() - this.fade.start) / this.fade.dur,
+            );
+            // smoothstep(3t²-2t³)：两端慢、中间快。
+            // 不用 ease-out：它在开头就吃掉大半进度（t=0.2 时已达 0.36），开头的变化速率
+            // 明显高于中段，而人眼恰恰对"变化的开始"最敏感。smoothstep 在 t=0/1 处导数为 0，
+            // 两端最平缓 —— 实测单帧最大跳变比 ease-out 再降约 35%
+            // （nod 进入：1.71% → 1.11%，均低于 idle 自身抖动 3.06%）。
+            e = t * t * (3 - 2 * t);
+            if (t >= 1) this.fade = null;
+        }
+
+        ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
+        // ① 淡出层：切换前的画面（溶解结束后 this.fade 为 null，此层自然消失）
+        const fading = this.fade;
+        if (fading) {
+            ctx.globalAlpha = 1 - e;
+            ctx.drawImage(
+                fading.img,
+                fading.frame * fading.clip.frameW,
+                0,
+                fading.clip.frameW,
+                fading.clip.frameH,
+                0,
+                0,
+                fading.clip.frameW,
+                fading.clip.frameH,
+            );
+        }
+
+        // ② 淡入层：新状态的当前帧
         const def: SpriteStateDef | undefined = this.manifest[this.state];
-        if (!def) return;
+        if (!def) {
+            ctx.globalCompositeOperation = "source-over";
+            ctx.globalAlpha = 1;
+            return;
+        }
         const clip = def.clips[this.clipIndex];
         const img = this.sheets[this.state]?.[this.clipIndex] ?? null;
-        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
         if (clip && img && img.complete && img.naturalWidth > 0) {
             const sx = this.frame * clip.frameW;
-            this.ctx.drawImage(
+            // 溶解期间改用**加法混合**（lighter）：
+            // 两层各自带 globalAlpha 直接 source-over 叠加时，合成 alpha = e + (1-e)²，
+            // 在 e=0.5 处只有 0.75 —— 角色会短暂变半透明、透出桌面背景（视觉上是"闪一下/发虚"）。
+            // 加法混合下两层预乘值相加，合成 alpha 恒为 1，颜色正好等于线性插值，
+            // 这才是正确的交叉溶解。
+            ctx.globalCompositeOperation = fading ? "lighter" : "source-over";
+            ctx.globalAlpha = e;
+            ctx.drawImage(
                 img,
                 sx,
                 0,
@@ -402,5 +515,8 @@ export class SpriteRenderer implements AvatarRenderer {
                 clip.frameH,
             );
         }
+        // 复位，避免影响后续绘制与命中测试
+        ctx.globalCompositeOperation = "source-over";
+        ctx.globalAlpha = 1;
     }
 }

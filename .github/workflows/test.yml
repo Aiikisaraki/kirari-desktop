@@ -7,6 +7,13 @@ name: 检查与测试 (kirari-desktop)
 #
 # 之前 push 什么都不跑 —— 「点进模型页卡死」「表单整块不渲染」这类问题
 # 只能等人工点出来。这里就是补上那道关。
+#
+# ⚠️ 依赖布局：package.json 里是 "kirari-net": "file:../kirari-net" —— 组网层
+#    是与本仓库**平级**的独立包。所以这里要把它检出到上一个目录（workspace 根）
+#    下的 kirari-net/，再把本仓库检出到 kirari-desktop/，两者才成平级关系。
+#    组网层还要先构建出 dist（本仓库引的是它的编译产物 + 类型声明）。
+#    ⚠️ npm ci 对 file: 依赖**不校验目标是否存在**，缺了只留一个悬空软链，
+#       安装一路绿灯、typecheck 才炸 —— 所以这段检出绝对不能省。
 # ─────────────────────────────────────────────────────────────────────────────
 on:
   push:
@@ -22,15 +29,35 @@ jobs:
     env:
       # 单测不启动 Electron，别下载百来 MB 的二进制，省时间也省流量。
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    defaults:
+      run:
+        working-directory: kirari-desktop
     steps:
+      - name: 检出组网层（kirari-net，必须与桌面端平级）
+        uses: actions/checkout@v4
+        with:
+          repository: Aiikisaraki/kirari-net
+          path: kirari-net
+
       - name: 检出代码
         uses: actions/checkout@v4
+        with:
+          path: kirari-desktop
 
       - name: 装 Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
+          cache-dependency-path: kirari-desktop/package-lock.json
+
+      - name: 构建组网层（桌面端引的是它的 dist）
+        run: |
+          cd ../kirari-net
+          npm install --no-audit --no-fund
+          npm run build
+          # 自检：构建产物真的能 require 到（不然只是把失败推迟到后面）
+          node -e "require('./'); console.log('kirari-net ok')"
 
       - name: 装依赖
         run: npm ci

@@ -8,19 +8,122 @@ const {
     getModelConfig,
     setModelConfig,
     onModelConfigChanged,
+    listModels,
+    addModel,
+    updateModel,
+    deleteModel,
+    activateModel,
 } = useApiToken();
 
 // 免费大模型 API Key 领取指引（chatanywhere，支持 gpt/deepseek/通义千问等，国内直连免代理）
 const freeKeyUrl = "https://github.com/chatanywhere/GPT_API_free";
 
-const modelInput = ref("gpt-5.4-mini");
-const apiEndpointInput = ref("https://api.chatanywhere.tech/v1");
-const tokenMasked = ref("");
-const hasToken = ref(false);
-const newTokenInput = ref("");
+// ── 多模型 ──
+// 每套 = 名字 + 服务地址 + 型号 + 钥匙；「设为当前」后聊天就走那套。
+interface ModelItem {
+    id: number;
+    name: string;
+    endpoint: string;
+    model: string;
+    keyMasked: string;
+    hasKey: boolean;
+}
+const models = ref<ModelItem[]>([]);
+const activeId = ref<number | null>(null);
+const modelsError = ref("");
+const modelsNotice = ref("");
+// null = 没在编辑；"new" = 新增；数字 = 编辑那一套
+const editing = ref<{ id: "new" | number; name: string; endpoint: string; model: string; key: string } | null>(null);
+let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+
+function flashNotice(msg: string) {
+    modelsNotice.value = msg;
+    if (noticeTimer) clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => (modelsNotice.value = ""), 2500);
+}
+
+async function loadModels() {
+    try {
+        const d = await listModels();
+        models.value = d.items;
+        activeId.value = d.activeId;
+    } catch {
+        /* 读不到保留现状 */
+    }
+}
+
+function startAdd() {
+    editing.value = { id: "new", name: "", endpoint: "", model: "gpt-5.4-mini", key: "" };
+    modelsError.value = "";
+}
+
+function startEdit(m: ModelItem) {
+    // 钥匙不回填明文，留空 = 不改
+    editing.value = { id: m.id, name: m.name, endpoint: m.endpoint, model: m.model, key: "" };
+    modelsError.value = "";
+}
+
+function cancelEdit() {
+    editing.value = null;
+    modelsError.value = "";
+}
+
+async function saveEdit() {
+    const f = editing.value;
+    if (!f) return;
+    if (!f.name.trim() || !f.endpoint.trim() || !f.model.trim()) {
+        modelsError.value = "名字、服务地址、型号都要填";
+        return;
+    }
+    if (f.id === "new" && !f.key.trim()) {
+        modelsError.value = "新的一套要把钥匙也填上";
+        return;
+    }
+    try {
+        if (f.id === "new") {
+            await addModel({ name: f.name, endpoint: f.endpoint, model: f.model, key: f.key });
+            flashNotice("已添加");
+        } else {
+            await updateModel(f.id, {
+                name: f.name,
+                endpoint: f.endpoint,
+                model: f.model,
+                key: f.key.trim() ? f.key.trim() : undefined,
+            });
+            flashNotice("已保存，立即生效");
+        }
+        editing.value = null;
+        await loadModels();
+    } catch {
+        /* error 已由 composable 写入 */
+    }
+}
+
+async function setActive(m: ModelItem) {
+    modelsError.value = "";
+    try {
+        await activateModel(m.id);
+        flashNotice(`已切换到「${m.name}」`);
+        await loadModels();
+    } catch {
+        /* error 已由 composable 写入 */
+    }
+}
+
+async function removeModel(m: ModelItem) {
+    if (!window.confirm(`删掉「${m.name}」？删了就找不回来了。`)) return;
+    modelsError.value = "";
+    try {
+        await deleteModel(m.id);
+        flashNotice("已删除");
+        await loadModels();
+    } catch {
+        /* error 已由 composable 写入 */
+    }
+}
+
+// ── 联网搜索（渠道配置，所有大脑共用）──
 const searchProvider = ref<"uapis" | "tavily" | "searxng">("uapis");
-// 主进程/缓存里的 searchProvider 是 string，落进联合类型前先归一化，
-// 认不出来的值一律回退到 uapis，避免界面上出现空选项。
 function normalizeProvider(v: string | undefined): "uapis" | "tavily" | "searxng" {
     return v === "tavily" || v === "searxng" ? v : "uapis";
 }
@@ -39,49 +142,29 @@ const credentialPlaceholder = computed(() => {
     if (searchProvider.value === "tavily") return "选填：填后改用 Tavily 搜索";
     return "选填：uapis.cn 登录令牌（留空则用匿名免费额度）";
 });
-const credentialType = computed(() =>
-    searchProvider.value === "searxng" ? "text" : "password",
-);
+const credentialType = computed(() => (searchProvider.value === "searxng" ? "text" : "password"));
 const saveSuccess = ref(false);
-// 打开时从后端/缓存读到的最新值，保存时只发送「发生变更」的字段。
-const baseProfile = ref<{
-    model: string;
-    apiEndpoint: string;
-    searchProvider: string;
-} | null>(null);
+const baseSearchProvider = ref("uapis");
 let clearTimer: ReturnType<typeof setTimeout> | undefined;
 
-function applyProfile(p: {
-    model: string;
-    apiEndpoint: string;
-    tokenMasked: string;
-    hasToken: boolean;
+function applySearch(p: {
     searchKeyMasked?: string;
     hasSearchKey?: boolean;
     searchEndpoint?: string;
     searchProvider?: string;
 }) {
-    modelInput.value = p.model;
-    apiEndpointInput.value = p.apiEndpoint;
-    tokenMasked.value = p.tokenMasked;
-    hasToken.value = p.hasToken;
     searchProvider.value = normalizeProvider(p.searchProvider);
     searchKeyMasked.value = p.searchKeyMasked ?? "";
     hasSearchKey.value = p.hasSearchKey === true;
     searchEndpoint.value = p.searchEndpoint ?? "";
 }
 
-async function loadProfile() {
+async function loadSearch() {
     try {
-        const profile = await getModelConfig();
-        applyProfile(profile);
-        baseProfile.value = {
-            model: profile.model,
-            apiEndpoint: profile.apiEndpoint,
-            searchProvider: profile.searchProvider,
-        };
+        applySearch(await getModelConfig());
+        baseSearchProvider.value = searchProvider.value;
     } catch {
-        /* 读不到则保留表单当前值 */
+        /* 读不到则保留当前值 */
     }
 }
 
@@ -101,58 +184,20 @@ function openExternal(url: string) {
 }
 
 async function handleSave() {
-    const model = modelInput.value.trim();
-    const endpoint = apiEndpointInput.value.trim();
-    if (!model || !endpoint) {
-        error.value = "模型名称和 API 端点不能为空";
-        return;
-    }
-    // 还没填过钥匙，且本次也没填：直接提示，避免保存后仍然聊不了天。
-    if (!hasToken.value && !newTokenInput.value.trim()) {
-        error.value = "还没填过大脑的钥匙，请在下面的钥匙框里填一次再保存";
-        return;
-    }
-    // 仅发送变更过的字段：改一个就只发一个，不必三个一起填。
-    const patch: {
-        model?: string;
-        endpoint?: string;
-        key?: string;
-        searchKey?: string;
-        searchEndpoint?: string;
-        searchProvider?: string;
-    } = {};
-    if (model !== (baseProfile.value?.model ?? "")) patch.model = model;
-    if (endpoint !== (baseProfile.value?.apiEndpoint ?? ""))
-        patch.endpoint = endpoint;
-    if (newTokenInput.value.trim()) patch.key = newTokenInput.value.trim();
-    if (searchProvider.value !== (baseProfile.value?.searchProvider ?? "uapis"))
-        patch.searchProvider = searchProvider.value;
+    const patch: { searchKey?: string; searchEndpoint?: string; searchProvider?: string } = {};
+    if (searchProvider.value !== baseSearchProvider.value) patch.searchProvider = searchProvider.value;
     if (newCredentialInput.value.trim()) {
-        if (searchProvider.value === "searxng")
-            patch.searchEndpoint = newCredentialInput.value.trim();
+        if (searchProvider.value === "searxng") patch.searchEndpoint = newCredentialInput.value.trim();
         else patch.searchKey = newCredentialInput.value.trim();
     }
-
     if (Object.keys(patch).length === 0) {
         flashSuccess();
         return;
     }
     try {
         const updated = await setModelConfig(patch);
-        modelInput.value = updated.model;
-        apiEndpointInput.value = updated.apiEndpoint;
-        tokenMasked.value = updated.tokenMasked;
-        hasToken.value = updated.hasToken;
-        searchKeyMasked.value = updated.searchKeyMasked;
-        hasSearchKey.value = updated.hasSearchKey;
-        searchEndpoint.value = updated.searchEndpoint;
-        if (updated.searchProvider) searchProvider.value = normalizeProvider(updated.searchProvider);
-        baseProfile.value = {
-            model: updated.model,
-            apiEndpoint: updated.apiEndpoint,
-            searchProvider: updated.searchProvider || "uapis",
-        };
-        newTokenInput.value = "";
+        applySearch(updated);
+        baseSearchProvider.value = updated.searchProvider || "uapis";
         newCredentialInput.value = "";
         flashSuccess();
     } catch {
@@ -161,101 +206,130 @@ async function handleSave() {
 }
 
 onMounted(() => {
-    // 订阅 config.json 的外部改动：用户在设置页之外改了文件（比如手动编辑、
-    // 组网时被主机同步过来），这里实时刷新，不用重开设置页。
-    //
-    // ⚠️ 早前这里还包了一层 `if (mode.value === "local")` —— 那是部署模式
-    //    时代的分支，0.8.0 移除远程模式后 `mode` 变量已被删掉，引用它会直接
-    //    抛 ReferenceError，整个组件渲染失败（表现是「点进模型页就卡死」）。
-    //    现在只有本机配置一种模式，直接订阅即可。
-    onModelConfigChanged((p) => {
-        applyProfile(p);
-        baseProfile.value = {
-            model: p.model,
-            apiEndpoint: p.apiEndpoint,
-            searchProvider: p.searchProvider,
-        };
-    });
-    loadProfile();
+    // 订阅 config.json 的外部改动：手动编辑、组网同步过来的配置实时刷新。
+    onModelConfigChanged((p) => applySearch(p));
+    loadModels();
+    loadSearch();
 });
-
 </script>
 
 <template>
     <section id="model" class="settings-card">
         <h3 class="settings-card__title">
             <span class="title-emoji">🧠</span>
-            <span>模型与联网搜索</span>
+            <span>大脑（可配多套）</span>
         </h3>
         <p class="settings-card__desc">
-            配置桌宠使用的大模型与联网搜索能力。
+            可以保存好几套大脑（不同的服务地址、型号、钥匙），随时切换聊天用哪套。标着「使用中」的就是当前生效的。
         </p>
 
-        <!-- 桌宠本机运行、免登录，模型配置（含钥匙）直接可填。 -->
-        <!--
-            ⚠️ 这里曾经有个 `<template>` 包裹（是 `v-if="mode === 'local'"` 时代留下的）。
-            不带任何指令的 `<template>` 会被编译成**原生 template 元素**，它的子节点
-            只存在于 .content 片段里、根本不进 DOM —— 表现就是页面上只剩标题，
-            下面一整张表单全是空的。删掉分支时必须连包裹一起删，不能只删 v-if。
-        -->
-        <div class="field">
-            <label class="field-label" for="model">模型名称</label>
-            <input
-                id="model"
-                v-model="modelInput"
-                class="text-input"
-                type="text"
-                autocomplete="off"
-                placeholder="例如 gpt-5.4-mini"
-                :disabled="isLoading"
-            />
+        <!-- 列表 -->
+        <div v-if="models.length === 0 && !editing" class="models-empty">
+            还没配过大脑。点下面的「添加一套」填上服务地址和钥匙就能聊。
         </div>
-
-        <div class="field">
-            <label class="field-label" for="endpoint">模型 API 端点</label>
-            <input
-                id="endpoint"
-                v-model="apiEndpointInput"
-                class="text-input"
-                type="url"
-                autocomplete="off"
-                placeholder="https://api.chatanywhere.tech/v1"
-                :disabled="isLoading"
-            />
-            <p class="settings-hint">
-                这是大模型 API 地址，不是本地后端地址。
-            </p>
-            <p class="settings-hint">
-                没有 API Key？可前往
-                <a
-                    href="#"
-                    class="inline-link"
-                    @click.prevent="openExternal(freeKeyUrl)"
-                    >chatanywhere</a
+        <div
+            v-for="m in models"
+            :key="m.id"
+            class="model-item"
+            :class="{ 'model-item--active': m.id === activeId }"
+        >
+            <div class="model-item__main">
+                <div class="model-item__name">
+                    {{ m.name }}
+                    <span v-if="m.id === activeId" class="model-item__badge">使用中</span>
+                    <span v-if="!m.hasKey" class="model-item__warn">还没填钥匙</span>
+                </div>
+                <div class="model-item__meta">{{ m.model }}</div>
+                <div class="model-item__meta model-item__meta--dim">{{ m.endpoint }}</div>
+                <div v-if="m.hasKey" class="model-item__meta model-item__meta--dim">钥匙 {{ m.keyMasked }}</div>
+            </div>
+            <div class="model-item__ops">
+                <button
+                    v-if="m.id !== activeId"
+                    type="button"
+                    class="btn btn--small btn--primary"
+                    :disabled="isLoading"
+                    @click="setActive(m)"
                 >
-                免费领取（支持 gpt / deepseek /
-                通义千问等常用模型，国内直连、免代理，每日有免费额度）。
-            </p>
+                    设为当前
+                </button>
+                <button type="button" class="btn btn--small" :disabled="isLoading" @click="startEdit(m)">
+                    编辑
+                </button>
+                <button type="button" class="btn btn--small btn--danger" :disabled="isLoading" @click="removeModel(m)">
+                    删除
+                </button>
+            </div>
         </div>
 
-        <div class="field">
-            <label class="field-label" for="newToken">API Token</label>
-            <input
-                id="newToken"
-                v-model="newTokenInput"
-                class="text-input"
-                type="password"
-                autocomplete="new-password"
-                placeholder="输入新 Token 以替换（留空则不修改）"
-                :disabled="isLoading"
-            />
-            <p v-if="hasToken" class="settings-hint">
-                当前 Token：{{ tokenMasked }}（已加密保存，无需查看明文）
-            </p>
-        </div>
+        <p v-if="modelsNotice" class="settings-success">{{ modelsNotice }}</p>
+        <p v-if="modelsError" class="settings-error">{{ modelsError }}</p>
 
-        <div class="field">
+        <!-- 添加 / 编辑 -->
+        <div v-if="editing" class="model-edit">
+            <h4 class="model-edit__title">{{ editing.id === "new" ? "添加一套大脑" : "编辑这套大脑" }}</h4>
+            <div class="field">
+                <label class="field-label" for="mp-name">名字</label>
+                <input
+                    id="mp-name"
+                    v-model="editing.name"
+                    class="text-input"
+                    type="text"
+                    maxlength="40"
+                    placeholder="自己起个好认的，例如「便宜快档」"
+                />
+            </div>
+            <div class="field">
+                <label class="field-label" for="mp-endpoint">服务地址</label>
+                <input
+                    id="mp-endpoint"
+                    v-model="editing.endpoint"
+                    class="text-input"
+                    type="url"
+                    placeholder="https://api.chatanywhere.tech/v1"
+                />
+                <p class="settings-hint">
+                    没有 API Key？可前往
+                    <a href="#" class="inline-link" @click.prevent="openExternal(freeKeyUrl)">chatanywhere</a>
+                    免费领取（国内直连、每日有免费额度）。
+                </p>
+            </div>
+            <div class="field">
+                <label class="field-label" for="mp-model">型号</label>
+                <input
+                    id="mp-model"
+                    v-model="editing.model"
+                    class="text-input"
+                    type="text"
+                    placeholder="例如 gpt-5.4-mini"
+                />
+            </div>
+            <div class="field">
+                <label class="field-label" for="mp-key">钥匙</label>
+                <input
+                    id="mp-key"
+                    v-model="editing.key"
+                    class="text-input"
+                    type="password"
+                    autocomplete="new-password"
+                    :placeholder="editing.id === 'new' ? '这家服务给你的钥匙' : '留空表示不改'"
+                />
+            </div>
+            <div class="model-edit__ops">
+                <button type="button" class="btn btn--primary" :disabled="isLoading" @click="saveEdit">
+                    {{ isLoading ? "保存中..." : "保存" }}
+                </button>
+                <button type="button" class="btn" @click="cancelEdit">取消</button>
+            </div>
+        </div>
+        <button v-else type="button" class="btn btn--block models-add" :disabled="isLoading" @click="startAdd">
+            ＋ 添加一套
+        </button>
+
+        <!-- 联网搜索（所有大脑共用） -->
+        <div class="field models-divider">
             <span class="field-label">联网搜索提供商</span>
+            <p class="settings-hint">回答实时问题（天气、新闻之类）时用的查证渠道，所有大脑共用这一套。</p>
             <div class="provider-row">
                 <label class="provider-option">
                     <input type="radio" value="uapis" v-model="searchProvider" />
@@ -266,24 +340,14 @@ onMounted(() => {
                     <span>Tavily</span>
                 </label>
                 <label class="provider-option">
-                    <input
-                        type="radio"
-                        value="searxng"
-                        v-model="searchProvider"
-                    />
+                    <input type="radio" value="searxng" v-model="searchProvider" />
                     <span>SearXNG（自建）</span>
                 </label>
             </div>
-            <p class="settings-hint">
-                默认使用内置 UAPI 免费搜索，<strong>无需任何配置即可联网</strong>；选
-                Tavily 需填其 API Key；选 SearXNG 需填自建实例地址（隐私可控、零成本）。
-            </p>
         </div>
 
         <div class="field">
-            <label class="field-label" for="searchCredential">{{
-                credentialLabel
-            }}</label>
+            <label class="field-label" for="searchCredential">{{ credentialLabel }}</label>
             <input
                 id="searchCredential"
                 v-model="newCredentialInput"
@@ -296,29 +360,7 @@ onMounted(() => {
             <p v-if="!isSearxng && hasSearchKey" class="settings-hint">
                 当前 Key：{{ searchKeyMasked }}（已加密保存，无需查看明文）
             </p>
-            <p v-if="isSearxng && searchEndpoint" class="settings-hint">
-                当前地址：{{ searchEndpoint }}
-            </p>
-            <p v-if="searchProvider === 'uapis'" class="settings-hint">
-                免 key 即可用（匿名每月约 375 次）。在
-                <a
-                    href="#"
-                    class="inline-link"
-                    @click.prevent="openExternal('https://uapis.cn')"
-                    >uapis.cn</a
-                >
-                登录获取令牌填到此处，额度可提升至约 875 次/月。
-            </p>
-            <p v-if="searchProvider === 'tavily'" class="settings-hint">
-                Tavily 结果质量更高，在
-                <a
-                    href="#"
-                    class="inline-link"
-                    @click.prevent="openExternal('https://tavily.com')"
-                    >Tavily</a
-                >
-                免费领取 Key。
-            </p>
+            <p v-if="isSearxng && searchEndpoint" class="settings-hint">当前地址：{{ searchEndpoint }}</p>
             <p v-if="searchProvider === 'searxng'" class="settings-hint">
                 填后改用你自建的 SearXNG 实例（隐私可控、零成本）。需开启 JSON
                 API：<code>settings.yml</code> 中
@@ -333,9 +375,98 @@ onMounted(() => {
             :disabled="isLoading"
             @click="handleSave"
         >
-            {{ isLoading ? "保存中..." : "保存设置" }}
+            {{ isLoading ? "保存中..." : "保存搜索设置" }}
         </button>
         <div v-if="saveSuccess" class="settings-success">保存成功</div>
         <div v-if="error" class="settings-error">{{ error }}</div>
     </section>
 </template>
+
+<style scoped>
+.models-empty {
+    color: var(--text-secondary, #888);
+    font-size: 13px;
+    padding: 12px 0;
+}
+.model-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border: 1px solid var(--border-color, #e0e0e0);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin: 10px 0;
+}
+.model-item--active {
+    border-color: var(--primary-color, #5b6cff);
+    background: color-mix(in srgb, var(--primary-color, #5b6cff) 6%, transparent);
+}
+.model-item__main {
+    flex: 1;
+    min-width: 0;
+}
+.model-item__name {
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.model-item__badge {
+    font-size: 11px;
+    font-weight: 400;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--primary-color, #5b6cff) 14%, transparent);
+    color: var(--primary-color, #5b6cff);
+}
+.model-item__warn {
+    font-size: 11px;
+    color: #d64545;
+}
+.model-item__meta {
+    font-size: 12.5px;
+    margin-top: 3px;
+    word-break: break-all;
+}
+.model-item__meta--dim {
+    opacity: 0.65;
+}
+.model-item__ops {
+    display: flex;
+    gap: 6px;
+    flex: none;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+.btn--small {
+    padding: 5px 10px;
+    font-size: 12.5px;
+}
+.btn--danger {
+    color: #d64545;
+}
+.model-edit {
+    border: 1px dashed var(--primary-color, #5b6cff);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin: 12px 0;
+}
+.model-edit__title {
+    margin: 0 0 6px;
+    font-size: 14px;
+}
+.model-edit__ops {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+}
+.models-add {
+    margin-top: 10px;
+}
+.models-divider {
+    margin-top: 22px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-color, #e0e0e0);
+}
+</style>

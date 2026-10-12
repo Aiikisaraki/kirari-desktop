@@ -127,6 +127,33 @@ export type ChatOptions = {
     skillPrompts?: string[];
     /** 机器人场景：按群号/QQ号隔离位置记忆 */
     locationScope?: string | null;
+    /**
+     * 调用方自带的私人知识库检索结果（可选）。
+     * 叶子上行到主机时，主机必须带上它 —— 片段存在叶子本地，主机拿不到别的副本。
+     * 桌面端本地回答时带上可跳过重复检索。
+     *
+     * 刻意用宽松形状而不是 ai/knowledge/types 的 RetrievedPassage：
+     * 调用方可能拿的是 src/knowledge/localKnowledge 的同名类型（tier: string），
+     * 也可能是 kirari-net 的 KbPassage（没有 tier）——收宽形状在入口归一化。
+     */
+    kbContext?:
+        | ReadonlyArray<{
+              text: string;
+              source?: string;
+              url?: string;
+              score?: number;
+              tier?: string;
+              priority?: number;
+          }>
+        | null;
+    /**
+     * 正文逐字回调（上层做流式展示）。约定：
+     *   onDelta(text)  —— 追加一段正文增量（模型原始输出，可能带情绪标签碎片）
+     *   onDelta(null)  —— 之前流出的内容作废（工具轮碎片/换收尾路径），调用方应清空
+     * 回调抛出的异常一律在内核里吞掉，不会影响生成；最终仍以 chat() 返回的
+     * result.speech（解析后的权威正文）为准。
+     */
+    onDelta?: ((text: string | null) => void) | null;
     /** 外部取消（用户点停止生成） */
     signal?: AbortSignal;
     /** 失败时是否回退到预设兜底语。桌宠默认 true，保证永远有反应 */
@@ -148,28 +175,48 @@ export async function chat(options: ChatOptions): Promise<ReplyResult> {
         persona = null,
         skillPrompts = [],
         locationScope = null,
+        kbContext = null,
+        onDelta = null,
         signal,
         allowFallback = true,
     } = options;
 
     const context = ensureContext(settings);
 
-    // 用户消息入库（内核构造上下文时读取）
-    await db.saveMessage(sessionId, "user", text);
+    // 用户消息入库（内核构造上下文时读取）。images 一并落库 ——
+    // 这张表现在同时是桌宠聊天界面的记录真源，只存文字会让历史里的图片全丢。
+    await db.saveMessage(sessionId, "user", text, { images: images.length ? images : undefined });
 
     try {
+        // 归一化：tier 只接受白名单值（A/B/C），其余剥掉，别让脏数据进内核
+        const kbNormalized: RetrievedPassage[] | null = kbContext
+            ? kbContext.map((p) => ({
+                  text: p.text,
+                  source: p.source,
+                  url: p.url,
+                  score: p.score,
+                  tier: p.tier === "A" || p.tier === "B" || p.tier === "C" ? p.tier : undefined,
+                  priority: p.priority,
+              }))
+            : null;
         const result = await getReply({
             aiContext: context,
             content: text,
             images,
             sessionId,
             locationScope,
+            kbContext: kbNormalized,
+            onDelta,
             skillPrompts,
             persona,
             signal,
         });
-        // 助手回复入库，保证下一轮上下文连贯
-        await db.saveMessage(sessionId, "assistant", result.speech);
+        // 助手回复入库，保证下一轮上下文连贯。emotion 一并落库 ——
+        // 界面重放历史时要按当时的情绪播动画，见 ChatSessionService.loadFromDb。
+        await db.saveMessage(sessionId, "assistant", result.speech, {
+            emotion: (result.emotion as string | undefined) ?? null,
+            images: Array.isArray(result.images) && result.images.length ? result.images : undefined,
+        });
         return result;
     } catch (e) {
         const err = e as Error & { name?: string };

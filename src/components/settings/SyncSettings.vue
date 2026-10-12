@@ -10,7 +10,10 @@
  *  3. 加入组网会共用主机的额度 —— 必须在接入前明示，不能让用户无声消耗别人额度。
  *
  * 文案规范：不出现 WebSocket / Token / 适配器这类词。
- *   主机 = 这台设备；连接码 = 加入凭证；额度 = 大脑的使用额度。
+ *   主机 = 这台设备；连接码 = 加入凭证（一次性、可撤销）；额度 = 大脑的使用额度。
+ *
+ * ⚠️ 「连接码」现在是**邀请码**：对方事先不需要有任何密钥，密钥在配对那一刻
+ *    才发给它。所以别再写「必须和主机用同一个版本/同一把密钥」这类说明。
  */
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useToast } from "../../composables/useToast";
@@ -43,7 +46,7 @@ const netApi = (window as any).netApi;
 const toast = useToast();
 
 const snap = ref<NetSnapshot | null>(null);
-/** 本构建是否带组网密钥（没有就整体禁用） */
+/** 这个版本能不能用组网（被发行者整体关掉时为 false，整块灰显） */
 const netEnabled = ref(true);
 const addresses = ref<string[]>([]);
 const busy = ref(false);
@@ -316,9 +319,9 @@ onUnmounted(() => {
             这样一份回复只会有一个，不会几台设备抢着回答。
         </p>
 
-        <!-- 没有密钥的构建：明确说清为什么不可用（灰显而非隐藏） -->
+        <!-- 组网被这个版本整体关掉时：明确说清（灰显而非隐藏） -->
         <div v-if="!netEnabled" class="settings-hint" style="margin-bottom: 8px">
-            当前这个版本没有包含组网密钥，无法使用组网功能。
+            当前这个版本的组网功能被关掉了，无法使用。
         </div>
 
         <!-- ── 总开关 ─────────────────────────────────────────── -->
@@ -448,7 +451,7 @@ onUnmounted(() => {
                         />
                         <div v-else style="opacity: 0.7">正在生成…</div>
                         <p style="margin-top: 8px; opacity: 0.85">
-                            <strong>扫一下最稳。</strong>连接码是加密过的乱码，手动粘贴容易漏字符。
+                            <strong>扫一下最稳。</strong>连接码是一长串字符，手动粘贴容易漏字符。
                         </p>
                     </div>
                 </div>
@@ -596,7 +599,7 @@ onUnmounted(() => {
                     </div>
                 </div>
                 <div class="settings-hint">
-                    密钥不会下发 —— 组网时本来就用这台设备的，其他设备不用单独配置。
+                    上面这些只管「用哪个大脑」，不含钥匙 —— 钥匙始终只用这台设备自己的。
                 </div>
             </template>
 

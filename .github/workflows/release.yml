@@ -36,14 +36,38 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
+    # 本仓库被检出到 kirari-desktop/ 子目录（为了和 kirari-net 成平级关系，
+    # 见下面检出那两步），所以所有 run 步骤都在这个目录里执行。
+    defaults:
+      run:
+        working-directory: kirari-desktop
     steps:
+      - name: 检出组网层 (kirari-net)
+        # package.json 里是 "kirari-net": "file:../kirari-net" —— 组网层必须与
+        # 本仓库**平级**。检出到 workspace 根下的 kirari-net/ 才能满足这个相对路径。
+        # 注意：npm ci 对 file: 依赖不校验目标是否存在（缺了只留悬空软链，
+        # 安装绿灯、运行时才炸），所以这一步不能省。
+        uses: actions/checkout@v4
+        with:
+          repository: Aiikisaraki/kirari-net
+          path: kirari-net
+
       - name: Checkout frontend (kirari-desktop)
         uses: actions/checkout@v4
         with:
+          path: kirari-desktop
           fetch-depth: 0
           # 关键：官方皮肤精灵图走 Git LFS，必须拉取真实二进制。否则安装包里只是 LFS 指针文本，
           # 运行时加载不出任何皮肤形象（历史踩坑：CI 发出的安装包找不到皮肤）。
           lfs: true
+
+      - name: Build networking layer (kirari-net)
+        # 主进程会把 kirari-net 打进来，需要它的 dist + 类型声明先就位。
+        working-directory: kirari-net
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+          node -e "require('./'); console.log('kirari-net ok')"
 
       # 防御性校验：确保 official-avatars 下是真实图片而非 LFS 指针残留。
       # 若 CI 没拉到 LFS 对象，这里直接让构建失败，避免再次发出"无皮肤"的安装包。
@@ -68,6 +92,7 @@ jobs:
         with:
           node-version: 24
           cache: npm
+          cache-dependency-path: kirari-desktop/package-lock.json
 
       - name: Determine version
         id: version
@@ -89,11 +114,9 @@ jobs:
 
       - name: Build & package Windows installer
         env:
-          # 组网密钥：从 GitHub Secret 注入，构建期编译进产物。
-          # 没配置这个 Secret 时构建仍会成功，但产物的组网功能是禁用的
-          # （electron/net/secure.ts 里 NET_ENABLED 为 false）——
-          # 这样 fork 后自行构建的人不会带着别人的密钥分发。
-          KIRARI_NET_SECRET: ${{ secrets.KIRARI_NET_SECRET }}
+          # 组网密钥**不需要在构建期注入**：两端都不带密钥出厂，
+          # 密钥由每台设备在运行时自己解决（当主机自签 / 当叶子配对期领取）。
+          # 所以这里没有 KIRARI_NET_SECRET 这个 Secret，也没有任何密钥进产物。
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: npm run dist
 
@@ -114,7 +137,8 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: ${{ steps.version.outputs.tag }}
-          files: release/*Setup*.exe
+          # 路径相对 workspace 根（uses 步骤不受 defaults.run.working-directory 影响）
+          files: kirari-desktop/release/*Setup*.exe
           draft: false
           prerelease: false
           generate_release_notes: true

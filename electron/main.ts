@@ -16,13 +16,13 @@ import { ChatSessionService, type ChatStateSnapshot } from "./chat-session-servi
 import { AdapterManager } from "./adapter/adapter-manager";
 import type { AdapterConfig, AdapterStatus } from "./adapter/types";
 import { initEngine, shutdownEngine, chat as engineChat } from "./ai/engine";
-import { NetManager } from "./net/manager";
+import { NetManager } from "kirari-net";
+import type { HostExecutor, RelayBackfill } from "kirari-net";
 import { setupNetIpc } from "./net/ipc";
-import type { HostExecutor } from "./net/manager";
-import type { RelayBackfill } from "./net/protocol";
 import { saveMessage as saveChatMessage, LOCAL_UID } from "./ai/db/storage";
+import { ensureLocalSessionId } from "./ai/local-session";
 import * as frontendTools from "./frontend-tools";
-import { readModelConfigFile, writeModelConfigFile, onModelConfigChanged, startModelConfigWatch } from "./model-config";
+import { readModelConfigFile, writeModelConfigFile, onModelConfigChanged, startModelConfigWatch, listModelProfiles, addModelProfile, updateModelProfile, deleteModelProfile, activateModelProfile } from "./model-config";
 import { initAppLogger, getLogPath, isDebugMode } from "./app-logger";
 import { LocalKnowledge } from "../src/knowledge/localKnowledge";
 
@@ -113,6 +113,37 @@ const DEFAULT_LOCAL = {
   adapters: [],
 };
 
+/** 把一份原始 JSON 归一成 DeployConfig（缺字段走默认，非法值一律丢弃）。 */
+function parseClientConfig(raw: unknown): DeployConfig {
+  const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  return {
+    theme: THEME_LIST.includes(o.theme as ThemeName) ? (o.theme as ThemeName) : DEFAULT_THEME,
+    avatar: migrateLegacyAvatar(
+      o.avatar && (o.avatar as AvatarConfig).type && (o.avatar as AvatarConfig).src
+        ? (o.avatar as AvatarConfig)
+        : DEFAULT_AVATAR,
+    ),
+    customAvatars: Array.isArray(o.customAvatars) ? (o.customAvatars as AvatarMeta[]) : [],
+    petName:
+      typeof o.petName === "string" && o.petName.trim() ? o.petName.trim() : "Kirari",
+    // 用户头像：仅当是合法字符串时才采用，空值回退 undefined（回退到渐变占位头像）。
+    userAvatar:
+      typeof o.userAvatar === "string" && o.userAvatar.trim() ? o.userAvatar.trim() : undefined,
+    adapters: Array.isArray(o.adapters)
+      ? (o.adapters as AdapterConfig[]).filter(
+          (a: AdapterConfig) => a && typeof a.id === "string" && typeof a.type === "string",
+        )
+      : [],
+    // 仅当 x/y 都是有效数字时才采用持久化位置；否则保持 undefined，启动时回退默认。
+    window:
+      o.window &&
+      typeof (o.window as { x?: unknown }).x === "number" &&
+      typeof (o.window as { y?: unknown }).y === "number"
+        ? { x: (o.window as { x: number }).x, y: (o.window as { y: number }).y }
+        : undefined,
+  };
+}
+
 function loadClientConfig(): DeployConfig {
   const candidates = [
     process.env.PET_CLIENT_CONFIG,
@@ -121,28 +152,7 @@ function loadClientConfig(): DeployConfig {
   for (const p of candidates) {
     try {
       const raw = JSON.parse(fs.readFileSync(p, "utf8"));
-      if (raw && typeof raw === "object") {
-      return {
-        theme: THEME_LIST.includes(raw.theme) ? raw.theme : DEFAULT_THEME,
-        avatar: migrateLegacyAvatar(
-          raw.avatar && raw.avatar.type && raw.avatar.src ? raw.avatar : DEFAULT_AVATAR,
-        ),
-        customAvatars: Array.isArray(raw.customAvatars) ? raw.customAvatars : [],
-        petName: typeof raw.petName === "string" && raw.petName.trim() ? raw.petName.trim() : "Kirari",
-        // 用户头像：仅当是合法字符串时才采用，空值回退 undefined（回退到渐变占位头像）。
-        userAvatar: typeof raw.userAvatar === "string" && raw.userAvatar.trim() ? raw.userAvatar.trim() : undefined,
-        adapters: Array.isArray(raw.adapters)
-          ? raw.adapters.filter(
-              (a: AdapterConfig) => a && typeof a.id === "string" && typeof a.type === "string",
-            )
-          : [],
-        // 仅当 x/y 都是有效数字时才采用持久化位置；否则保持 undefined，启动时回退默认。
-        window:
-          raw.window && typeof raw.window.x === "number" && typeof raw.window.y === "number"
-            ? { x: raw.window.x, y: raw.window.y }
-            : undefined,
-      };
-      }
+      if (raw && typeof raw === "object") return parseClientConfig(raw);
     } catch {
       // 配置无效则尝试下一个候选
     }
@@ -152,17 +162,80 @@ function loadClientConfig(): DeployConfig {
 
 const clientConfig = loadClientConfig();
 
+// 最后一次由**本进程**写出的配置文本。用来在文件监听里认出「这是我自己写的」，
+// 避免自己写→自己读→自己广播的回环。
+// 核心版（同一台机器、同一个 userData）也会改这份文件的 petName / userAvatar /
+// adapters —— 记下内容，就能把「外部改动」和「自己刚写的」区分开。
+let lastWrittenConfigJson = "";
+
 // 桌宠自带大脑，不再区分「本地部署 / 连接远程服务端」两种模式，
 // 也不再随包携带或拉起任何后端进程。配置里残留的模式与服务端地址一律忽略。
 
 function saveClientConfig() {
   try {
-    fs.writeFileSync(
-      path.join(app.getPath("userData"), "pet-client.config.json"),
-      JSON.stringify(clientConfig, null, 2)
-    );
+    const json = JSON.stringify(clientConfig, null, 2);
+    lastWrittenConfigJson = json;
+    fs.writeFileSync(path.join(app.getPath("userData"), "pet-client.config.json"), json);
   } catch (e) {
     console.error("[config] 保存客户端配置失败:", e);
+  }
+}
+
+// ───────────── 监听 pet-client.config.json 的外部改动 ─────────────
+// 同一个 userData 目录里，核心版读写的是**同一份文件**（备注名 / 我的头像 /
+// 机器人适配器）。核心版改了之后桌宠端不该蒙在鼓里 —— 这里在文件被别人改动时
+// 重新加载并广播，做到两端改哪边都算数。
+function applyExternalClientConfig(json: string): void {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(json);
+  } catch {
+    return; // 正写到一半，等下一个事件
+  }
+  const next = parseClientConfig(raw);
+  const themeChanged = next.theme !== clientConfig.theme;
+  const avatarChanged =
+    JSON.stringify(next.avatar) !== JSON.stringify(clientConfig.avatar ?? null);
+  const customAvatarsChanged =
+    JSON.stringify(next.customAvatars) !== JSON.stringify(clientConfig.customAvatars ?? []);
+  const nameChanged = next.petName !== clientConfig.petName;
+  const userAvatarChanged = next.userAvatar !== clientConfig.userAvatar;
+  const adaptersChanged =
+    JSON.stringify(next.adapters) !== JSON.stringify(clientConfig.adapters ?? []);
+
+  Object.assign(clientConfig, next);
+  lastWrittenConfigJson = json; // 认下这份内容，别再当成外部改动
+
+  if (themeChanged) broadcastTheme(next.theme ?? DEFAULT_THEME);
+  if (avatarChanged || customAvatarsChanged) broadcastAvatar();
+  if (nameChanged) {
+    broadcastPetName();
+    if (chatWindow && !chatWindow.isDestroyed()) {
+      chatWindow.setTitle(`和 ${clientConfig.petName || "Kirari"} 聊天`);
+    }
+  }
+  if (userAvatarChanged) broadcastUserAvatar();
+  // 适配器整表重建：核心版新增/改动的机器人立刻在桌宠端生效
+  if (adaptersChanged) initAdapterManager();
+  console.log("[config] 检测到 pet-client.config.json 被外部改动，已同步（核心版/手动编辑）");
+}
+
+function startClientConfigWatch(): void {
+  const p = path.join(app.getPath("userData"), "pet-client.config.json");
+  try {
+    if (!fs.existsSync(p)) return;
+    fs.watch(p, () => {
+      try {
+        const json = fs.readFileSync(p, "utf8");
+        if (json === lastWrittenConfigJson) return; // 自己刚写的，忽略
+        applyExternalClientConfig(json);
+      } catch {
+        /* 读取瞬时态失败，下一个事件会补上 */
+      }
+    });
+    console.log("[config] 已监听本机配置（核心版改动会自动同步过来）:", p);
+  } catch (e) {
+    console.warn("[config] 监听本机配置失败（不影响运行）:", e);
   }
 }
 
@@ -611,9 +684,129 @@ function resolveChatUserid(): number {
   return CHAT_UID;
 }
 
-// 聊天记录落在本机 userData 下，按本机身份存储一份即可。
-function resolveChatStoragePath(): string {
+// 旧版聊天记录文件（chat-session.json）的路径。
+// 2026-10-12 起聊天记录统一改用数据库（与核心版共用同一个 pet_sessions.db），
+// 这个路径现在只用于**一次性迁移**：ChatSessionService.init() 发现它存在就把内容
+// 导进 messages 表，然后改名备份，之后不再读写。
+function resolveLegacyChatStoragePath(): string {
   return path.join(app.getPath("userData"), "chat-session.json");
+}
+
+/**
+ * 一次性迁移：旧库 kirari.db → pet_sessions.db。
+ *
+ * 为什么改库名：桌宠版原来用 kirari.db，核心版用 pet_sessions.db，两边各存一份
+ * 聊天记录，用户在上一个版本里聊的内容另一个版本看不到（用户拍板：记录要互通）。
+ * 表结构完全一致（messages / bot_locations / daily_memory），所以直接搬行即可。
+ *
+ * 保守策略：
+ *   · kirari.db 不存在 → 什么都不做（新装用户）；
+ *   · **按会话跳过**：目标库里已有某个 session_id 的消息，就整个跳过那个会话 ——
+ *     那个会话大概率刚从 chat-session.json 迁过来（数据更全，带图片和情绪），
+ *     不能再用裁剪过的纯文本覆盖回去；
+ *   · 成功后 kirari.db 改名成 .migrated-<时间戳>.bak，**不删**。
+ */
+function migrateLegacyChatDb(userDataDir: string): void {
+  const legacy = path.join(userDataDir, "kirari.db");
+  const target = path.join(userDataDir, "pet_sessions.db");
+  try {
+    if (!fs.existsSync(legacy)) return;
+
+    const src = new (require("better-sqlite3"))(legacy, { readonly: true });
+    const rows = src
+      .prepare("SELECT session_id, role, content, timestamp FROM messages ORDER BY id ASC")
+      .all() as { session_id: string; role: string; content: string; timestamp: string }[];
+    const locations = src.prepare("SELECT * FROM bot_locations").all();
+    const briefs = src.prepare("SELECT * FROM daily_memory").all();
+    src.close();
+
+    if (rows.length === 0 && locations.length === 0 && briefs.length === 0) {
+      // 旧库是空的：直接改名备份，不用建目标
+      const backup = `${legacy}.migrated-${Date.now()}.bak`;
+      fs.renameSync(legacy, backup);
+      console.log(`[migrate] 旧库为空，已备份为 ${path.basename(backup)}`);
+      return;
+    }
+
+    const dst = new (require("better-sqlite3"))(target);
+    dst.pragma("busy_timeout = 5000");
+    dst.exec(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL,
+        content TEXT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        emotion TEXT, images_json TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_id ON messages(session_id);
+      CREATE TABLE IF NOT EXISTS bot_locations (
+        owner_uid INTEGER NOT NULL, scope TEXT NOT NULL,
+        location TEXT, location_raw TEXT, location_name TEXT, location_admin1 TEXT,
+        location_country TEXT, location_country_code TEXT,
+        latitude REAL, longitude REAL, location_source TEXT,
+        location_timezone TEXT, location_asked_at TEXT,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (owner_uid, scope)
+      );
+      CREATE TABLE IF NOT EXISTS daily_memory (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        userid INTEGER NOT NULL, date TEXT NOT NULL,
+        brief_text TEXT NOT NULL, topics_json TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(userid, date)
+      );
+    `);
+
+    // 按会话跳过：目标里已有该会话的记录就不动它（刚从 JSON 迁过来的更全）
+    const existingSessions = new Set(
+      (dst.prepare("SELECT DISTINCT session_id FROM messages").all() as { session_id: string }[]).map(
+        (r) => r.session_id,
+      ),
+    );
+    const toInsert = rows.filter((r) => !existingSessions.has(r.session_id));
+    const skippedSessions = existingSessions.size;
+
+    if (toInsert.length === 0 && locations.length === 0 && briefs.length === 0) {
+      dst.close();
+      const backup = `${legacy}.migrated-${Date.now()}.bak`;
+      fs.renameSync(legacy, backup);
+      console.log(`[migrate] 旧库内容都已在目标库中，已备份为 ${path.basename(backup)}`);
+      return;
+    }
+
+    const insertMsg = dst.prepare(
+      "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+    );
+    const insertLoc = dst.prepare(
+      "INSERT OR REPLACE INTO bot_locations (owner_uid, scope, location, location_raw, location_name, location_admin1, location_country, location_country_code, latitude, longitude, location_source, location_timezone, location_asked_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    const insertBrief = dst.prepare(
+      "INSERT OR REPLACE INTO daily_memory (userid, date, brief_text, topics_json, created_at) VALUES (?, ?, ?, ?, ?)",
+    );
+    const tx = dst.transaction(() => {
+      for (const r of toInsert) insertMsg.run(r.session_id, r.role, r.content, r.timestamp);
+      for (const l of locations as Record<string, unknown>[]) {
+        insertLoc.run(
+          l.owner_uid, l.scope, l.location, l.location_raw ?? null, l.location_name ?? null,
+          l.location_admin1 ?? null, l.location_country ?? null, l.location_country_code ?? null,
+          l.latitude ?? null, l.longitude ?? null, l.location_source ?? null,
+          l.location_timezone ?? null, l.location_asked_at ?? null, l.updated_at ?? null,
+        );
+      }
+      for (const b of briefs as Record<string, unknown>[]) {
+        insertBrief.run(b.userid, b.date, b.brief_text, b.topics_json ?? null, b.created_at ?? null);
+      }
+    });
+    tx();
+    dst.close();
+
+    const backup = `${legacy}.migrated-${Date.now()}.bak`;
+    fs.renameSync(legacy, backup);
+    console.log(
+      `[migrate] 旧库迁移完成：补入 ${toInsert.length} 条对话（跳过 ${skippedSessions} 个已存在的会话）、${locations.length} 条位置、${briefs.length} 份简报；旧库备份为 ${path.basename(backup)}`,
+    );
+  } catch (e) {
+    // 迁移失败绝不能阻断启动：旧库原地留着，用户顶多是看不到旧记录，但不会丢数据
+    console.warn("[migrate] 旧库迁移失败（不影响启动，旧库已保留）:", (e as Error)?.message || e);
+  }
 }
 
 let settingsWindow: PetWindow | null = null;
@@ -1464,6 +1657,65 @@ function handleModelConfigChanged(cfg: ReturnType<typeof readModelConfigFile>) {
   }
 }
 
+// ---- 多模型：用户自建多套「地址 + 型号 + 钥匙」，任选一套当前使用 ----
+// 语义与核心版控制台一致：顶层 endpoint/model/key 才是「当前生效」，
+// 「设为当前」= 覆盖顶层字段 → handleModelConfigChanged → 引擎自动重建上下文。
+ipcMain.handle("models:list", () => listModelProfiles());
+ipcMain.handle(
+  "models:add",
+  (_e, p: { name: unknown; endpoint: unknown; model: unknown; key: unknown }) => {
+    if (
+      typeof p?.name !== "string" ||
+      !p.name.trim() ||
+      typeof p?.endpoint !== "string" ||
+      !p.endpoint.trim() ||
+      typeof p?.model !== "string" ||
+      !p.model.trim() ||
+      typeof p?.key !== "string" ||
+      !p.key.trim()
+    ) {
+      throw new Error("名字、服务地址、型号、钥匙都要填");
+    }
+    return addModelProfile({
+      name: p.name,
+      endpoint: p.endpoint,
+      model: p.model,
+      key: p.key,
+    });
+  },
+);
+ipcMain.handle(
+  "models:update",
+  (_e, p: { id: unknown; name?: unknown; endpoint?: unknown; model?: unknown; key?: unknown }) => {
+    if (typeof p?.id !== "number") throw new Error("模型 id 无效");
+    // 编辑「当前使用」那一套时顶层生效字段一并同步（model-config 内部处理），
+    // 写盘后主动通知 → 引擎按配置指纹重建上下文 + 广播所有窗口 → 聊天状态立刻刷新。
+    const next = updateModelProfile(p.id, {
+      name: typeof p.name === "string" ? p.name : undefined,
+      endpoint: typeof p.endpoint === "string" ? p.endpoint : undefined,
+      model: typeof p.model === "string" ? p.model : undefined,
+      key: typeof p.key === "string" ? p.key : undefined,
+    });
+    if (!next) throw new Error("这套大脑不存在（可能已被删除）");
+    return { ok: true };
+  },
+);
+ipcMain.handle("models:delete", (_e, id: unknown) => {
+  if (typeof id !== "number") throw new Error("模型 id 无效");
+  const ok = deleteModelProfile(id);
+  if (!ok) throw new Error("这套大脑不存在（可能已被删除）");
+  // 删掉当前套：顶层生效字段保持不动（聊天还能继续用），activeId 由读取方返回 null
+  return { ok: true, list: listModelProfiles() };
+});
+ipcMain.handle("models:activate", (_e, id: unknown) => {
+  if (typeof id !== "number") throw new Error("模型 id 无效");
+  const next = activateModelProfile(id);
+  if (!next) throw new Error("这套大脑不存在（可能已被删除）");
+  // 顶层生效字段变了：引擎按配置指纹重建上下文 + 广播所有窗口（下一条消息就用新套）
+  handleModelConfigChanged(next);
+  return { ok: true, list: listModelProfiles() };
+});
+
 // 监听 config.json 外部编辑：用户用文本编辑器改文件后实时同步到后端与前端。
 onModelConfigChanged(handleModelConfigChanged);
 
@@ -1537,6 +1789,13 @@ function broadcastAdapterStatus() {
   });
 }
 
+/**
+ * 本机会话 id（userData/local-session.json，见 ai/local-session.ts）。
+ * 启动时由 ensureLocalSessionId() 定下，聊天服务固定用它 —— 和核心版控制台同一个会话。
+ * 空串 = 还没初始化（极早期调用），此时退化为服务自己生成随机 id。
+ */
+let localSessionId = "";
+
 function ensureChatSessionService() {
   const uid = resolveChatUserid();
   if (!chatSessionService || chatServiceUserid !== uid) {
@@ -1547,6 +1806,21 @@ function ensureChatSessionService() {
       userid: uid,
       emitState: broadcastChatState,
       localKnowledge: localKnowledge ?? undefined,
+      // 固定的本机会话（与核心版共用）——换掉过去「每次启动重掷随机 id」的做法
+      sessionId: localSessionId || undefined,
+      // 组网上行出口。⚠️ 之前这里从未接线 —— relaySender 一直 undefined，
+      // 桌面端当叶子时聊天悄悄走了本地模型（花自己的额度，主机毫不知情）。
+      relaySender: (content, images, kbContext) => {
+        if (!netManager) return false;
+        // 叶子把本机私人知识库检索结果一并上行：主机没有我们的本地知识库，
+        // 不带的话主机回答时就没有这份参考（知识库等于白配）。
+        return netManager.relay(
+          content,
+          chatSessionService?.getSessionId() ?? "",
+          images,
+          kbContext.length > 0 ? kbContext : undefined,
+        );
+      },
     });
     // 暴露给 MCP / skill 保存后「重新注册工具」时调用。
     (globalThis as any).__chatSessionService = chatSessionService;
@@ -2008,10 +2282,22 @@ app.whenReady().then(async () => {
 
   // 初始化进程内 AI 引擎（本地数据库落在本机 userData）。
   // 桌宠自此不再依赖任何外部后端进程——大脑、知识库、历史全在本进程内。
-  initEngine({ dbPath: path.join(app.getPath("userData"), "kirari.db") });
+  //
+  // ⚠️ 库文件名是 pet_sessions.db（不是历史上的 kirari.db）：
+  //    与核心版**同一个文件**。本机装过核心版（或它作为子进程被拉起）时，
+  //    两边读写同一份记录，桌宠里聊的核心版控制台看得到，反之亦然。
+  //    旧库 kirari.db 的迁移在下面 ChatSessionService.init() 之后做 ——
+  //    必须先迁 chat-session.json（那份带着图片和情绪，数据最全），
+  //    再迁 kirari.db（只有被裁剪过的纯文本），顺序反了会丢东西。
+  const userDataDir = app.getPath("userData");
+  initEngine({ dbPath: path.join(userDataDir, "pet_sessions.db") });
 
   // 组网（活锁模型）：本机既可以作为主机（为其他设备提供出口），
   // 也可以作为叶子（把请求上行给主机）。角色由用户在设置里选，随时可换。
+  //
+  // 密钥不用在这里配 —— 两端都不预置密钥：
+  //   本机当主机时自己签一把，当叶子时凭一张邀请码在配对那一刻领（enroll）。
+  //   来源与安全性见 kirari-net 的 secure.ts / enroll.ts。
   netManager = new NetManager(app.getPath("userData"), {
     onSnapshot: (snap) => {
       for (const win of [petWindow, chatWindow, settingsWindow]) {
@@ -2063,7 +2349,7 @@ app.whenReady().then(async () => {
    * 这里把本机 AI 引擎包装成执行器；引擎的会话历史按叶子传来的 sessionId 存放，
    * 所以每台设备有自己的对话脉络，且叶子重连后上下文还在。
    */
-  const hostExecutor: HostExecutor = async ({ sessionId, content, images }) => {
+  const hostExecutor: HostExecutor = async ({ sessionId, content, images, kbContext, onDelta }) => {
     const cfg = readModelConfigFile();
     const result = await engineChat({
       settings: {
@@ -2078,6 +2364,12 @@ app.whenReady().then(async () => {
       sessionId,
       text: content,
       images,
+      // 叶子自带的私人知识库检索结果：它存在叶子本地，主机没有别的途径拿到，
+      // 必须当最高优先级参考注入（否则叶子的知识库在组网下等于白配）。
+      kbContext: kbContext && kbContext.length > 0 ? kbContext : null,
+      // 流式：叶子请求了 stream 时，组网层会传 onDelta 进来 —— 转给内核逐字回调，
+      // 增量由组网层单播回叶子。没请求流式时是 undefined，行为不变。
+      onDelta: typeof onDelta === "function" ? onDelta : null,
       // 组网场景下宁可给兜底语也不要让整条链路失败
       allowFallback: true,
     });
@@ -2176,6 +2468,12 @@ app.whenReady().then(async () => {
   // 启动形象目录监听：用户直接向形象文件夹增删皮肤时自动刷新设置页与桌宠窗口。
   startAvatarFolderWatch();
 
+  // 监听 pet-client.config.json：核心版（同机、同一份文件）改了备注名 / 我的头像 /
+  // 机器人适配器时，桌宠端自动跟着变，两边始终一致。
+  // 放在这里（形象初始化之后）是因为下面的形象兜底会写一次配置，
+  // 先写完再开始监听，避免刚启动就被自己那次写入触发一轮同步。
+  startClientConfigWatch();
+
   // 兼容旧版持久化 + 兜底校验：默认形象若指向旧 pet:// 协议、旧 id、当前形象
   // 已不在扫描后的形象列表中、或 config.json 里根本没存过形象（首次启动/卸载重装），
   // 则初始化/回退到默认形象，避免下拉框选不中或 syncCurrentAvatarFromScan 因 undefined 跳过。
@@ -2197,8 +2495,20 @@ app.whenReady().then(async () => {
   syncCurrentAvatarFromScan();
 
   // 大脑在本进程内，无需探测外部服务健康状态。
-  chatSessionStoragePath = resolveChatStoragePath();
+  // 传旧版 chat-session.json 的路径：ChatSessionService 会做一次性迁移后改用它备份。
+  // ⚠️ 顺序：先迁 JSON（数据最全，带图片和情绪），再迁 kirari.db（见下面）。
+  // 本机会话 id：先定下来再建聊天服务 —— 服务一旦建好就固定用这个会话，
+  // 重启不会换（以前是构造时重掷随机 id，重启即丢历史）。
+  localSessionId = await ensureLocalSessionId(userDataDir);
+  chatSessionStoragePath = resolveLegacyChatStoragePath();
   await ensureChatSessionService().init(chatSessionStoragePath);
+  // 旧库 kirari.db 的兜底迁移：补上那些只有库里有过、JSON 里没有的会话
+  // （比如早期版本只走引擎入库时的对话）。按会话跳过，不覆盖已迁的。
+  migrateLegacyChatDb(userDataDir);
+  // 上面两步迁移会把旧记录写进「它们自己当年的会话 id」里 —— 再收口一次，
+  // 全部并进本机会话，然后让界面重新读一遍，历史就都回来了。
+  await ensureLocalSessionId(userDataDir);
+  await ensureChatSessionService().refreshHistory();
   // 初始化机器人适配器管理器：连接已启用的适配器与后端 WS，使 QQ 等跨端消息可在启动时同步进桌宠。
   // 之前仅在 deploy:set-server（远程改服务端地址）里调用，启动时漏掉会导致 adapter:* 处理器
   // 全部抛「适配器管理器未初始化」。此时 backendUrl 与聊天服务均已就绪，调用安全。

@@ -28,7 +28,8 @@ const emit = defineEmits<{
     "update:activeId": [id: string];
 }>();
 
-const versionTag = "0.6.0"; // 与 package.json 同步，发布时一齐改
+// 构建期从 package.json 注入（见 vite.config.ts 顶层 define），改版本号只改 package.json。
+const versionTag = __APP_VERSION__;
 
 function resolveCount(c: Section["count"]): number | undefined {
     if (typeof c === "function") return c();
