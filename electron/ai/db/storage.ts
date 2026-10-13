@@ -131,6 +131,14 @@ const SCHEMA = `
     UNIQUE(userid, date)
   );
   CREATE INDEX IF NOT EXISTS idx_daily_memory_user_date ON daily_memory(userid, date);
+
+  -- 轻量键值对（与核心版 dbStorage.js 同名同结构）。
+  -- 当前用途：记「旧版聊天记录已迁移」这类一次性动作的完成凭据 —— 迁移成功后写入键，
+  -- 之后无论源文件还在不在（已被删 / 被改名 / 用户手工放回来）都不会重复导入。
+  CREATE TABLE IF NOT EXISTS settings_kv (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
 `;
 
 // ---------------------------------------------------------------- 对话记录
@@ -483,6 +491,29 @@ export async function upsertDailyBrief(
 export function maskToken(token: unknown): string {
     if (typeof token !== "string" || token.length <= 6) return "****";
     return `${token.slice(0, 3)}${"*".repeat(6)}${token.slice(-4)}`;
+}
+
+// ---------------------------------------------------------------- 轻量 KV
+
+/**
+ * 读一个 KV 值；键不存在返回 null。
+ *
+ * 用途：记「一次性动作已完成」的凭据（如旧版聊天记录迁移）。
+ * 为什么放数据库而不是记一个标记文件：这份数据本来就只有一份，
+ * 状态和数据放一起，删库即重来一次，不存在「标记文件和数据文件对不上」的中间态。
+ */
+export function getSetting(key: string): string | null {
+    const row = getDb().prepare("SELECT value FROM settings_kv WHERE key = ?").get(key) as
+        | { value: string }
+        | undefined;
+    return row ? row.value : null;
+}
+
+/** 写入一个 KV 值（同名覆盖）。 */
+export function setSetting(key: string, value: string): void {
+    getDb()
+        .prepare("INSERT INTO settings_kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+        .run(key, value);
 }
 
 /** JSON 数组字段的容错解析（解析失败回退空数组） */

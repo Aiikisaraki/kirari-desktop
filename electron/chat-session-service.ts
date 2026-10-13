@@ -1,5 +1,3 @@
-import fs from "fs/promises";
-import path from "path";
 import { nativeImage } from "electron";
 import * as frontendTools from "./frontend-tools";
 import * as engine from "./ai/engine";
@@ -39,11 +37,12 @@ export type ChatStateSnapshot = {
 /**
  * 旧版聊天记录的磁盘格式（chat-session.json）。
  *
- * 2026-10-12 起聊天记录统一改用数据库（用户拍板），这个类型只用于**一次性迁移**：
- * 启动时发现文件存在就把内容导进 messages 表，然后改名备份，之后不再读写。
- * 保留定义是为了让迁移代码有明确的形状可校验。
+ * 2026-10-12 起聊天记录统一改用数据库（用户拍板），磁盘上的 JSON 只作为**一次性迁移的源**，
+ * 由 ai/migrate/legacy-chat.ts 在启动时导进 messages 表后删除，之后不再读写。
+ *
+ * 这里保留类型定义只是给迁移模块做形状参考 —— 本服务已完全不碰磁盘文件。
  */
-type LegacyPersistedChatState = {
+export type LegacyPersistedChatState = {
     sessionId: string;
     messages: ChatMessage[];
     bubbleMessage: string;
@@ -186,73 +185,23 @@ export class ChatSessionService {
     /**
      * 初始化聊天服务。
      *
-     * @param legacyJsonPath 旧版 chat-session.json 的路径。传了才会做一次性迁移；
-     *   不传（或传空串）就是纯数据库模式。迁移成功后该文件会被改名成 .bak 留着，
-     *   **不删** —— 用户自己的聊天记录，宁可留个备份也不能弄丢。
+     * 旧版 JSON 的导入已移出本服务（ai/migrate/legacy-chat.ts）：迁移必须早于这里
+     * 执行，且要扫多个历史文件名、保留原始时间戳、导入后删源文件 —— 塞在本类里
+     * 会和「从库读历史」的职责混在一起。
+     *
+     * 调用方（main.ts）保证启动时序：迁移 → 收口 → init → refreshHistory。
      */
-    async init(legacyJsonPath?: string) {
+    async init() {
         if (this.initialized) {
             return;
         }
 
         this.initialized = true;
-        if (legacyJsonPath) {
-            await this.migrateLegacyJson(legacyJsonPath);
-        }
         await this.loadFromDb();
         this.ensureBubbleState();
         // 进程内引擎：把前端托管工具与私有知识库注入内核，并检查大脑是否就绪
         this.prepareEngine();
         this.emit();
-    }
-
-    /**
-     * 一次性迁移：把旧版 chat-session.json 的内容导进 messages 表。
-     *
-     * 幂等且保守：
-     *   · 文件不存在 / 解析失败 → 什么都不做（当没旧数据）；
-     *   · 那个会话在库里已有消息 → 不导入（避免重复灌一遍，比如迁移后又回滚）；
-     *   · 成功后把文件改名成 <名字>.migrated-<时间戳>.bak，不删。
-     */
-    private async migrateLegacyJson(jsonPath: string): Promise<void> {
-        let legacy: LegacyPersistedChatState | null = null;
-        try {
-            const text = await fs.readFile(jsonPath, "utf-8");
-            const parsed = JSON.parse(text) as LegacyPersistedChatState;
-            if (parsed && typeof parsed === "object" && Array.isArray(parsed.messages)) {
-                legacy = parsed;
-            }
-        } catch {
-            return; // 没有旧文件或读不出来：纯新装，无需迁移
-        }
-        if (!legacy) return;
-
-        const sessionId = legacy.sessionId || crypto.randomUUID();
-        const existing = await db.getSessionMessages(sessionId, 1);
-        if (existing.length > 0) {
-            // 库里已有这个会话的记录：说明迁移已经做过（或用户又在库里聊过了），跳过
-            console.log("[chat-session] 数据库里已有该会话记录，跳过旧文件迁移");
-        } else {
-            let imported = 0;
-            for (const m of legacy.messages) {
-                if (!m || typeof m.text !== "string" || !m.text.trim()) continue;
-                await db.saveMessage(sessionId, m.author === "pet" ? "assistant" : "user", m.text, {
-                    emotion: m.emotion ?? null,
-                    images: Array.isArray(m.images) ? m.images : undefined,
-                });
-                imported++;
-            }
-            console.log(`[chat-session] 已把旧聊天记录导入数据库（${imported} 条，会话 ${sessionId.slice(0, 8)}…）`);
-        }
-
-        // 备份旧文件：改名而非删除。用户数据宁可留一份多余的，不能因迁移出 bug 就没了。
-        try {
-            const backup = `${jsonPath}.migrated-${Date.now()}.bak`;
-            await fs.rename(jsonPath, backup);
-            console.log(`[chat-session] 旧聊天记录文件已备份为 ${path.basename(backup)}`);
-        } catch (e) {
-            console.warn("[chat-session] 旧文件备份失败（不影响使用）:", (e as Error)?.message || e);
-        }
     }
 
     /** 从数据库加载当前会话的完整历史（聊天界面的记录真源）。 */

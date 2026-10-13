@@ -21,6 +21,8 @@ import type { HostExecutor, RelayBackfill } from "kirari-net";
 import { setupNetIpc } from "./net/ipc";
 import { saveMessage as saveChatMessage, LOCAL_UID } from "./ai/db/storage";
 import { ensureLocalSessionId } from "./ai/local-session";
+import { migrateLegacyChatJson } from "./ai/migrate/legacy-chat";
+import { migrateLegacyChatDb } from "./ai/migrate/legacy-db";
 import * as frontendTools from "./frontend-tools";
 import { readModelConfigFile, writeModelConfigFile, onModelConfigChanged, startModelConfigWatch, listModelProfiles, addModelProfile, updateModelProfile, deleteModelProfile, activateModelProfile } from "./model-config";
 import { initAppLogger, getLogPath, isDebugMode } from "./app-logger";
@@ -684,130 +686,16 @@ function resolveChatUserid(): number {
   return CHAT_UID;
 }
 
-// 旧版聊天记录文件（chat-session.json）的路径。
-// 2026-10-12 起聊天记录统一改用数据库（与核心版共用同一个 pet_sessions.db），
-// 这个路径现在只用于**一次性迁移**：ChatSessionService.init() 发现它存在就把内容
-// 导进 messages 表，然后改名备份，之后不再读写。
-function resolveLegacyChatStoragePath(): string {
-  return path.join(app.getPath("userData"), "chat-session.json");
-}
-
-/**
- * 一次性迁移：旧库 kirari.db → pet_sessions.db。
- *
- * 为什么改库名：桌宠版原来用 kirari.db，核心版用 pet_sessions.db，两边各存一份
- * 聊天记录，用户在上一个版本里聊的内容另一个版本看不到（用户拍板：记录要互通）。
- * 表结构完全一致（messages / bot_locations / daily_memory），所以直接搬行即可。
- *
- * 保守策略：
- *   · kirari.db 不存在 → 什么都不做（新装用户）；
- *   · **按会话跳过**：目标库里已有某个 session_id 的消息，就整个跳过那个会话 ——
- *     那个会话大概率刚从 chat-session.json 迁过来（数据更全，带图片和情绪），
- *     不能再用裁剪过的纯文本覆盖回去；
- *   · 成功后 kirari.db 改名成 .migrated-<时间戳>.bak，**不删**。
- */
-function migrateLegacyChatDb(userDataDir: string): void {
-  const legacy = path.join(userDataDir, "kirari.db");
-  const target = path.join(userDataDir, "pet_sessions.db");
-  try {
-    if (!fs.existsSync(legacy)) return;
-
-    const src = new (require("better-sqlite3"))(legacy, { readonly: true });
-    const rows = src
-      .prepare("SELECT session_id, role, content, timestamp FROM messages ORDER BY id ASC")
-      .all() as { session_id: string; role: string; content: string; timestamp: string }[];
-    const locations = src.prepare("SELECT * FROM bot_locations").all();
-    const briefs = src.prepare("SELECT * FROM daily_memory").all();
-    src.close();
-
-    if (rows.length === 0 && locations.length === 0 && briefs.length === 0) {
-      // 旧库是空的：直接改名备份，不用建目标
-      const backup = `${legacy}.migrated-${Date.now()}.bak`;
-      fs.renameSync(legacy, backup);
-      console.log(`[migrate] 旧库为空，已备份为 ${path.basename(backup)}`);
-      return;
-    }
-
-    const dst = new (require("better-sqlite3"))(target);
-    dst.pragma("busy_timeout = 5000");
-    dst.exec(`
-      CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL,
-        content TEXT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-        emotion TEXT, images_json TEXT
-      );
-      CREATE INDEX IF NOT EXISTS idx_session_id ON messages(session_id);
-      CREATE TABLE IF NOT EXISTS bot_locations (
-        owner_uid INTEGER NOT NULL, scope TEXT NOT NULL,
-        location TEXT, location_raw TEXT, location_name TEXT, location_admin1 TEXT,
-        location_country TEXT, location_country_code TEXT,
-        latitude REAL, longitude REAL, location_source TEXT,
-        location_timezone TEXT, location_asked_at TEXT,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (owner_uid, scope)
-      );
-      CREATE TABLE IF NOT EXISTS daily_memory (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        userid INTEGER NOT NULL, date TEXT NOT NULL,
-        brief_text TEXT NOT NULL, topics_json TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(userid, date)
-      );
-    `);
-
-    // 按会话跳过：目标里已有该会话的记录就不动它（刚从 JSON 迁过来的更全）
-    const existingSessions = new Set(
-      (dst.prepare("SELECT DISTINCT session_id FROM messages").all() as { session_id: string }[]).map(
-        (r) => r.session_id,
-      ),
-    );
-    const toInsert = rows.filter((r) => !existingSessions.has(r.session_id));
-    const skippedSessions = existingSessions.size;
-
-    if (toInsert.length === 0 && locations.length === 0 && briefs.length === 0) {
-      dst.close();
-      const backup = `${legacy}.migrated-${Date.now()}.bak`;
-      fs.renameSync(legacy, backup);
-      console.log(`[migrate] 旧库内容都已在目标库中，已备份为 ${path.basename(backup)}`);
-      return;
-    }
-
-    const insertMsg = dst.prepare(
-      "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-    );
-    const insertLoc = dst.prepare(
-      "INSERT OR REPLACE INTO bot_locations (owner_uid, scope, location, location_raw, location_name, location_admin1, location_country, location_country_code, latitude, longitude, location_source, location_timezone, location_asked_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    );
-    const insertBrief = dst.prepare(
-      "INSERT OR REPLACE INTO daily_memory (userid, date, brief_text, topics_json, created_at) VALUES (?, ?, ?, ?, ?)",
-    );
-    const tx = dst.transaction(() => {
-      for (const r of toInsert) insertMsg.run(r.session_id, r.role, r.content, r.timestamp);
-      for (const l of locations as Record<string, unknown>[]) {
-        insertLoc.run(
-          l.owner_uid, l.scope, l.location, l.location_raw ?? null, l.location_name ?? null,
-          l.location_admin1 ?? null, l.location_country ?? null, l.location_country_code ?? null,
-          l.latitude ?? null, l.longitude ?? null, l.location_source ?? null,
-          l.location_timezone ?? null, l.location_asked_at ?? null, l.updated_at ?? null,
-        );
-      }
-      for (const b of briefs as Record<string, unknown>[]) {
-        insertBrief.run(b.userid, b.date, b.brief_text, b.topics_json ?? null, b.created_at ?? null);
-      }
-    });
-    tx();
-    dst.close();
-
-    const backup = `${legacy}.migrated-${Date.now()}.bak`;
-    fs.renameSync(legacy, backup);
-    console.log(
-      `[migrate] 旧库迁移完成：补入 ${toInsert.length} 条对话（跳过 ${skippedSessions} 个已存在的会话）、${locations.length} 条位置、${briefs.length} 份简报；旧库备份为 ${path.basename(backup)}`,
-    );
-  } catch (e) {
-    // 迁移失败绝不能阻断启动：旧库原地留着，用户顶多是看不到旧记录，但不会丢数据
-    console.warn("[migrate] 旧库迁移失败（不影响启动，旧库已保留）:", (e as Error)?.message || e);
-  }
-}
+// 旧版聊天记录的两个一次性迁移都已独立成模块（electron/ai/migrate/）：
+//   legacy-chat.ts  旧 JSON → 数据库。扫多个历史文件名（v0.5.1 起改叫
+//                   chat-session.local.json，远程模式另有 chat-session.remote.*.json）——
+//                   早期实现只认 chat-session.json，导致 v0.5.x～v0.7.x 升上来的用户
+//                   聊天记录"凭空消失"且无任何日志。该模块还保留原始毫秒时间戳
+//                   （走 saveMessage 会全部压成"迁移那一秒"）。
+//   legacy-db.ts    旧库 kirari.db → pet_sessions.db。
+// 两者同一套策略：幂等键写 settings_kv 且与数据同事务提交 → 提交后才删源文件 →
+// 失败整体回滚并保留源文件 → 任何异常都不阻断启动。
+// 启动时序（顺序不能反）见下面 app.whenReady 里的三步。
 
 let settingsWindow: PetWindow | null = null;
 
@@ -822,9 +710,6 @@ let dragState: {
 } | null = null;
 let isQuitting = false;
 let chatSessionService: ChatSessionService | null = null;
-// 聊天会话持久化文件路径：按当前部署模式/服务端/登录身份隔离（见 resolveChatStoragePath），
-// 每次重建聊天连接时重算，确保不同身份加载各自独立的聊天历史。
-let chatSessionStoragePath = "";
 // 私人知识库：本地文件存储（userData/knowledge.json），前端自主检索，后端零状态
 let localKnowledge: LocalKnowledge | null = null;
 /** 组网管理器（阶段 2-4）：主机/叶子两种角色，随时可换 */
@@ -2494,20 +2379,17 @@ app.whenReady().then(async () => {
   // 头像由 skin 目录的 frames.json.chatAvatar 声明，换皮肤即换头像。
   syncCurrentAvatarFromScan();
 
-  // 大脑在本进程内，无需探测外部服务健康状态。
-  // 传旧版 chat-session.json 的路径：ChatSessionService 会做一次性迁移后改用它备份。
-  // ⚠️ 顺序：先迁 JSON（数据最全，带图片和情绪），再迁 kirari.db（见下面）。
-  // 本机会话 id：先定下来再建聊天服务 —— 服务一旦建好就固定用这个会话，
-  // 重启不会换（以前是构造时重掷随机 id，重启即丢历史）。
+  // 迁移三步走，顺序不能颠倒：
+  //   ① 旧 JSON → 数据库（数据最全，带图片/情绪/原始时间戳），导完删源文件；
+  //   ② 旧库 kirari.db → 数据库（只有被裁剪过的纯文本，按会话跳过已迁的）；
+  //   ③ 收口：①② 都把记录写进「它们自己当年的会话 id」，统一并进本机会话，
+  //      再让界面重读一遍，历史就都回来了。
+  // 本机会话 id 要先定下来 —— 服务一旦建好就固定用它，重启不会换。
   localSessionId = await ensureLocalSessionId(userDataDir);
-  chatSessionStoragePath = resolveLegacyChatStoragePath();
-  await ensureChatSessionService().init(chatSessionStoragePath);
-  // 旧库 kirari.db 的兜底迁移：补上那些只有库里有过、JSON 里没有的会话
-  // （比如早期版本只走引擎入库时的对话）。按会话跳过，不覆盖已迁的。
+  await migrateLegacyChatJson(userDataDir);
   migrateLegacyChatDb(userDataDir);
-  // 上面两步迁移会把旧记录写进「它们自己当年的会话 id」里 —— 再收口一次，
-  // 全部并进本机会话，然后让界面重新读一遍，历史就都回来了。
   await ensureLocalSessionId(userDataDir);
+  await ensureChatSessionService().init();
   await ensureChatSessionService().refreshHistory();
   // 初始化机器人适配器管理器：连接已启用的适配器与后端 WS，使 QQ 等跨端消息可在启动时同步进桌宠。
   // 之前仅在 deploy:set-server（远程改服务端地址）里调用，启动时漏掉会导致 adapter:* 处理器
