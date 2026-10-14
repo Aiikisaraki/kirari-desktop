@@ -180,7 +180,10 @@ export class AdapterManager {
     // owner → scope=null（共享登录 uid）；guest → 独立 scope
     const isOwner = adapter.ownerAccount != null && msg.senderId === adapter.ownerAccount;
     const scope = isOwner ? null : `${adapter.id}::${msg.senderId}`;
-    const sessionId = isOwner ? this.opts.getDesktopSessionId() : `bot:${adapter.id}:${msg.conversationKey}`;
+    // 客人会话前缀必须是 bot-（不是 bot:）—— 两端 FOREIGN_SESSION_PREFIXES 都按
+    // "bot-" 排除；用冒号会被 ensureLocalSessionId 当成本机会话并进主对话（群聊泄漏）。
+    // 与核心版 botManager 的 bot-<适配器>-<对话键> 格式对齐。
+    const sessionId = isOwner ? this.opts.getDesktopSessionId() : `bot-${adapter.id}-${msg.conversationKey}`;
     console.log(`[adapter] isOwner=${isOwner} scope=${scope} session=${sessionId}`);
 
     // 主人账号：先把用户在协议端的输入同步到桌宠聊天框（与桌面自身发消息表现一致）。
