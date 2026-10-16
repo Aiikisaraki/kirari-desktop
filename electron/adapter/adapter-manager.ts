@@ -3,6 +3,7 @@ import { OneBotAdapter } from "./onebot-adapter";
 import { BotBackendClient } from "./bot-backend-client";
 import type { AdapterConfig, AdapterStatus, BotIncoming, PetBackendResponse } from "./types";
 import type { LocalKnowledge } from "../../src/knowledge/localKnowledge";
+import * as db from "../ai/db/storage";
 
 // 主人在其他协议端（如 QQ）发起的对话，需要同步进桌宠聊天框。
 // 由 main.ts 注入一个回调，内部转发到 ChatSessionService.injectExternalMessage。
@@ -157,9 +158,45 @@ export class AdapterManager {
     this.emitStatus();
   }
 
+  /**
+   * 把某账号**设为主人之前**攒下的私聊记录并进桌宠主对话。
+   *
+   * 与核心版 botManager.mergeOwnerHistory 同语义 —— 两端必须一致，否则一边合一边不合规。
+   *
+   * 为什么必须有这一步：主人只能从 knownAccounts 里挑，而 knownAccounts 要「对方先发过
+   * 消息」才有 —— 也就是说用户一定先以客人身份聊过一段，那段记录落在
+   * `bot-<适配器>-private:<QQ>` 里。而 bot- 前缀被 FOREIGN_SESSION_PREFIXES 挡着，
+   * 永远不会被收口并进主对话。只改路由的话，老记录就永远丢在客人会话里了。
+   *
+   * 只并**私聊**（1:1 对话，搬过去最自然）；群会话 `group:<群号>:<QQ>` 是多方上下文，不掺。
+   *
+   * @returns 实际搬过去多少条
+   */
+  private async mergeOwnerHistory(adapterId: string, accountKey: string): Promise<number> {
+    const legacy = `bot-${adapterId}-private:${accountKey}`;
+    try {
+      const all = await db.listSessions();
+      if (!all.includes(legacy)) return 0;
+      const target = this.opts.getDesktopSessionId();
+      if (!target || legacy === target) return 0;
+      const moved = await db.mergeSessions([legacy], target);
+      if (moved > 0) console.log(`[adapter] 已把主人 ${accountKey} 此前 ${moved} 条私聊记录并进主对话`);
+      return moved;
+    } catch (e) {
+      console.warn("[adapter] 合并主人旧记录失败（不影响新消息）:", (e as Error)?.message || e);
+      return 0;
+    }
+  }
+
   // 设置某账号为主人：之后该账号复用桌面 session + scope=null（共享登录 uid 的记忆）。
   // accountKey 为空表示取消主人。
-  setOwner(adapterId: string, accountKey: string): void {
+  //
+  // 顺带把该账号此前以客人身份攒下的私聊记录并进主对话（见 mergeOwnerHistory）。
+  // 取消主人不反向拆回 —— 已经并进主对话的记录不会再拆出去。
+  async setOwner(
+    adapterId: string,
+    accountKey: string,
+  ): Promise<{ ownerAccount: string | null; moved: number }> {
     const configs = this.opts.getAdaptersConfig().slice();
     const c = configs.find((x) => x.id === adapterId);
     if (!c) throw new Error("适配器不存在");
@@ -168,6 +205,8 @@ export class AdapterManager {
     const inst = this.instances.get(adapterId);
     if (inst) inst.setOwner(accountKey || null);
     this.emitStatus();
+    const moved = c.ownerAccount ? await this.mergeOwnerHistory(adapterId, c.ownerAccount) : 0;
+    return { ownerAccount: c.ownerAccount, moved };
   }
 
   private async handleIncoming(adapter: BotAdapter, msg: BotIncoming): Promise<void> {

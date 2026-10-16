@@ -148,7 +148,11 @@ contextBridge.exposeInMainWorld("botAdapterApi", {
   remove: (id: string): Promise<void> => ipcRenderer.invoke("adapter:remove", id),
   connect: (id: string): Promise<void> => ipcRenderer.invoke("adapter:connect", id),
   disconnect: (id: string): Promise<void> => ipcRenderer.invoke("adapter:disconnect", id),
-  setOwner: (adapterId: string, accountKey: string): Promise<void> =>
+  // moved = 顺带并进主对话的旧私聊记录条数（与核心版 /api/bot/:id/owner 同形状）
+  setOwner: (
+    adapterId: string,
+    accountKey: string,
+  ): Promise<{ ownerAccount: string | null; moved: number }> =>
     ipcRenderer.invoke("adapter:set-owner", adapterId, accountKey),
   onStatus: (cb: (status: AdapterStatus[]) => void): void => {
     ipcRenderer.on("adapter:status", (_event, status: AdapterStatus[]) => cb(status));

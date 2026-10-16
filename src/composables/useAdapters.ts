@@ -73,12 +73,13 @@ export function useAdapters() {
       await refresh();
     }
   }
+  /** 返回 { ownerAccount, moved }；moved = 顺带并进主对话的旧私聊记录条数。 */
   async function setOwner(adapterId: string, accountKey: string) {
     const api = getApi();
-    if (api?.setOwner) {
-      await api.setOwner(adapterId, accountKey);
-      await refresh();
-    }
+    if (!api?.setOwner) return { ownerAccount: null, moved: 0 };
+    const res = await api.setOwner(adapterId, accountKey);
+    await refresh();
+    return res;
   }
 
   let onStatus: ((s: AdapterStatusLite[]) => void) | null = null;
