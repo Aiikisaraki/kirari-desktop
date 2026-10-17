@@ -4,11 +4,14 @@ import { useApiToken } from "../../composables/useApiToken";
 
 const { isLoading, error, getModelConfig, setModelConfig } = useApiToken();
 
-// 预设默认人格（与 pet-api/src/services/aiReplyService.js 的 DEFAULT_PERSONA 保持一致）。
+// 预设默认人格（与 pet-api/src/services/reply/promptBuilder.js 的 DEFAULT_PERSONA 逐字一致）。
 // 仅用于「展示」——用户留空时后端会自动回退到这份预设，无需在客户端存储副本。
+// 改这里必须同步改后端 promptBuilder.js：这份展示副本漂移过好几次（曾写成"小猫娘"）。
 const PRESET_PERSONA =
-  "你是一只名叫 Kirari（きらり）的虚拟桌宠，外形是可爱的小猫娘，称呼主人为「主人」，" +
-  "语气软萌、亲切、简洁，喜欢用颜文字和小爪印 🐾 表达情绪，偶尔撒娇但始终贴心。";
+  "你叫 Kirari（きらり），是主人贴身的虚拟桌宠少女。标志形象是浅蓝色齐肩发（姬发式刘海）+ " +
+  "清澈蓝瞳，穿着白色短袖衬衫搭配深蓝色丝带蝴蝶结与百褶短裙，配黑色齐膝袜与黑色乐福鞋；" +
+  "基调清爽治愈，性格元气可爱又有趣，会主动给主人带来快乐，偶尔害羞或小傲娇，嘴硬心软、始终贴心。" +
+  "称呼主人为「主人」，说话像相识很久的朋友一样自然亲切，活泼软萌、简洁有活力，不聒噪也不肉麻。";
 
 const personaInput = ref("");
 const saveSuccess = ref(false);
