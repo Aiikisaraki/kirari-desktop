@@ -21,6 +21,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import Database from "better-sqlite3";
 import type { ContentPart, MessageRole } from "../types";
+// 事件流 schema 由平级共享包 kirari-agent 定义，两端各自执行同一份 DDL，
+// 保证同一份 pet_sessions.db 里的 session_events 不分叉。
+import { SESSION_EVENTS_DDL, SESSION_EVENTS_COLUMNS } from "kirari-agent";
 
 type DB = Database.Database;
 
@@ -55,15 +58,16 @@ export function initDatabase(dbPath?: string): DB {
     db.pragma("busy_timeout = 5000");
     db.exec(SCHEMA);
     migrateUiColumns();
+    ensureSessionEventsSchema();
     return db;
 }
 
 /**
  * messages 表的 UI 扩展列（emotion / images_json）。
  *
- * 为什么加：这张表现在同时是**桌宠聊天界面的记录真源**（用户拍板：聊天记录统一用
- * 数据库，废掉 chat-session.json）。界面要显示情绪动画标签和图片，而内核上下文
- * 只需要 role + content —— 两类需求共用一列 content 会互相污染，所以单开两列。
+ * 为什么加：这张表现在是**聊天界面的 UI 投影缓存**（真源是 session_events 事件流），
+ * 界面要显示情绪动画标签和图片，而内核上下文只需要 role + content ——
+ * 两类需求共用一列 content 会互相污染，所以单开两列。
  * 核心版读历史时原样带回，两端记录完全互通。
  */
 function migrateUiColumns(): void {
@@ -71,6 +75,23 @@ function migrateUiColumns(): void {
     const cols = (db.prepare("PRAGMA table_info(messages)").all() as { name: string }[]).map((c) => c.name);
     if (!cols.includes("emotion")) db.exec("ALTER TABLE messages ADD COLUMN emotion TEXT");
     if (!cols.includes("images_json")) db.exec("ALTER TABLE messages ADD COLUMN images_json TEXT");
+}
+
+/**
+ * 事件流真源表。DDL 文本来自 kirari-agent，两端各自执行同一份，
+ * 保证同一份 pet_sessions.db 里的 session_events 不分叉；补列清单也由包导出，
+ * 未来加列只改包里一处，两端不会分叉。
+ *
+ * seq 用 AUTOINCREMENT：两个进程直写同一个文件，应用层各自维护 seq 必然冲突，
+ * SQLite 文件锁分配的 rowid 才是跨进程全局唯一且单调的因果序。
+ */
+function ensureSessionEventsSchema(): void {
+    if (!db) return;
+    db.exec(SESSION_EVENTS_DDL);
+    const cols = (db.prepare("PRAGMA table_info(session_events)").all() as { name: string }[]).map((c) => c.name);
+    for (const col of SESSION_EVENTS_COLUMNS) {
+        if (!cols.includes(col.name)) db.exec(`ALTER TABLE session_events ADD COLUMN ${col.ddl}`);
+    }
 }
 
 /** 取得数据库实例；未显式初始化时用兜底路径（会告警，但不阻塞）。 */
@@ -165,10 +186,9 @@ export type UiMessage = {
 /**
  * 每个会话保留的最大消息条数。
  *
- * 原为 10 —— 那时这张表只当「上下文窗口」用，删旧的没关系。
- * 现在它同时是**桌宠聊天界面的记录真源**（用户拍板：聊天记录统一用数据库），
- * 10 条等于翻不了历史，所以提高到 500。
- * 上下文仍由 getRecentMessages 按需取最近几条，存得久不等于喂给模型的多。
+ * 这张表现在是 UI 投影缓存（真源是 session_events 事件流），所以这个值同时是
+ * 「界面能翻回多早」的界限。500 条足够日常使用又不至于让单文件无限膨胀；
+ * 上下文窗口与此无关（由 getRecentMessages 按需取最近几条），存得久不等于喂给模型的多。
  */
 const MAX_MESSAGES_PER_SESSION = 500;
 
@@ -195,6 +215,22 @@ export async function saveMessage(
     content: string | unknown[],
     extras?: { emotion?: string | null; images?: string[] },
 ): Promise<StoredMessage[]> {
+    // 事件流旁路记录真源；原有 SQL 一字不动。
+    // 动态 import 避开 storage → recorder → store → storage 的顶层循环
+    // （与核心版惰性 require 同构）。
+    try {
+        const { recorder, currentTurnId } = await import("../events/recorder");
+        recorder.enqueue({
+            origin: "desktop",
+            sessionId,
+            turnId: currentTurnId(),
+            type: role === "user" ? "user_message" : "assistant_message",
+            payload: { role, content, extras: extras || undefined },
+        });
+    } catch (e) {
+        // 红线：事件写失败只警告，绝不冒泡到用户、绝不打断存消息。
+        console.warn("[events] 记录消息事件失败（已忽略）:", (e as Error)?.message || e);
+    }
     // content 可能是纯文本字符串，或 [text, image_url] 多模态数组；后者序列化为 JSON 存储。
     const c = typeof content === "string" ? content : JSON.stringify(content);
     const emotion =
@@ -217,6 +253,24 @@ export async function saveMessage(
     if (ids.length > MAX_MESSAGES_PER_SESSION) {
         const stale = ids.slice(MAX_MESSAGES_PER_SESSION).map((row) => row.id);
         d.prepare(`DELETE FROM messages WHERE id IN (${stale.map(() => "?").join(",")})`).run(...stale);
+        // 只记审计信息：这里拿到的是 messages 表的 id，与事件流 seq 不是同一个编号空间，
+        // 不能拿来给投影器当 keptFromSeq 用。投影器自己按 UI_HISTORY_LIMIT 收口。
+        try {
+            const { recorder, currentTurnId } = await import("../events/recorder");
+            recorder.enqueue({
+                origin: "desktop",
+                sessionId,
+                turnId: currentTurnId(),
+                type: "messages_pruned",
+                payload: {
+                    droppedCount: ids.length - MAX_MESSAGES_PER_SESSION,
+                    remaining: MAX_MESSAGES_PER_SESSION,
+                },
+            });
+            void recorder.flush();
+        } catch (e) {
+            console.warn("[events] 记录裁剪事件失败（已忽略）:", (e as Error)?.message || e);
+        }
     }
     return getSession(sessionId);
 }
@@ -264,6 +318,20 @@ export async function getRecentMessages(sessionId: string, limit = 5): Promise<S
 
 /** 清空指定会话（用户点了"清空聊天记录"） */
 export async function clearSession(sessionId: string): Promise<void> {
+    // 事件流不删自身，只记 tombstone：投影据此截断 UI 缓存，历史仍可审计。
+    try {
+        const { recorder, currentTurnId } = await import("../events/recorder");
+        recorder.enqueue({
+            origin: "desktop",
+            sessionId,
+            turnId: currentTurnId(),
+            type: "session_cleared",
+            payload: { reason: "clearSession" },
+        });
+        void recorder.flush();
+    } catch (e) {
+        console.warn("[events] 记录清空事件失败（已忽略）:", (e as Error)?.message || e);
+    }
     getDb().prepare("DELETE FROM messages WHERE session_id = ?").run(sessionId);
 }
 
@@ -294,6 +362,20 @@ export async function mergeSessions(fromSessionIds: string[], intoSessionId: str
         (s) => typeof s === "string" && s && s !== intoSessionId,
     );
     if (!from.length) return 0;
+    // 事件里 session_id 保持原值不改，靠 messages_merged 表达「归属变了」。
+    try {
+        const { recorder, currentTurnId } = await import("../events/recorder");
+        recorder.enqueue({
+            origin: "desktop",
+            sessionId: intoSessionId,
+            turnId: currentTurnId(),
+            type: "messages_merged",
+            payload: { fromSessionIds: from, intoSessionId },
+        });
+        void recorder.flush();
+    } catch (e) {
+        console.warn("[events] 记录合并事件失败（已忽略）:", (e as Error)?.message || e);
+    }
     const d = getDb();
     const stmt = d.prepare("UPDATE messages SET session_id = ? WHERE session_id = ?");
     let moved = 0;

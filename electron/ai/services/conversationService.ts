@@ -28,6 +28,10 @@ import { runTool, getFrontendToolNames } from "../tools";
 import { getRecentMessages } from "../db/storage";
 import type { AiContext } from "../aiContext";
 import type { RetrievedPassage } from "../knowledge/types";
+// 事件流：把「模型看到的东西」收归 append-only 事件流。
+// 共享包只放纯逻辑，db 连接由 events/recorder + events/store 注入（不碰 native 模块）。
+import { createInjector, buildSystemContent } from "kirari-agent";
+import { recorder, beginTurn, endTurn, newTurnId, refreshEnabled } from "../events/recorder";
 
 /** 工具循环最多轮数（也用于超时预算计算） */
 const MAX_ROUNDS = 5;
@@ -168,7 +172,22 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
     aiContext.activeRequests.add(controller);
     const _t0 = Date.now();
 
+    // 一轮对话一个 turnId。所有早退 return 全部经由下面的 finally 收口，
+    // 所以 turn_start / turn_end 成对出现，不需要改任何 if 判断。
+    const turnId = newTurnId();
+    beginTurn(turnId);
+    // 每轮刷新一次事件开关。此时 initEngine() 已建库，读表不会触发兜底建库
+    //（见 events/recorder.ts 里 refreshEnabled 的说明）。
+    refreshEnabled();
+
     try {
+        recorder.enqueue({
+            origin: "desktop",
+            sessionId,
+            turnId,
+            type: "turn_start",
+            payload: { userid: aiContext.userid, model: aiContext.model, maxRounds: MAX_ROUNDS, sessionId },
+        });
         // ── Step 1: 意图预检 ──
         const preflight = await preflightTools(
             text || "[用户发送了图片]",
@@ -349,8 +368,25 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
                 ? userParts
                 : text || "";
 
+        // 显式注入：四段各自带 source 与 order，逐条落 context_inject 事件。
+        // 过去是 systemPrompt + dailyBlock + kbBlock + skillBlock 直接相加，
+        // 无法追溯「哪段是哪来的」；现在换成显式 inject，行为逐字等价
+        // （buildSystemContent 用空串 join('')，段间不加任何字符）。
+        const injector = createInjector({
+            origin: "desktop",
+            sessionId,
+            turnId,
+            enqueue: (event) => recorder.enqueue(event),
+        });
+        injector.inject("system.base", systemPrompt, { preflightInjected: preflight.injected || [] });
+        injector.inject("daily_brief", dailyBlock, { failed: dailyBlock === "" });
+        injector.inject("knowledge", kbBlock, { failed: kbBlock === "" });
+        injector.inject("skills", skillBlock, {
+            skillCount: Array.isArray(skillPrompts) ? skillPrompts.length : 0,
+        });
+
         const messages: unknown[] = [
-            { role: "system", content: systemPrompt + dailyBlock + kbBlock + skillBlock },
+            { role: "system", content: buildSystemContent(injector.segments) },
             ...normalizedRecent,
             { role: "user", content: userContent },
         ];
@@ -372,6 +408,26 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
             let completion;
             try {
                 const useTools = allTools.length && !toolsDisabled && !degenerateLoop;
+                // 调用模型前落一条 request：payload.messages 是当时完整数组的逐字深拷贝，
+                // 杀进程重启后靠它重建「发给模型的 messages」（Harness 的硬指标）。
+                recorder.enqueue({
+                    origin: "desktop",
+                    sessionId,
+                    turnId,
+                    type: "request",
+                    payload: {
+                        round,
+                        callSite: "main",
+                        params: {
+                            model: aiContext.model,
+                            useTools: !!useTools,
+                            max_tokens: 1500,
+                            tool_choice: useTools ? toolChoice : undefined,
+                            toolsCount: useTools ? allTools.length : 0,
+                        },
+                        messages: JSON.parse(JSON.stringify(messages)),
+                    },
+                });
                 completion = await streamChatCompletion(
                     aiContext.openai,
                     {
@@ -438,6 +494,24 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
 
             messages.push(msg);
 
+            // 工具轮的中间产物：模型吐过的正文碎片随后会被 onDelta(null) 作废，
+            // 记一条 discarded 事件供轨迹追溯，不进模型历史的最终态。
+            if (msg.tool_calls && msg.tool_calls.length > 0) {
+                recorder.enqueue({
+                    origin: "desktop",
+                    sessionId,
+                    turnId,
+                    type: "assistant_attempt",
+                    payload: {
+                        round,
+                        content: msg.content || "",
+                        tool_calls: msg.tool_calls,
+                        discarded: true,
+                        reason: "tool_round",
+                    },
+                });
+            }
+
             // 无工具调用 → 最终回复
             if (!msg.tool_calls || msg.tool_calls.length === 0) {
                 const rawContent = msg.content?.trim();
@@ -501,6 +575,13 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
                 try {
                     const args = tc.function?.arguments ? JSON.parse(tc.function.arguments) : {};
                     const toolName = tc.function?.name;
+                    recorder.enqueue({
+                        origin: "desktop",
+                        sessionId,
+                        turnId,
+                        type: "tool_call",
+                        payload: { round, tool_call_id: tc.id, name: toolName, arguments: args },
+                    });
                     // 退化循环检测：记录 web_search 的 query，出现近重复即标记 degenerateLoop
                     if (toolName === "web_search") {
                         webSearchCount++;
@@ -535,6 +616,20 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
                     result = `error: ${e instanceof Error ? e.message : String(e)}`;
                 }
                 messages.push({ role: "tool", tool_call_id: tc.id, content: String(result) });
+                // 保持无截断（阶段 A 行为等价）：统一截断放到 D 阶段的 dispatch 流水线。
+                recorder.enqueue({
+                    origin: "desktop",
+                    sessionId,
+                    turnId,
+                    type: "tool_result",
+                    payload: {
+                        round,
+                        tool_call_id: tc.id,
+                        name: tc.function?.name,
+                        content: String(result),
+                        isError: typeof result === "string" && result.startsWith("error:"),
+                    },
+                });
             }
         }
 
@@ -543,6 +638,18 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
         clearTimeout(timeoutId);
         aiContext.activeRequests.delete(controller);
         if (signal) signal.removeEventListener("abort", onAbort);
+        // 每轮强制 flush：回复返回前把本轮 request / tool_* 全部落库，
+        // 「杀进程重启后逐字重建」才成立。失败只警告，绝不影响回复。
+        try { await recorder.flush(); } catch (e) { console.warn("[events] 本轮事件落库失败（已忽略）:", (e as Error)?.message || e); }
+        recorder.enqueue({
+            origin: "desktop",
+            sessionId,
+            turnId,
+            type: "turn_end",
+            payload: { elapsedMs: Date.now() - _t0, model: aiContext.model },
+        });
+        try { await recorder.flush(); } catch (e) { console.warn("[events] 本轮事件落库失败（已忽略）:", (e as Error)?.message || e); }
+        endTurn();
         console.log(`[getReply] 结束，耗时 ${Date.now() - _t0}ms`);
     }
 }
