@@ -27,6 +27,11 @@ export type ToolContext = {
     imageModel?: string;
     /** 生图用，复用用户配置的模型客户端 */
     openai?: OpenAI;
+    /** 阶段 C 任务工具所需上下文（非任务工具忽略） */
+    sessionId?: string;
+    turnId?: string;
+    uid?: number;
+    origin?: "core" | "desktop";
 };
 
 // WMO 天气代码 → 中文描述（精简版）
@@ -532,6 +537,21 @@ export async function runTool(
             return await webSearch(args as { query?: string; topic?: string }, ctx);
         case "generate_image":
             return await generateImage(args as { prompt?: string; size?: string }, ctx);
+        case "plan":
+        case "schedule_reminder": {
+            // 阶段 C：任务工具由 taskRuntime 执行（建任务/建提醒 + 落库 + 记事件）。
+            // 顶层 import taskRuntime 不触发 DB 访问（其 DB 调用都在方法内惰性进行）。
+            const taskRuntime = await import("../services/taskRuntime");
+            const ctxTask = {
+                sessionId: ctx.sessionId || "",
+                turnId: ctx.turnId || "",
+                uid: ctx.uid ?? 1,
+                origin: ctx.origin || ("desktop" as const),
+            };
+            return name === "plan"
+                ? taskRuntime.handlePlan(args, ctxTask)
+                : taskRuntime.handleScheduleReminder(args, ctxTask);
+        }
         default:
             return `未知工具：${name}`;
     }

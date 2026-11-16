@@ -40,6 +40,8 @@ import {
 } from "kirari-agent";
 import { recorder, beginTurn, endTurn, newTurnId, refreshEnabled } from "../events/recorder";
 import { getAgentProfile } from "../../model-config";
+// 阶段 C 任务编排：plan / schedule_reminder 工具分派 + 未完成任务跨轮恢复。
+import * as taskRuntime from "./taskRuntime";
 
 // 工具循环参数已从硬编码常量收进 config.json 的 agentProfile（阶段 B）。
 // 数值逐字等于改造前的 MAX_ROUNDS=5 / max_tokens=1500 / 超时 60s+15s*轮-封顶120s。
@@ -332,9 +334,12 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
             console.warn("[aiReply] 知识库检索失败（已忽略）：", (e as Error)?.message || e);
         }
 
-        const systemPrompt = preflight.injected
+        let systemPrompt = preflight.injected
             ? sys.withTools.replace("{{TOOL_RESULTS}}", preflight.injected.join("\n"))
             : sys.normal;
+        // 阶段 C：把该会话尚未完成的任务拼进 system.base，实现「新消息进来先恢复未完成任务」。
+        const taskResume = taskRuntime.resumeBlock(sessionId);
+        if (taskResume) systemPrompt += taskResume;
 
         // 注入前端托管的 skill 行为模板
         const skillBlock =
@@ -406,7 +411,7 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
         ];
 
         const correctionMode = detectCorrectionIntent(text);
-        const allTools = buildTools();
+        const allTools = taskRuntime.withTaskTools(buildTools());
         const toolChoice = allTools.length ? "auto" : undefined;
         // 纠正模式限 2 次、普通模式限 4 次：达到上限即强制后续轮次纯文本收尾，
         // 避免模型反复搜索（自证式空转）把请求拖到超时。
@@ -532,9 +537,27 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
                 });
             }
 
-            // 无工具调用 → 最终回复
+            // 无工具调用 → 模型想收尾
             if (!msg.tool_calls || msg.tool_calls.length === 0) {
                 const rawContent = msg.content?.trim();
+                // 阶段 C：任务未完成时拦截提前收尾——text 步骤先推进，仍有未做步骤则
+                // 注入 nudge、保持 turn 打开再转一轮（maxRounds 熔断兜底）。
+                if (taskRuntime.hasActiveTask(sessionId)) {
+                    if (rawContent) taskRuntime.advancePendingStep(sessionId, "text", null, rawContent.slice(0, 200));
+                    if (taskRuntime.hasActiveTask(sessionId)) {
+                        console.log("[aiReply] 任务未完成，拦截收尾并继续推进");
+                        if (onDelta) {
+                            try {
+                                onDelta(null);
+                            } catch {
+                                /* ignore */
+                            }
+                        }
+                        messages.push({ role: "user", content: taskRuntime.pendingNudge(sessionId) });
+                        return { kind: "continue" as const, reason: "active task not finished" };
+                    }
+                    // 任务恰好在这轮完成 → 落到下方正常 final
+                }
                 if (!rawContent) {
                     // 流被截断（超时 abort / reasoning 吃满 max_tokens）导致 content 为空：
                     // 先强制一次"纯文本收尾"救回答案，不再硬抛。
@@ -639,6 +662,11 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
                             searchEndpoint: aiContext.searchEndpoint,
                             searchProvider: aiContext.searchProvider,
                             openai: aiContext.openai,
+                            // 阶段 C 任务工具所需上下文。
+                            sessionId,
+                            turnId,
+                            uid: aiContext.userid,
+                            origin: "desktop",
                         });
                     }
                 } catch (e) {
@@ -660,6 +688,11 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
                     },
                 });
                 r.settle(tc.id); // 该工具结果已回灌，清偿欠账
+                // 阶段 C：工具成功后推进 active task 的对应 tool 步骤。
+                const isErr = typeof result === "string" && result.startsWith("error:");
+                if (!isErr && !taskRuntime.isTaskTool(tc.function?.name)) {
+                    taskRuntime.advancePendingStep(sessionId, "tool", tc.function?.name ?? null, String(result).slice(0, 300));
+                }
             }
             // 本轮工具全部回灌、账本清空 → 请求 runner 进入下一轮。
             return { kind: "tools" as const, toolCallIds };

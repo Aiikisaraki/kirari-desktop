@@ -13,6 +13,8 @@ protocol.registerSchemesAsPrivileged([
 ]);
 import extract from "extract-zip";
 import { ChatSessionService, type ChatStateSnapshot } from "./chat-session-service";
+// 阶段 C：持久化定时任务调度器（提醒落库、重启补跑不丢）。
+import * as scheduledJobsService from "./ai/services/scheduledJobsService";
 import { AdapterManager } from "./adapter/adapter-manager";
 import type { AdapterConfig, AdapterStatus } from "./adapter/types";
 import { initEngine, shutdownEngine, chat as engineChat } from "./ai/engine";
@@ -2391,6 +2393,17 @@ app.whenReady().then(async () => {
   await ensureLocalSessionId(userDataDir);
   await ensureChatSessionService().init();
   await ensureChatSessionService().refreshHistory();
+  // 阶段 C：定时任务到点提醒 → 注入当前聊天会话并广播 chat:state；随后启动调度器
+  // （先补跑停机期间到点的任务）。放在聊天服务就绪后，保证 onFire 回调可用。
+  scheduledJobsService.setFireHandler((job) => {
+    try {
+      return ensureChatSessionService().injectProactiveMessage(job.payload, "happy");
+    } catch (e) {
+      console.warn("[sched] 注入主动提醒失败:", e instanceof Error ? e.message : e);
+      return false;
+    }
+  });
+  scheduledJobsService.start();
   // 初始化机器人适配器管理器：连接已启用的适配器与后端 WS，使 QQ 等跨端消息可在启动时同步进桌宠。
   // 之前仅在 deploy:set-server（远程改服务端地址）里调用，启动时漏掉会导致 adapter:* 处理器
   // 全部抛「适配器管理器未初始化」。此时 backendUrl 与聊天服务均已就绪，调用安全。
@@ -2405,6 +2418,7 @@ app.whenReady().then(async () => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  scheduledJobsService.stop();
   chatSessionService?.dispose();
   shutdownEngine();
   if (avatarFolderWatcher) {

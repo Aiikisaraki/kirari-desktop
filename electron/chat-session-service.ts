@@ -263,6 +263,20 @@ export class ChatSessionService {
         return this.cloneState();
     }
 
+    /**
+     * 阶段 C：定时任务到点时注入一条主动提醒（不走模型、直接以宠物口吻呈现）。
+     * 与 relay 回报同构：入 state → persist（落 messages + 旁路事件）→ emit 广播 chat:state。
+     * 返回是否注入成功。
+     */
+    injectProactiveMessage(text: string, emotion: PetEmotion | null = "happy"): boolean {
+        if (this.disposed || !text || !text.trim()) return false;
+        this.state.messages.push(this.createMessage("pet", text.trim(), emotion));
+        this.state.bubbleMessage = text.trim().length <= 10 ? text.trim() : this.state.bubbleMessage;
+        this.persist();
+        this.emit();
+        return true;
+    }
+
     /** 当前会话 id（组网上行时要用；state 本身是私有的，只放行这一个字段） */
     getSessionId(): string {
         return this.state.sessionId;

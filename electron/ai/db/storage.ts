@@ -21,9 +21,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import Database from "better-sqlite3";
 import type { ContentPart, MessageRole } from "../types";
-// 事件流 schema 由平级共享包 kirari-agent 定义，两端各自执行同一份 DDL，
-// 保证同一份 pet_sessions.db 里的 session_events 不分叉。
-import { SESSION_EVENTS_DDL, SESSION_EVENTS_COLUMNS } from "kirari-agent";
+// 事件流 / 任务 / 定时任务 schema 由平级共享包 kirari-agent 定义，两端各自执行同一份 DDL，
+// 保证同一份 pet_sessions.db 里的 session_events / tasks / scheduled_jobs 不分叉。
+import {
+    SESSION_EVENTS_DDL, SESSION_EVENTS_COLUMNS,
+    TASKS_DDL, TASKS_COLUMNS,
+    SCHEDULED_JOBS_DDL, SCHEDULED_JOBS_COLUMNS,
+} from "kirari-agent";
 
 type DB = Database.Database;
 
@@ -59,6 +63,7 @@ export function initDatabase(dbPath?: string): DB {
     db.exec(SCHEMA);
     migrateUiColumns();
     ensureSessionEventsSchema();
+    ensureTaskSchemas();
     return db;
 }
 
@@ -91,6 +96,21 @@ function ensureSessionEventsSchema(): void {
     const cols = (db.prepare("PRAGMA table_info(session_events)").all() as { name: string }[]).map((c) => c.name);
     for (const col of SESSION_EVENTS_COLUMNS) {
         if (!cols.includes(col.name)) db.exec(`ALTER TABLE session_events ADD COLUMN ${col.ddl}`);
+    }
+}
+
+/** 阶段 C：tasks / scheduled_jobs 表，DDL 与补列清单均来自共享包，与核心版同源。 */
+function ensureTaskSchemas(): void {
+    if (!db) return;
+    db.exec(TASKS_DDL);
+    const taskCols = (db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name);
+    for (const col of TASKS_COLUMNS) {
+        if (!taskCols.includes(col.name)) db.exec(`ALTER TABLE tasks ADD COLUMN ${col.ddl}`);
+    }
+    db.exec(SCHEDULED_JOBS_DDL);
+    const jobCols = (db.prepare("PRAGMA table_info(scheduled_jobs)").all() as { name: string }[]).map((c) => c.name);
+    for (const col of SCHEDULED_JOBS_COLUMNS) {
+        if (!jobCols.includes(col.name)) db.exec(`ALTER TABLE scheduled_jobs ADD COLUMN ${col.ddl}`);
     }
 }
 
@@ -607,4 +627,61 @@ export function safeJsonArray(s: unknown): string[] {
     } catch {
         return [];
     }
+}
+
+// ---------------------------------------------------------------- 阶段 C：tasks / scheduled_jobs
+// 行级 CRUD：对象 ↔ 行的转换放在 events/taskStore.ts 与 events/jobStore.ts 适配器里；
+// 这里只提供最小 SQL，与核心版 dbStorage.js 对称。
+
+export type TaskRow = {
+    task_id: string; session_id: string; turn_id: string; origin: string; uid: number;
+    title: string; status: string; steps_json: string; current_step: number;
+    created_at: number; updated_at: number; completed_at: number | null;
+};
+export type JobRow = {
+    job_id: string; session_id: string; origin: string; uid: number;
+    kind: string; title: string; payload: string; due_at: number; recurrence: string;
+    status: string; created_at: number; updated_at: number; last_fired_at: number | null;
+};
+
+export function getTaskRow(taskId: string): TaskRow | undefined {
+    return getDb().prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId) as TaskRow | undefined;
+}
+export function saveTaskRow(row: TaskRow): void {
+    getDb().prepare(`
+        INSERT INTO tasks (task_id, session_id, turn_id, origin, uid, title, status, steps_json, current_step, created_at, updated_at, completed_at)
+        VALUES (@task_id, @session_id, @turn_id, @origin, @uid, @title, @status, @steps_json, @current_step, @created_at, @updated_at, @completed_at)
+        ON CONFLICT(task_id) DO UPDATE SET
+            session_id=excluded.session_id, turn_id=excluded.turn_id, title=excluded.title,
+            status=excluded.status, steps_json=excluded.steps_json, current_step=excluded.current_step,
+            updated_at=excluded.updated_at, completed_at=excluded.completed_at
+    `).run(row);
+}
+export function activeTaskRows(sessionId: string): TaskRow[] {
+    return getDb().prepare(
+        "SELECT * FROM tasks WHERE session_id = ? AND status IN ('pending','running') ORDER BY created_at ASC",
+    ).all(sessionId) as TaskRow[];
+}
+export function listTaskRows(sessionId: string, limit: number): TaskRow[] {
+    return getDb().prepare("SELECT * FROM tasks WHERE session_id = ? ORDER BY created_at DESC LIMIT ?").all(sessionId, limit) as TaskRow[];
+}
+export function getJobRow(jobId: string): JobRow | undefined {
+    return getDb().prepare("SELECT * FROM scheduled_jobs WHERE job_id = ?").get(jobId) as JobRow | undefined;
+}
+export function saveJobRow(row: JobRow): void {
+    getDb().prepare(`
+        INSERT INTO scheduled_jobs (job_id, session_id, origin, uid, kind, title, payload, due_at, recurrence, status, created_at, updated_at, last_fired_at)
+        VALUES (@job_id, @session_id, @origin, @uid, @kind, @title, @payload, @due_at, @recurrence, @status, @created_at, @updated_at, @last_fired_at)
+        ON CONFLICT(job_id) DO UPDATE SET
+            title=excluded.title, payload=excluded.payload, due_at=excluded.due_at,
+            status=excluded.status, updated_at=excluded.updated_at, last_fired_at=excluded.last_fired_at
+    `).run(row);
+}
+export function dueJobRows(now: number, limit: number): JobRow[] {
+    return getDb().prepare(
+        "SELECT * FROM scheduled_jobs WHERE status = 'pending' AND due_at <= ? ORDER BY due_at ASC LIMIT ?",
+    ).all(now, limit) as JobRow[];
+}
+export function listJobRows(sessionId: string, limit: number): JobRow[] {
+    return getDb().prepare("SELECT * FROM scheduled_jobs WHERE session_id = ? ORDER BY due_at DESC LIMIT ?").all(sessionId, limit) as JobRow[];
 }
