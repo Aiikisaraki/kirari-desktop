@@ -157,7 +157,7 @@ export async function geocodeCandidates(name: string, count = 5): Promise<GeoCan
 }
 
 /** 当前时间：按 IANA 时区格式化，输出自然语句供 LLM 润色。 */
-async function getCurrentTime(args: { timezone?: string | null } = {}): Promise<string> {
+export async function getCurrentTime(args: { timezone?: string | null } = {}): Promise<string> {
     const timezone = args.timezone || undefined;
     const now = new Date();
     let dateStr = "";
@@ -205,7 +205,7 @@ async function getCurrentTime(args: { timezone?: string | null } = {}): Promise<
 }
 
 /** 天气查询：优先用已解析坐标（由位置服务固化，唯一且明确，避免重复地理编码与歧义）。 */
-async function getWeather(
+export async function getWeather(
     args: {
         location?: string;
         latitude?: number | null;
@@ -375,7 +375,7 @@ async function searxngSearch(
  * dispatcher：按 ctx.searchProvider 选择搜索源（设置界面用户可选）。
  * 未设 provider（旧数据兼容）→ 回退原优先级：searchEndpoint > searchKey > uapis
  */
-async function webSearch(
+export async function webSearch(
     args: { query?: string; topic?: string } = {},
     ctx: ToolContext = {},
 ): Promise<string> {
@@ -403,7 +403,7 @@ async function webSearch(
  * AI 生图工具：调用 OpenAI 兼容图像生成接口（复用用户配置的模型 Key 与 endpoint），
  * 以 markdown 图片语法返回，由 parseModelReply 提取到 images 字段统一渲染。
  */
-async function generateImage(
+export async function generateImage(
     args: { prompt?: string; size?: string } = {},
     ctx: ToolContext = {},
 ): Promise<string> {

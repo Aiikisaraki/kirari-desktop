@@ -32,17 +32,27 @@ vi.mock("../db/storage", async (importOriginal) => {
     return { ...actual, getRecentMessages: async () => [] };
 });
 
-// taskRuntime 用真实实现（含 store/状态机）；tools 的 runTool 对任务工具转发到真实 taskRuntime。
+// taskRuntime 用真实实现（含 store/状态机）；阶段 D 起 conversationService 走 capabilities.dispatch，
+// 所以 mock 能力层：任务工具转发真实 taskRuntime，get_weather 返回固定值（不跑外网），listTools 给非空集。
 import type { TaskToolCtx } from "./taskRuntime";
 const taskRuntime = await import("./taskRuntime");
-vi.mock("../tools", () => ({
-    runTool: async (name: string, args: unknown, ctx: unknown) => {
-        if (name === "plan") return taskRuntime.handlePlan(args, ctx as TaskToolCtx);
-        if (name === "schedule_reminder") return taskRuntime.handleScheduleReminder(args, ctx as TaskToolCtx);
-        if (name === "get_weather") return "上海晴转雨";
-        return `tool:${name}`;
+const fakeTools = ["plan", "get_weather", "schedule_reminder", "load_skill"].map((name) => ({
+    type: "function", function: { name, description: name, parameters: { type: "object" } },
+}));
+vi.mock("../capabilities/registry", () => ({
+    scopeKey: (ns: string, id: string) => `${ns}::${id}`,
+    listTools: () => fakeTools,
+    has: (_s: string, name: string) => fakeTools.some((t) => t.function.name === name),
+    resolve: (_s: string, name: string) => fakeTools.find((t) => t.function.name === name) ? { name, scope: "builtin", timeoutMs: 30000, truncateChars: 4000 } : undefined,
+    dispatch: async (_s: string, name: string, args: unknown, ctx: unknown) => {
+        if (name === "plan") return { content: await taskRuntime.handlePlan(args, ctx as TaskToolCtx), isError: false, capability: null };
+        if (name === "schedule_reminder") return { content: await taskRuntime.handleScheduleReminder(args, ctx as TaskToolCtx), isError: false, capability: null };
+        if (name === "get_weather") return { content: "上海晴转雨", isError: false, capability: null };
+        return { content: `tool:${name}`, isError: false, capability: null };
     },
-    getFrontendToolNames: () => new Set<string>(),
+    registerGlobal: () => 0,
+    registerConnection: () => 0,
+    unregisterConnection: () => {},
 }));
 
 const planArgs = { title: "查天气再提醒带伞", steps: [

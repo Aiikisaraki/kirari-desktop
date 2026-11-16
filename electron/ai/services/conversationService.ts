@@ -20,11 +20,13 @@ import {
     LOCATION_ASK_MESSAGE,
     stripNonConversational,
 } from "../reply/promptBuilder";
-import { preflightTools, buildTools, detectCorrectionIntent } from "../reply/intent";
+import { preflightTools, detectCorrectionIntent } from "../reply/intent";
 import { streamChatCompletion, polishToolResult } from "../reply/streaming";
 import * as dailyBriefing from "./dailyBriefingService";
 import * as knowledgeRetrieval from "../knowledge/retrievalService";
-import { runTool, getFrontendToolNames } from "../tools";
+// 阶段 D：统一能力注册表（scope 隔离 + 超时 + 截断），SKILL.md 目录摘要。
+import * as capabilities from "../capabilities/registry";
+import * as skillMd from "../skills/skillMd";
 import { getRecentMessages } from "../db/storage";
 import type { AiContext } from "../aiContext";
 import type { RetrievedPassage } from "../knowledge/types";
@@ -61,6 +63,8 @@ export type GetReplyOptions = {
     persona?: string | null;
     /** 前端主动携带的私有知识库检索结果 */
     kbContext?: RetrievedPassage[] | null;
+    /** 阶段 D：能力作用域（本地 UI / 组网 hostExecutor / 机器人），隔离 frontend 工具与技能执行器 */
+    capabilityScope?: string | null;
     /** 外部取消（用户点了停止生成） */
     signal?: AbortSignal;
     /**
@@ -146,9 +150,14 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
         skillPrompts = [],
         persona = null,
         kbContext = null,
+        capabilityScope = null,
         onDelta = null,
         signal,
     } = options;
+
+    // 阶段 D：能力作用域，缺省按「本地 UI」处理。三类调用方各持一份 frontend 工具，
+    // 不再有全局 last-writer-wins（本地 UI / 组网 hostExecutor / 机器人互不覆盖）。
+    const capScope = capabilityScope || capabilities.scopeKey("local", "ui");
 
     if (!aiContext || aiContext.closed || !aiContext.openai) {
         throw new Error("小灵的大脑还没准备好，去设置里检查一下连接吧");
@@ -341,11 +350,13 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
         const taskResume = taskRuntime.resumeBlock(sessionId);
         if (taskResume) systemPrompt += taskResume;
 
-        // 注入前端托管的 skill 行为模板
+        // 阶段 D：SKILL.md 渐进披露——system 里只放目录摘要，正文用 load_skill 按需加载。
+        const skillCatalog = skillMd.catalogBlock();
+        // 前端上报的 skill 行为模板仍保留（与 SKILL.md 是两类能力）。
         const skillBlock =
-            Array.isArray(skillPrompts) && skillPrompts.length
+            (Array.isArray(skillPrompts) && skillPrompts.length
                 ? "\n\n# 已启用的技能（请遵循以下设定）\n" + skillPrompts.join("\n\n")
-                : "";
+                : "") + skillCatalog;
 
         // 历史消息 content 可能是字符串，或 [text, image_url] 多模态数组（JSON 序列化存储）；
         // 统一归一化为 OpenAI 消息格式，确保发送过的图片在上下文里不被丢弃。
@@ -411,7 +422,9 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
         ];
 
         const correctionMode = detectCorrectionIntent(text);
-        const allTools = taskRuntime.withTaskTools(buildTools());
+        // 阶段 D：工具集统一按 scope 从能力注册表列举（内置 + 全局 MCP/技能 + 本 scope 前端工具）。
+        // builtin 能力文件已含 plan / schedule_reminder / load_skill，不再额外 withTaskTools。
+        const allTools = capabilities.listTools(capScope);
         const toolChoice = allTools.length ? "auto" : undefined;
         // 纠正模式限 2 次、普通模式限 4 次：达到上限即强制后续轮次纯文本收尾，
         // 避免模型反复搜索（自证式空转）把请求拖到超时。
@@ -652,28 +665,27 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
                             degenerateLoop = true;
                         }
                     }
-                    // 前端托管工具（MCP/skill 提供，以 frontend__ 前缀标识）：由主进程注入的执行器执行
-                    const frontendToolNames = aiContext.invokeFrontendTool ? getFrontendToolNames() : null;
-                    if (frontendToolNames && frontendToolNames.has(toolName) && aiContext.invokeFrontendTool) {
-                        result = await aiContext.invokeFrontendTool(toolName, args);
-                    } else {
-                        result = await runTool(toolName, args, {
-                            searchKey: aiContext.searchKey,
-                            searchEndpoint: aiContext.searchEndpoint,
-                            searchProvider: aiContext.searchProvider,
-                            openai: aiContext.openai,
-                            // 阶段 C 任务工具所需上下文。
-                            sessionId,
-                            turnId,
-                            uid: aiContext.userid,
-                            origin: "desktop",
-                        });
-                    }
+                    // 阶段 D：统一 dispatch 流水线——按 scope 选执行器（内置/全局/本 scope 前端）
+                    // + 统一超时 + 统一截断。前端执行器由调用方按 scope 注册进注册表，
+                    // 不再用全局 getFrontendToolNames 判断归属（那正是串线根因）。
+                    const dispatched = await capabilities.dispatch(capScope, toolName, args, {
+                        searchKey: aiContext.searchKey,
+                        searchEndpoint: aiContext.searchEndpoint,
+                        searchProvider: aiContext.searchProvider,
+                        openai: aiContext.openai,
+                        sessionId,
+                        turnId,
+                        uid: aiContext.userid,
+                        origin: "desktop",
+                        // 前端执行器兜底（兼容尚未按新接口注册的调用方），形态 (name, args)。
+                        invokeFrontendTool: aiContext.invokeFrontendTool,
+                    });
+                    result = dispatched.content;
                 } catch (e) {
                     result = `error: ${e instanceof Error ? e.message : String(e)}`;
                 }
                 messages.push({ role: "tool", tool_call_id: tc.id, content: String(result) });
-                // 保持无截断（阶段 A 行为等价）：统一截断放到 D 阶段的 dispatch 流水线。
+                // 阶段 D：截断已在 capabilities.dispatch 流水线里统一执行。
                 recorder.enqueue({
                     origin: "desktop",
                     sessionId,

@@ -2251,6 +2251,10 @@ app.whenReady().then(async () => {
       sessionId,
       text: content,
       images,
+      // 阶段 D：组网调用方用独立能力作用域，与本地 UI 的 frontend 工具/技能执行器隔离，
+      // 并在组网链路上也带上技能行为模板（此前 hostExecutor 漏传，远端拿不到技能设定）。
+      capabilityScope: "net::host",
+      skillPrompts: frontendTools.collectSkillPrompts(),
       // 叶子自带的私人知识库检索结果：它存在叶子本地，主机没有别的途径拿到，
       // 必须当最高优先级参考注入（否则叶子的知识库在组网下等于白配）。
       kbContext: kbContext && kbContext.length > 0 ? kbContext : null,

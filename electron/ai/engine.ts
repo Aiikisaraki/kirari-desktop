@@ -17,6 +17,7 @@ import { getReply } from "./services/conversationService";
 import type { ReplyResult } from "./services/conversationService";
 import { getReply as getFallbackReply } from "./services/fallbackService";
 import { setFrontendTools } from "./tools";
+import * as capabilities from "./capabilities/registry";
 import { setPrivateKnowledgeProvider } from "./knowledge/privateKnowledge";
 import type { RetrievedPassage } from "./knowledge/types";
 import type { ToolSpec } from "./types";
@@ -62,6 +63,15 @@ export function registerFrontendTools(
 ): number {
     const normalized = setFrontendTools(schemas as ToolSpec[]);
     frontendExecutor = executor;
+    // 阶段 D：MCP/skill 工具是配置驱动的全局能力，注册进统一注册表（所有 scope 可见），
+    // 走统一的超时 + 截断流水线。执行器由 (name,args) 包装成 (args) 形态。
+    const asGlobal = normalized.map((t) => ({
+        name: t.function.name,
+        description: t.function.description,
+        parameters: t.function.parameters as Record<string, unknown> | undefined,
+        execute: (args: Record<string, unknown>) => executor(t.function.name, args),
+    }));
+    capabilities.registerGlobal(asGlobal);
     return normalized.length;
 }
 
@@ -127,6 +137,8 @@ export type ChatOptions = {
     skillPrompts?: string[];
     /** 机器人场景：按群号/QQ号隔离位置记忆 */
     locationScope?: string | null;
+    /** 阶段 D：能力作用域（本地 UI / 组网 hostExecutor / 机器人），隔离 frontend 工具与技能执行器 */
+    capabilityScope?: string | null;
     /**
      * 调用方自带的私人知识库检索结果（可选）。
      * 叶子上行到主机时，主机必须带上它 —— 片段存在叶子本地，主机拿不到别的副本。
@@ -175,6 +187,7 @@ export async function chat(options: ChatOptions): Promise<ReplyResult> {
         persona = null,
         skillPrompts = [],
         locationScope = null,
+        capabilityScope = null,
         kbContext = null,
         onDelta = null,
         signal,
@@ -205,6 +218,7 @@ export async function chat(options: ChatOptions): Promise<ReplyResult> {
             images,
             sessionId,
             locationScope,
+            capabilityScope,
             kbContext: kbNormalized,
             onDelta,
             skillPrompts,

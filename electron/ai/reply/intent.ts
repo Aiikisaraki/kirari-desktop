@@ -9,7 +9,10 @@
 // 改动：sessionManager 去掉存储模式分支（桌宠固定走本地库），直接调 db 层；
 //       前端工具执行改为进程内注入（见 tools/bridge）。
 
-import { mergeTools, runTool, geocode } from "../tools";
+import { mergeTools, geocode } from "../tools";
+// 阶段 D：preflight 快路径走统一 dispatch（统一超时 + 截断），scope 用固定 local。
+import * as capabilities from "../capabilities/registry";
+const PREFLIGHT_SCOPE = capabilities.scopeKey("local", "preflight");
 import * as locationSvc from "../services/locationService";
 import { getRecentMessages } from "../db/storage";
 import { GREETING_MESSAGE } from "./promptBuilder";
@@ -124,10 +127,11 @@ async function runDirectToolsByIntents(
             } else if (intentName === "get_current_time") {
                 args = { timezone: loc.timezone || null };
             }
-            const result = await runTool(intentName, args, {
+            const dispatched = await capabilities.dispatch(PREFLIGHT_SCOPE, intentName, args, {
                 searchKey: searchCtx.searchKey,
                 searchEndpoint: searchCtx.searchEndpoint,
             });
+            const result = dispatched.content;
             results.push(result);
         } catch (e) {
             results.push(`${intentName} error: ${e instanceof Error ? e.message : String(e)}`);
@@ -356,10 +360,11 @@ export async function preflightTools(
                     }
                 }
             }
-            const result = await runTool(intent.name, args, {
+            const dispatched = await capabilities.dispatch(PREFLIGHT_SCOPE, intent.name, args, {
                 searchKey: searchCtx.searchKey,
                 searchEndpoint: searchCtx.searchEndpoint,
             });
+            const result = dispatched.content;
             results.push(result);
         } catch (e) {
             results.push(`${intent.name} error: ${e instanceof Error ? e.message : String(e)}`);
