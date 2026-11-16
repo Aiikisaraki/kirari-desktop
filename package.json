@@ -28,7 +28,7 @@
         "hookable": "^5.5.3",
         "katex": "^0.18.1",
         "kirari-net": "file:../kirari-net",
-        "kirari-agent": "https://codeload.github.com/Aiikisaraki/kirari-agent/tar.gz/refs/tags/v0.1.0",
+        "kirari-agent": "https://codeload.github.com/Aiikisaraki/kirari-agent/tar.gz/refs/tags/v0.2.0",
         "marked": "^18.0.7",
         "nostics": "^1.1.4",
         "openai": "^7.31.0",

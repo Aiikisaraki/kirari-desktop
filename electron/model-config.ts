@@ -5,6 +5,13 @@
 import fs from "fs";
 import path from "path";
 import { app } from "electron";
+// AgentProfile：默认常量只在首次补写时用一次；运行期读取一律走 parseAgentProfile 严格校验，
+// 缺字段 / 坏值显式报错，不静默回退默认值（与核心版同构，两端同一份内核）。
+import {
+    parseAgentProfile,
+    DEFAULT_AGENT_PROFILE,
+    type AgentProfile,
+} from "kirari-agent";
 
 export interface ModelProfile {
     id: number;
@@ -34,6 +41,8 @@ export interface ModelConfigFile {
      */
     models?: ModelProfile[];
     activeModelId?: number;
+    /** 阶段 B：工具循环参数（maxRounds / 搜索上限 / max_tokens / 超时），与核心版同构 */
+    agentProfile?: AgentProfile;
 }
 
 const CONFIG_FILE = path.join(app.getPath("userData"), "config.json");
@@ -169,6 +178,22 @@ function writeConfig(next: ModelConfigFile): void {
         return;
     }
     if (changeCallbacks.length > 0) notifyChange();
+}
+
+/**
+ * 运行期读取 agentProfile。
+ *  - 配置缺 agentProfile：惰性补写一份默认值落盘（一次），走 writeConfig 整体 spread，
+ *    手写的未知字段原样保留。这样存量用户升级无感，也不用到处改初始化入口。
+ *  - 已有但缺字段 / 值非法：parseAgentProfile 显式报错，不回退默认值。
+ * fs.watch 已把外部改动同步进文件，这里每次直接读文件，改配置立即生效。
+ */
+export function getAgentProfile(): AgentProfile {
+    const cfg = readModelConfigFile();
+    if (!cfg.agentProfile) {
+        writeConfig({ ...cfg, agentProfile: { ...DEFAULT_AGENT_PROFILE } });
+        return { ...DEFAULT_AGENT_PROFILE };
+    }
+    return parseAgentProfile(cfg.agentProfile, "config.json.agentProfile");
 }
 
 export function addModelProfile(p: { name: string; endpoint: string; model: string; key: string }): number {

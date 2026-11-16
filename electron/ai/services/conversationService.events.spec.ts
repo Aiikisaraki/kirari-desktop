@@ -11,6 +11,11 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// conversationService 现在从 model-config 读 agentProfile；mock electron 的 userData，
+// 让 getAgentProfile 首次补写默认配置落到隔离目录，不碰真实配置。
+const configDir = vi.hoisted(() => `${process.cwd()}/.tmp-test/agent-profile-for-reply-${process.pid}`);
+vi.mock("electron", () => ({ app: { getPath: () => configDir } }));
+
 vi.mock("../reply/parser", () => ({
     parseModelReply: (s: string) => ({ speech: s, emotion: null, images: [] }),
     isValidImageUrl: () => true,
