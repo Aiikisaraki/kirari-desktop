@@ -618,6 +618,20 @@ export function setSetting(key: string, value: string): void {
         .run(key, value);
 }
 
+/**
+ * 阶段 E：抢占式写入（INSERT OR IGNORE）。返回 true=本次抢到，false=键已存在。
+ * 用途：两端共库时给「同一档简报」加去重锁，只有一个进程真正去采集+压缩。
+ */
+export function claimSetting(key: string, value = "1"): boolean {
+    const info = getDb().prepare("INSERT OR IGNORE INTO settings_kv (key, value) VALUES (?, ?)").run(key, value);
+    return info.changes > 0;
+}
+
+/** 释放抢占（生成失败时回滚，让另一进程/下一轮还能补）。 */
+export function releaseSetting(key: string): void {
+    getDb().prepare("DELETE FROM settings_kv WHERE key = ?").run(key);
+}
+
 /** JSON 数组字段的容错解析（解析失败回退空数组） */
 export function safeJsonArray(s: unknown): string[] {
     if (!s || typeof s !== "string") return [];

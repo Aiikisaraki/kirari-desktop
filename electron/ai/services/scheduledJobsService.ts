@@ -8,6 +8,7 @@
 import { isDue, fireJob } from "kirari-agent";
 import { jobStore } from "../events/jobStore";
 import { recorder } from "../events/recorder";
+import * as briefSchedule from "./briefSchedule";
 
 type FireHandler = (job: { title: string; payload: string; sessionId: string; uid: number }) => boolean | void;
 
@@ -33,6 +34,10 @@ export async function scanOnce(): Promise<number> {
             try {
                 if (job.kind === "reminder" && onFire) {
                     onFire({ title: job.title, payload: job.payload, sessionId: job.sessionId, uid: job.uid });
+                } else if (job.kind === "daily_brief") {
+                    // 阶段 E：简报任务。生成失败也只 warn（briefSchedule 内部回滚档位锁），
+                    // job 照常顺延，避免 15s 热循环；当天缺简报由对话时惰性兜底。
+                    await briefSchedule.fireDailyBrief(job, now);
                 }
                 const next = fireJob(job, now);
                 jobStore.save(next, "job_fired");

@@ -15,9 +15,12 @@ import extract from "extract-zip";
 import { ChatSessionService, type ChatStateSnapshot } from "./chat-session-service";
 // 阶段 C：持久化定时任务调度器（提醒落库、重启补跑不丢）。
 import * as scheduledJobsService from "./ai/services/scheduledJobsService";
+// 阶段 E：每日简报落库调度（每 uid × 08/16/22 三档）+ 简报生成。
+import * as briefSchedule from "./ai/services/briefSchedule";
+import * as dailyBriefingService from "./ai/services/dailyBriefingService";
 import { AdapterManager } from "./adapter/adapter-manager";
 import type { AdapterConfig, AdapterStatus } from "./adapter/types";
-import { initEngine, shutdownEngine, chat as engineChat } from "./ai/engine";
+import { initEngine, shutdownEngine, chat as engineChat, ensureContext } from "./ai/engine";
 import { NetManager } from "kirari-net";
 import type { HostExecutor, RelayBackfill } from "kirari-net";
 import { setupNetIpc } from "./net/ipc";
@@ -2406,6 +2409,28 @@ app.whenReady().then(async () => {
       console.warn("[sched] 注入主动提醒失败:", e instanceof Error ? e.message : e);
       return false;
     }
+  });
+  // 阶段 E：简报任务到点 → 用本机当前模型配置生成当日简报（写 daily_memory）。
+  // 未配置大脑时直接返回 false，由对话时的 ensureDailyBrief 惰性兜底。
+  // 两端共库时由 briefSchedule 的档位锁保证同一档只跑一次。
+  briefSchedule.setBriefRunner(async () => {
+    const cfg = readModelConfigFile();
+    if (!cfg.key || !cfg.model || !cfg.endpoint) return false;
+    const ctx = ensureContext({
+      model: cfg.model,
+      endpoint: cfg.endpoint,
+      key: cfg.key,
+      searchProvider: cfg.searchProvider,
+      searchKey: cfg.searchKey,
+      searchEndpoint: cfg.searchEndpoint,
+      userid: LOCAL_UID,
+    });
+    const brief = await dailyBriefingService.generateDailyBrief(ctx);
+    return !!brief;
+  });
+  // 先补齐简报任务记录，再启动调度器：停机期间过期但 pending 的记录会在首扫补跑一次。
+  void briefSchedule.ensureJobs().catch((e: unknown) => {
+    console.warn("[brief] 初始化简报任务失败:", e instanceof Error ? e.message : e);
   });
   scheduledJobsService.start();
   // 初始化机器人适配器管理器：连接已启用的适配器与后端 WS，使 QQ 等跨端消息可在启动时同步进桌宠。
