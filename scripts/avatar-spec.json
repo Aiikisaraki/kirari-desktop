@@ -1,0 +1,141 @@
+{
+  "skin": "resources/official-avatars/kirari",
+  "anchor": {
+    "state": "idle",
+    "frame": 0
+  },
+  "targets": {
+    "maxWidth": 330,
+    "heightTolerance": 0.08,
+    "bottomTolerance": 4,
+    "ssim": 0.95,
+    "jumpRms": 40,
+    "greenRatio": 0.01,
+    "staticRms": 4.0,
+    "staticMinFrames": 3,
+    "heightExempt": [
+      "sleepy",
+      "sleep_loop",
+      "sleep_start",
+      "sleep_end",
+      "drag"
+    ]
+  },
+  "states": {
+    "idle": {
+      "mode": "keep",
+      "trigger": "常态待机（循环）—— 长循环才有活着的感，不动"
+    },
+    "sleepy": {
+      "mode": "keep",
+      "trigger": "闲置 3~5 分钟（循环）—— 不动"
+    },
+    "speak": {
+      "mode": "keep",
+      "trigger": "收到回复（循环）—— 不动"
+    },
+    "blink": {
+      "mode": "trim",
+      "trigger": "空闲随机 3~8s 一次",
+      "note": "源表 81 帧里只有 2 次眨眼（f13~f25、f54~f68），单次被画成约 1.1s 慢动作，整片提速到 0.29s 需要 279fps，物理上做不到，只能挑帧。闭眼平台由逐帧闭眼指数实测（先在眼睛带内 ±6px 对齐消掉身体微漂）：f16~f21、f58~f62。",
+      "clips": [
+        {
+          "src": 0,
+          "sheet": "blink.png",
+          "pick": [
+            0,
+            14,
+            19,
+            26
+          ],
+          "fps": 14,
+          "weight": 3
+        },
+        {
+          "src": 0,
+          "sheet": "blink_double.png",
+          "pick": [
+            0,
+            14,
+            19,
+            26,
+            55,
+            61,
+            68
+          ],
+          "fps": 12,
+          "weight": 1
+        }
+      ]
+    },
+    "wave": {
+      "mode": "retime",
+      "trigger": "悬浮 1s / 随机 40~90s / 聚焦",
+      "targetSec": 2.0,
+      "pad": 0
+    },
+    "happy": {
+      "mode": "retime",
+      "trigger": "连点 3 次 / 对话结束 12%",
+      "targetSec": 2.0,
+      "pad": 0
+    },
+    "bow": {
+      "mode": "retime",
+      "trigger": "对话框打开",
+      "targetSec": 1.6,
+      "pad": 8
+    },
+    "excited": {
+      "mode": "retime",
+      "trigger": "（重）连接成功",
+      "targetSec": 2.0,
+      "pad": 8,
+      "anchorTail": 0
+    },
+    "nod": {
+      "mode": "retime",
+      "trigger": "用户发消息",
+      "targetSec": 1.2,
+      "pad": 8
+    },
+    "sad": {
+      "mode": "retime",
+      "trigger": "连接断开",
+      "targetSec": 2.4,
+      "pad": 8
+    },
+    "shake": {
+      "mode": "retime",
+      "trigger": "出错 / 无法满足",
+      "targetSec": 1.2,
+      "pad": 8
+    },
+    "shy": {
+      "mode": "retime",
+      "trigger": "光标抚摸",
+      "targetSec": 2.0,
+      "pad": 8,
+      "anchorTail": 0
+    },
+    "stretch": {
+      "mode": "retime",
+      "trigger": "闲置 2~4 分钟",
+      "targetSec": 3.0,
+      "pad": 8,
+      "anchorTail": 0
+    },
+    "surprised": {
+      "mode": "retime",
+      "trigger": "关闭对话框时收到新消息",
+      "targetSec": 1.4,
+      "pad": 8
+    },
+    "thinking": {
+      "mode": "retime",
+      "trigger": "等回复期间循环重播",
+      "targetSec": 2.4,
+      "pad": 8
+    }
+  }
+}
