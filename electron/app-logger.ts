@@ -1,8 +1,8 @@
 import fs from "fs";
 import path from "path";
-import { app } from "electron";
+import { homePath } from "./kirari-home";
 
-// 主进程日志模块：劫持 console.*，使其同时落盘到 userData/logs/app-YYYY-MM-DD.log。
+// 主进程日志模块：劫持 console.*，使其同时落盘到 ~/.kirari/logs/app-YYYY-MM-DD.log。
 // 这样打包后的 Electron 应用即使没有可见控制台，也能通过日志文件排查问题
 // （尤其是后端子进程是否启动、监听哪个端口、报错内容）。保留原始输出以便 DevTools / 终端可见。
 let logPath: string | null = null;
@@ -72,7 +72,8 @@ function patchConsole(): void {
 // 返回日志文件路径（用于打印到启动横幅 / 托盘菜单打开）。
 export function initAppLogger(): string | null {
   try {
-    const dir = path.join(app.getPath("userData"), "logs");
+    // 日志落数据根（~/.kirari/logs），与核心版同一处，排障时不用两头找。
+    const dir = homePath("logs");
     fs.mkdirSync(dir, { recursive: true });
     const d = new Date();
     const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;

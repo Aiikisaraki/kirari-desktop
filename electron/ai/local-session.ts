@@ -2,7 +2,7 @@
 // 「本机会话」真源：这台机器上「我」和这只桌宠的**同一个对话**的会话 id。
 //
 // 与核心版 src/session/localSession.js 是同一份规则、同一个文件
-// （userData/local-session.json）—— 两端读写同一份记录，所以记录天然互通。
+// （数据根下的 sessions/local-session.json）—— 两端读写同一份记录，所以记录天然互通。
 //
 // ── 为什么必须有这个东西 ──────────────────────────────────────────────
 // 以前桌宠版的 sessionId 是构造时 `crypto.randomUUID()`，只存在内存里，
@@ -20,14 +20,17 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import * as db from "./db/storage";
+import { LAYOUT } from "../kirari-home";
 
-const FILE = "local-session.json";
+/** 布局内的相对路径（sessions/local-session.json），与核心版 kirariHome.LAYOUT 一致。 */
+const FILE = LAYOUT.localSession;
 /** 不参与「本机会话」收口的会话前缀（每个前缀是一类独立对话）。 */
 export const FOREIGN_SESSION_PREFIXES = ["bot-"];
 
 const SESSION_ID_RE = /^[a-zA-Z0-9:_-]{1,80}$/;
 
 export function localSessionFilePath(userDataDir: string): string {
+    // 传入的是数据根；文件在 sessions/ 子目录里（见 kirari-home 的 LAYOUT）。
     return path.join(userDataDir, FILE);
 }
 

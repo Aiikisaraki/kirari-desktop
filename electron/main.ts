@@ -29,9 +29,46 @@ import { ensureLocalSessionId } from "./ai/local-session";
 import { migrateLegacyChatJson } from "./ai/migrate/legacy-chat";
 import { migrateLegacyChatDb } from "./ai/migrate/legacy-db";
 import * as frontendTools from "./frontend-tools";
-import { readModelConfigFile, writeModelConfigFile, onModelConfigChanged, startModelConfigWatch, listModelProfiles, addModelProfile, updateModelProfile, deleteModelProfile, activateModelProfile } from "./model-config";
+import { readModelConfigFile, writeModelConfigFile, onModelConfigChanged, startModelConfigWatch, listModelProfiles, addModelProfile, updateModelProfile, deleteModelProfile, activateModelProfile, migrateModelsOutOfConfig } from "./model-config";
 import { initAppLogger, getLogPath, isDebugMode } from "./app-logger";
+// 数据根（~/.kirari）：解析、布局、一次性迁移。与核心版 src/kirariHome.js 同一份规范。
+import { resolveHome, homePaths, homePath, setHomeRoot, migrateLegacyHome } from "./kirari-home";
+import * as standardMcp from "./mcp/standardMcp";
 import { LocalKnowledge } from "../src/knowledge/localKnowledge";
+
+// ───────────── 数据根（~/.kirari）：必须在任何模块读 userData 之前执行 ─────────────
+//
+// 为什么必须在 import 之后紧接着跑：下面的模块级代码（皮肤目录、头像目录等）
+// 会在模块体求值时调 homePath()。若 setHomeRoot() 晚于它们，那些值会永久
+// 绑定旧目录，于是「配置写新根、读旧根」这种最难查的分叉就出现了。
+// 会被提前求值、且跨模块使用的路径一律改成**调用时求值**，不存常量
+// （例如 mcpConfigPath() / model-config.ts 的 configFile()）。
+//
+// 两个路径的职责分开：
+//   userData    → ~/.kirari                  用户数据（配置/库/技能/皮肤/头像/日志）
+//   sessionData → %APPDATA%\<app>\chromium   Chromium 纯缓存（不跟着数据走）
+//
+// 与 kirari-core/src/kirariHome.js 同一份规范，见 docs/home-layout.md。
+const KIRARI_HOME_PATHS = initKirariHomePaths();
+function initKirariHomePaths(): { home: string; sessionData: string } {
+  const { dir } = resolveHome();
+  // sessionData 放在旧 userData 旁边的子目录里：路径稳定、一眼能看出是缓存。
+  const sessionData = path.join(app.getPath("userData"), "chromium");
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(sessionData, { recursive: true });
+    // 先登记给 layout 层：之后所有 homePath() 都以这个根为准，
+    // 不受「模块顶层求值早于 setPath」的影响。
+    setHomeRoot(dir);
+    app.setPath("userData", dir);
+    // sessionData 必须在 ready 之前设置，否则 Chromium 已经开始往默认位置写缓存。
+    app.setPath("sessionData", sessionData);
+  } catch (e) {
+    console.error("[home] 设置数据根失败，将沿用 Electron 默认 userData:", e);
+  }
+  return { home: dir, sessionData };
+}
+
 
 type PetWindow = InstanceType<typeof BrowserWindow>;
 type PetTray = InstanceType<typeof Tray>;
@@ -154,7 +191,7 @@ function parseClientConfig(raw: unknown): DeployConfig {
 function loadClientConfig(): DeployConfig {
   const candidates = [
     process.env.PET_CLIENT_CONFIG,
-    path.join(app.getPath("userData"), "pet-client.config.json"),
+    homePath("clientConfig"),
   ].filter(Boolean) as string[];
   for (const p of candidates) {
     try {
@@ -182,7 +219,7 @@ function saveClientConfig() {
   try {
     const json = JSON.stringify(clientConfig, null, 2);
     lastWrittenConfigJson = json;
-    fs.writeFileSync(path.join(app.getPath("userData"), "pet-client.config.json"), json);
+    fs.writeFileSync(homePath("clientConfig"), json);
   } catch (e) {
     console.error("[config] 保存客户端配置失败:", e);
   }
@@ -228,7 +265,7 @@ function applyExternalClientConfig(json: string): void {
 }
 
 function startClientConfigWatch(): void {
-  const p = path.join(app.getPath("userData"), "pet-client.config.json");
+  const p = homePath("clientConfig");
   try {
     if (!fs.existsSync(p)) return;
     fs.watch(p, () => {
@@ -247,8 +284,21 @@ function startClientConfigWatch(): void {
 }
 
 // ───────────────── 前端托管工具（MCP / skill）配置 ─────────────────
-const MCP_CONFIG_PATH = path.join(app.getPath("userData"), "mcp-servers.json");
-const SKILLS_CONFIG_PATH = path.join(app.getPath("userData"), "skills.json");
+// 用函数而不是常量：常量会在模块体求值时就绑定路径，一旦 homePath() 的根
+// 因 setHomeRoot() 变动就永远读旧文件。调用时求值没有这个隐患。
+//
+// MCP 配置写标准 mcp.json（`{ "mcpServers": {...} }`，与 Claude Code /
+// codebuddy / WorkBuddy 同格式）。内部仍用带 id/transport 的数组，
+// 边界转换统一走 standardMcp，别处不要再手写 JSON 结构。
+function mcpConfigPath(): string {
+  return homePath("mcp");
+}
+function legacyMcpConfigPath(): string {
+  return homePath("mcpLegacy");
+}
+function skillsConfigPath(): string {
+  return homePath("skillsJson");
+}
 
 function loadJsonFile<T>(p: string, fallback: T): T {
   try {
@@ -282,11 +332,66 @@ const DEFAULT_SKILLS: frontendTools.SkillConfig[] = [
   },
 ];
 
-// 初始化前端托管工具：从 userData 读取用户配置的 MCP server 与 skill，
+/**
+ * 旧版 MCP 配置迁移：把 mcp/servers.json（裸数组，旧内部格式）转到标准 mcp.json。
+ *
+ * 只补标准文件里没有的 id，不覆盖用户已在标准文件里改过的条目。
+ * 转完把旧文件改成 .migrated-<时间戳>.bak，避免下次重复导入。
+ */
+function migrateLegacyMcp(): { ran: boolean; reason: string; imported: number } {
+  const legacy = legacyMcpConfigPath();
+  if (!fs.existsSync(legacy)) return { ran: false, reason: "no-legacy", imported: 0 };
+  let old: unknown;
+  try {
+    old = JSON.parse(fs.readFileSync(legacy, "utf-8"));
+  } catch (e) {
+    console.error(`[mcp] 旧配置不是合法 JSON，跳过迁移：${legacy}`, e);
+    return { ran: false, reason: "legacy-broken", imported: 0 };
+  }
+  // 旧格式可能是裸数组，也可能包了一层 { servers: [...] }
+  const oldList: frontendTools.McpServerConfig[] = Array.isArray(old)
+    ? (old as frontendTools.McpServerConfig[])
+    : Array.isArray((old as { servers?: unknown })?.servers)
+      ? ((old as { servers: frontendTools.McpServerConfig[] }).servers)
+      : [];
+  if (!oldList.length) return { ran: false, reason: "legacy-empty", imported: 0 };
+
+  const current = standardMcp.readStandardFile(mcpConfigPath());
+  const have = new Set(current.servers.map((s) => s.id));
+  const merged = [...current.servers, ...oldList.filter((s) => s && s.id && !have.has(s.id))];
+  const imported = merged.length - current.servers.length;
+  if (imported > 0) standardMcp.writeStandardFile(mcpConfigPath(), merged);
+
+  const bak = `${legacy}.migrated-${Date.now()}.bak`;
+  try {
+    fs.renameSync(legacy, bak);
+  } catch (e) {
+    console.error(`[mcp] 旧配置留档失败（不影响已导入的数据）：${legacy}`, e);
+  }
+  return { ran: true, reason: "migrated", imported };
+}
+
+// 初始化前端托管工具：从 ~/.kirari 读取用户配置的 MCP server 与 skill，
 // 失败/缺失时回退到内置示例 skill，保证开箱即用地把工具注册给后端。
 export function initFrontendTools(): void {
-  const mcpServers = loadJsonFile<frontendTools.McpServerConfig[]>(MCP_CONFIG_PATH, []);
-  const skills = loadJsonFile<frontendTools.SkillConfig[]>(SKILLS_CONFIG_PATH, DEFAULT_SKILLS);
+  const mig = migrateLegacyMcp();
+  if (mig.ran) {
+    console.log(`[mcp] 旧配置已迁移到标准 mcp.json：导入 ${mig.imported} 个 server`);
+  }
+
+  let mcpServers: frontendTools.McpServerConfig[] = [];
+  try {
+    const read = standardMcp.readStandardFile(mcpConfigPath());
+    mcpServers = read.servers;
+    if (read.dropped.length) {
+      console.warn(`[mcp] mcp.json 里有 ${read.dropped.length} 个条目缺 command/url 被跳过：${read.dropped.join(", ")}`);
+    }
+  } catch (e) {
+    // 坏文件必须显式报出来：静默当空会让用户下次保存时把配置整体覆盖掉
+    console.error(`[mcp] 读取 mcp.json 失败，本次不加载 MCP server：`, e);
+  }
+
+  const skills = loadJsonFile<frontendTools.SkillConfig[]>(skillsConfigPath(), DEFAULT_SKILLS);
   frontendTools.setMcpServers(mcpServers);
   frontendTools.setSkills(skills);
   // 启动时载入用户自定义基础人格（如有），确保 WS 连接建立后即可推送，无需先打开设置页。
@@ -313,7 +418,8 @@ ipcMain.handle("mcp:list", (): frontendTools.McpServerConfig[] => {
 });
 
 ipcMain.handle("mcp:save", (_e, list: frontendTools.McpServerConfig[]): { ok: boolean } => {
-  saveJsonFile(MCP_CONFIG_PATH, list);
+  // 写标准格式，保留文件里已有的其他顶层键；内部仍用 list 的数组结构
+  standardMcp.writeStandardFile(mcpConfigPath(), list);
   frontendTools.setMcpServers(list);
   reRegisterFrontendTools();
   return { ok: true };
@@ -324,7 +430,7 @@ ipcMain.handle("skill:list", (): frontendTools.SkillConfig[] => {
 });
 
 ipcMain.handle("skill:save", (_e, list: frontendTools.SkillConfig[]): { ok: boolean } => {
-  saveJsonFile(SKILLS_CONFIG_PATH, list);
+  saveJsonFile(skillsConfigPath(), list);
   frontendTools.setSkills(list);
   reRegisterFrontendTools();
   return { ok: true };
@@ -414,7 +520,7 @@ function initAdapterManager() {
 // macOS=Library/Application Support/<app>/avatars，Linux=~/.config/<app>/avatars）。
 // 通过 avatar:// 协议对外服务，也作为"用户把文件夹丢进来即生效"的指定目录。
 function getAvatarsRoot(): string {
-  return path.join(app.getPath("userData"), "avatars");
+  return homePath("avatars");
 }
 
 // （DEFAULT_SKIN_DIR 已上移到文件顶部、DEFAULT_AVATAR 之前 —— 见那里的说明。）
@@ -586,7 +692,7 @@ function readAvatarImageAsDataUrl(url: string): string | undefined {
   if (!url.startsWith("avatar://")) return url;
   try {
     const rel = decodeURIComponent(url.replace("avatar://", ""));
-    const filePath = path.join(app.getPath("userData"), "avatars", rel);
+    const filePath = path.join(homePath("avatars"), rel);
     if (!fs.existsSync(filePath)) {
       console.warn("[avatar] 聊天头像图片不存在:", filePath);
       return undefined;
@@ -841,7 +947,7 @@ ipcMain.handle("user-avatar:pick", async () => {
     : await dialog.showOpenDialog(pickerOptions);
   if (result.canceled || !result.filePaths[0]) return null;
   const src = result.filePaths[0];
-  const dir = path.join(app.getPath("userData"), "user-avatar");
+  const dir = homePath("userAvatar");
   try {
     fs.mkdirSync(dir, { recursive: true });
     // 先清空旧文件，避免不同扩展名的残留图被误引用。
@@ -868,7 +974,7 @@ ipcMain.handle("user-avatar:pick", async () => {
 
 // 移除头像：删除本地文件 + 清空配置 + 广播。返回 null。
 ipcMain.handle("user-avatar:clear", () => {
-  const dir = path.join(app.getPath("userData"), "user-avatar");
+  const dir = homePath("userAvatar");
   try {
     if (fs.existsSync(dir)) {
       for (const f of fs.readdirSync(dir)) {
@@ -1152,7 +1258,7 @@ async function readImageSource(source: string): Promise<Buffer> {
   // （与 protocol.registerFileProtocol 同一套路径解析逻辑）
   if (source.startsWith("avatar://")) {
     const rel = decodeURIComponent(source.replace("avatar://", ""));
-    const filePath = path.join(app.getPath("userData"), "avatars", rel);
+    const filePath = path.join(homePath("avatars"), rel);
     return fs.readFileSync(filePath);
   }
   if (source.startsWith("pet://")) {
@@ -1493,7 +1599,7 @@ ipcMain.handle("avatar:import-folder", async () => {
   }
   if (!manifest || typeof manifest !== "object") return { ok: false, message: "frames.json 内容无效" };
   const name = path.basename(srcDir);
-  const destDir = path.join(app.getPath("userData"), "avatars", name);
+  const destDir = path.join(homePath("avatars"), name);
   try {
     fs.cpSync(srcDir, destDir, { recursive: true });
   } catch (e) {
@@ -1701,15 +1807,17 @@ function ensureChatSessionService() {
       // 组网上行出口。⚠️ 之前这里从未接线 —— relaySender 一直 undefined，
       // 桌面端当叶子时聊天悄悄走了本地模型（花自己的额度，主机毫不知情）。
       relaySender: (content, images, kbContext) => {
-        if (!netManager) return false;
-        // 叶子把本机私人知识库检索结果一并上行：主机没有我们的本地知识库，
-        // 不带的话主机回答时就没有这份参考（知识库等于白配）。
-        return netManager.relay(
-          content,
-          chatSessionService?.getSessionId() ?? "",
-          images,
-          kbContext.length > 0 ? kbContext : undefined,
-        );
+        if (!netManager || !netManager.canStartNetworking()) return null;
+        // 全节点一致视图：不管本机当前是叶子还是主机，都把用户输入交给组网路由。
+        // 叶子 → 上行给主机；主机 → 本地提交给自己的路由。
+        // 返回 requestId：用户消息本身由 relay_prompt 广播统一落地，
+        // 这样请求方和其他所有节点看到的是同一条。
+        const sessionId = chatSessionService?.getSessionId() ?? "";
+        const kb = kbContext.length > 0 ? kbContext : undefined;
+        if (netManager.role === "host") {
+          return netManager.submitLocalPrompt(content, sessionId, images, kb);
+        }
+        return netManager.relay(content, sessionId, images, kb);
       },
     });
     // 暴露给 MCP / skill 保存后「重新注册工具」时调用。
@@ -2166,8 +2274,24 @@ app.whenReady().then(async () => {
   console.log(`大脑: 本机自带（进程内引擎）`);
   console.log("========================================");
 
-  // 初始化私人知识库（本地文件）
-  localKnowledge = new LocalKnowledge(app.getPath("userData"));
+  // ── 数据根就位（~/.kirari），并把旧 userData 里的数据一次性复制过来 ──
+  // 只复制不移动：用户原目录一个字节都不动，出问题还能回退。
+  // HOME_PATHS 是本次运行的数据布局真源（与核心版 kirariHome 的 LAYOUT 同构）。
+  const HOME_PATHS = homePaths();
+  console.log(`[home] 数据根 = ${KIRARI_HOME_PATHS.home}`);
+  console.log(`[home] 缓存目录 = ${KIRARI_HOME_PATHS.sessionData}`);
+  const migrated = migrateLegacyHome({ root: KIRARI_HOME_PATHS.home });
+  if (migrated.ran) {
+    console.log(
+      `[home] 已从旧位置复制数据：${migrated.from ?? "（无旧数据）"}；` +
+        `复制 ${migrated.copied.length} 项、跳过已存在 ${migrated.skipped.length} 项` +
+        (migrated.failed.length ? `、失败 ${migrated.failed.length} 项（原件未动）` : ""),
+    );
+  }
+
+  // 初始化私人知识库（本地文件：数据根的 knowledge/knowledge.json）
+  // LocalKnowledge 接收「所在目录」并自行拼 knowledge.json，所以传 knowledge/ 的父级目录。
+  localKnowledge = new LocalKnowledge(path.dirname(HOME_PATHS.knowledge));
   console.log(`[kb] 私人知识库已加载 ${localKnowledge.getAll().length} 条`);
 
   // 初始化进程内 AI 引擎（本地数据库落在本机 userData）。
@@ -2179,8 +2303,8 @@ app.whenReady().then(async () => {
   //    旧库 kirari.db 的迁移在下面 ChatSessionService.init() 之后做 ——
   //    必须先迁 chat-session.json（那份带着图片和情绪，数据最全），
   //    再迁 kirari.db（只有被裁剪过的纯文本），顺序反了会丢东西。
-  const userDataDir = app.getPath("userData");
-  initEngine({ dbPath: path.join(userDataDir, "pet_sessions.db") });
+  const userDataDir = KIRARI_HOME_PATHS.home;
+  initEngine({ dbPath: HOME_PATHS.database });
 
   // 组网（活锁模型）：本机既可以作为主机（为其他设备提供出口），
   // 也可以作为叶子（把请求上行给主机）。角色由用户在设置里选，随时可换。
@@ -2188,15 +2312,19 @@ app.whenReady().then(async () => {
   // 密钥不用在这里配 —— 两端都不预置密钥：
   //   本机当主机时自己签一把，当叶子时凭一张邀请码在配对那一刻领（enroll）。
   //   来源与安全性见 kirari-net 的 secure.ts / enroll.ts。
-  netManager = new NetManager(app.getPath("userData"), {
+  netManager = new NetManager(path.dirname(HOME_PATHS.netState), {
     onSnapshot: (snap) => {
       for (const win of [petWindow, chatWindow, settingsWindow]) {
         if (win && !win.isDestroyed()) win.webContents.send("net:state", snap);
       }
     },
+    onRelayPrompt: (frame) => {
+      // 全网广播的用户输入：所有节点（含主机自己）都显示同一条。
+      const svc = chatSessionService;
+      if (svc) svc.applyRelayPrompt(frame);
+    },
     onRelayResult: (frame) => {
       // 全网广播：任何设备提问的回复，所有端都会收到。
-      // 请求方自己的发言本地已显示，这里只管把回复呈现出来。
       const svc = chatSessionService;
       if (svc) svc.applyRelayResult(frame);
     },
@@ -2305,7 +2433,7 @@ app.whenReady().then(async () => {
   protocol.registerFileProtocol("avatar", (request, callback) => {
     try {
       const rel = decodeURIComponent(request.url.replace("avatar://", ""));
-      callback({ filePath: path.join(app.getPath("userData"), "avatars", rel) } as unknown as ProtocolResponse);
+      callback({ filePath: path.join(homePath("avatars"), rel) } as unknown as ProtocolResponse);
     } catch {
       callback({ error: -100 });
     }
@@ -2317,7 +2445,7 @@ app.whenReady().then(async () => {
     try {
       const rel = decodeURIComponent(request.url.replace("useravatar://", ""));
       const safe = rel.replace(/^(\.\.[/\\])+/, ""); // 防目录穿越
-      callback({ filePath: path.join(app.getPath("userData"), "user-avatar", safe) } as unknown as ProtocolResponse);
+      callback({ filePath: path.join(homePath("userAvatar"), safe) } as unknown as ProtocolResponse);
     } catch {
       callback({ error: -100 });
     }
@@ -2347,6 +2475,15 @@ app.whenReady().then(async () => {
 
   // 加载前端托管的 MCP server 与 skill 配置，供内核在生成时调用。
   initFrontendTools();
+
+  // 一次性迁移：旧 config.json 里的 models[] → 独立 models.json（WorkBuddy 同构）。
+  // 必须在任何读取模型清单的逻辑之前跑，否则会读到空清单。
+  try {
+    const moved = migrateModelsOutOfConfig();
+    if (moved > 0) console.log(`[model-config] 已把 ${moved} 套模型从 config.json 迁到 models.json`);
+  } catch (e) {
+    console.error("[model-config] 迁移 models 到 models.json 失败（config.json 未改动）:", e);
+  }
 
   // 桌宠自带大脑：不再以子进程拉起后端，也不需要动态端口与远程凭证检测。
 

@@ -3,8 +3,16 @@ import { ref } from 'vue'
 import type { AvatarState } from '../pet/avatar/types'
 
 // 可由对话情绪标签驱动播放的动画状态（先播该动作、再衔接 speak）。
-// 即 AvatarState 去掉基础态与说话态：idle / blink / sleepy / speak。
-export type PetEmotion = Exclude<AvatarState, 'idle' | 'blink' | 'sleepy' | 'speak'>
+// 即 AvatarState 去掉三类"不可由对话标签驱动"的状态：
+//   - 基础态：idle / blink / sleepy / speak（渲染层自己调度）
+//   - 睡眠链过渡态：sleep_start / sleep_end（由 PetStage 的睡眠逻辑控制，乱入会切断链条）
+//   - 拖拽态：drag / drag_start（由指针事件独占，模型绝不能把桌宠"点"起来；
+//     drag_start 是拖拽流程的入场过渡，同样不能由模型下发）
+// angry / attention / stretch 均为模型可下发的情绪/动作。
+export type PetEmotion = Exclude<
+  AvatarState,
+  'idle' | 'blink' | 'sleepy' | 'speak' | 'sleep_start' | 'sleep_end' | 'drag' | 'drag_start'
+>
 
 export type ChatMessage = {
   id: string
@@ -16,6 +24,9 @@ export type ChatMessage = {
   emotion?: PetEmotion | null
   // 关联的图片 URL 或 base64 data URL（用户发送的图片、或 AI 返回的图片）。
   images?: string[]
+  // 组网 requestId：发起方与广播回来的同一条用户输入用这个字段合并，避免重复显示。
+  relayRequestId?: string
+  fromName?: string
 }
 
 export type ChatStateSnapshot = {

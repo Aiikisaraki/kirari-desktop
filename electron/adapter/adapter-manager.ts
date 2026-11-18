@@ -1,5 +1,6 @@
 import { BotAdapter } from "./bot-adapter";
 import { OneBotAdapter } from "./onebot-adapter";
+import { QQOfficialAdapter } from "./qqofficial-adapter";
 import { BotBackendClient } from "./bot-backend-client";
 import type { AdapterConfig, AdapterStatus, BotIncoming, PetBackendResponse } from "./types";
 import type { LocalKnowledge } from "../../src/knowledge/localKnowledge";
@@ -7,11 +8,13 @@ import * as db from "../ai/db/storage";
 
 // 主人在其他协议端（如 QQ）发起的对话，需要同步进桌宠聊天框。
 // 由 main.ts 注入一个回调，内部转发到 ChatSessionService.injectExternalMessage。
+// emotion 为上游透传的原始字符串，真正的白名单校验在 ChatSessionService.acceptEmotion 里做，
+// 这里不重复收窄（否则新增情绪标签要改两处，且容易漏）。
 export type OwnerSyncMessage = {
   author: "user" | "pet";
   text: string;
   images?: string[];
-  emotion?: "happy" | "wave" | null;
+  emotion?: string | null;
 };
 
 export interface AdapterManagerOpts {
@@ -60,7 +63,7 @@ export class AdapterManager {
 
   private createInstance(cfg: AdapterConfig): BotAdapter | null {
     if (cfg.type === "onebot") return new OneBotAdapter(cfg);
-    // QQ 官方机器人第二阶段实现
+    if (cfg.type === "qqofficial") return new QQOfficialAdapter(cfg);
     console.warn(`[adapter] 暂不支持的适配器类型: ${cfg.type}`);
     return null;
   }
@@ -245,7 +248,7 @@ export class AdapterManager {
           author: "pet",
           text: resp.speech,
           images: resp.images || [],
-          emotion: resp.emotion === "happy" || resp.emotion === "wave" ? resp.emotion : null,
+          emotion: typeof resp.emotion === "string" ? resp.emotion : null,
         });
       }
     };

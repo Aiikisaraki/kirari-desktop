@@ -26,10 +26,20 @@ export interface McpServerConfig {
   transport: McpTransport;
   // http（streamable，2024-11-05 spec）型：端点 URL
   url?: string;
+  // http 型：自定义请求头（多数远程 MCP 靠它传 API key / Bearer token）
+  headers?: Record<string, string>;
   // stdio 型：命令与参数
   command?: string;
   args?: string[];
+  // stdio 型：额外环境变量（与父进程合并，不替换）与工作目录
+  env?: Record<string, string>;
+  cwd?: string;
   enabled: boolean;
+  /**
+   * 索引签名：标准 mcp.json 里各家还会带私有字段（timeout / retry / $schema 等）。
+   * Kirari 不解释它们，但读写文件时必须原样带回去 —— 否则一次保存就把用户的配置吃掉了。
+   */
+  [key: string]: unknown;
 }
 
 export interface SkillToolDef {

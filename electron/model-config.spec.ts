@@ -35,16 +35,26 @@ import {
     readModelConfigFile,
     updateModelProfile,
 } from "./model-config";
+import { readModels } from "./models/modelsFile";
 
 const CONFIG_FILE = path.join(tmpDir, "config.json");
+// 模型清单 v0.8.3 起独立成 models.json（WorkBuddy 同构），不再写在 config.json 里
+const MODELS_FILE = path.join(tmpDir, "models.json");
 
 /** 直接覆写 config.json（模拟外部编辑器 / 旧版本写入的内容） */
 function seedConfig(obj: Record<string, unknown>) {
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(obj, null, 2), "utf-8");
 }
 
+/** 覆写 models.json（模拟外部编辑器 / 从 WorkBuddy 拷来的清单） */
+function seedModels(obj: unknown) {
+    fs.writeFileSync(MODELS_FILE, JSON.stringify(obj, null, 2), "utf-8");
+}
+
+/** 清掉两个文件，保证用例之间不串味。 */
 beforeEach(() => {
     seedConfig({});
+    if (fs.existsSync(MODELS_FILE)) fs.unlinkSync(MODELS_FILE);
 });
 
 describe("model-config 多模型", () => {
@@ -63,7 +73,9 @@ describe("model-config 多模型", () => {
         const cfg = readModelConfigFile();
         expect(cfg.endpoint).toBe("https://api.example.com/v1");
         expect(cfg.key).toBe("sk-legacy-key-123");
-        expect(cfg.models?.length).toBe(1);
+        // 清单落在 models.json，config.json 里不再有 models 键
+        expect(readModels().length).toBe(1);
+        expect(cfg.models).toBeUndefined();
     });
 
     it("第一套自动成为当前使用：覆盖顶层字段 + 记 activeModelId", () => {
@@ -88,7 +100,7 @@ describe("model-config 多模型", () => {
         // 顶层还是 A
         expect(cfg.endpoint).toBe("https://a/v1");
         expect(cfg.activeModelId).toBe(1);
-        expect(cfg.models?.length).toBe(2);
+        expect(readModels().length).toBe(2);
     });
 
     it("「设为当前」覆盖顶层字段并记 activeModelId", () => {
@@ -107,17 +119,17 @@ describe("model-config 多模型", () => {
         addModelProfile({ name: "A", endpoint: "https://a/v1", model: "m-a", key: "sk-original" });
         // 只改名字，钥匙不动
         expect(updateModelProfile(1, { name: "改名了" })).not.toBeNull();
-        let cfg = readModelConfigFile();
-        expect(cfg.models![0].name).toBe("改名了");
-        expect(cfg.models![0].key).toBe("sk-original");
+        let models = readModels();
+        expect(models[0].name).toBe("改名了");
+        expect(models[0].key).toBe("sk-original");
         // 显式空串也不算改
         updateModelProfile(1, { key: "" });
-        cfg = readModelConfigFile();
-        expect(cfg.models![0].key).toBe("sk-original");
+        models = readModels();
+        expect(models[0].key).toBe("sk-original");
         // 传新钥匙才覆盖
         updateModelProfile(1, { key: "sk-new" });
-        cfg = readModelConfigFile();
-        expect(cfg.models![0].key).toBe("sk-new");
+        models = readModels();
+        expect(models[0].key).toBe("sk-new");
     });
 
     it("编辑「当前使用」那一套：顶层生效字段跟着同步（聊天立刻用新值）", () => {
@@ -135,7 +147,7 @@ describe("model-config 多模型", () => {
         updateModelProfile(1, { endpoint: "https://a2/v1" });
         const cfg2 = readModelConfigFile();
         expect(cfg2.endpoint).toBe("https://b2/v1");
-        expect(cfg2.models![0].endpoint).toBe("https://a2/v1");
+        expect(readModels().find((m) => m.id === 1)!.endpoint).toBe("https://a2/v1");
     });
 
     it("删除非当前套：activeId 和顶层字段都不动", () => {
@@ -145,7 +157,7 @@ describe("model-config 多模型", () => {
         const cfg = readModelConfigFile();
         expect(cfg.activeModelId).toBe(1);
         expect(cfg.endpoint).toBe("https://a/v1");
-        expect(cfg.models?.length).toBe(1);
+        expect(readModels().length).toBe(1);
     });
 
     it("删除当前套：activeId 置空但顶层字段保持（聊天还能用）", () => {
@@ -182,17 +194,18 @@ describe("model-config 多模型", () => {
         expect(JSON.stringify(items)).not.toContain("sk-very-secret-key-9876");
     });
 
-    it("外部编辑把 models 写坏 → 懒自愈当没有，不崩", () => {
+    it("外部编辑把 models.json 写坏 → 懒自愈当没有，不崩", () => {
         // 注意 seed 里不能带顶层 endpoint/model/key，否则会走懒迁移分支导出「默认」套
-        seedConfig({ models: "坏了", activeModelId: 1 });
+        seedConfig({ activeModelId: 1 });
+        seedModels({ models: "坏了" }); // 顶层不是数组，内部 models 也不是数组
         const { items, activeId } = listModelProfiles();
         expect(items.length).toBe(0);
         // activeId 指向的列表都没了，读出来如实是 1（不额外发明状态）
         expect(activeId).toBe(1);
-        // 照常能加新套：坏掉的 models 会被安全列表替换，且这套自动成为当前使用
+        // 照常能加新套：坏掉的清单会被安全替换，且这套自动成为当前使用
         expect(() => addModelProfile({ name: "A", endpoint: "https://a/v1", model: "m-a", key: "k-a" })).not.toThrow();
         const cfg = readModelConfigFile();
-        expect(Array.isArray(cfg.models)).toBe(true);
+        expect(readModels().length).toBe(1);
         expect(cfg.activeModelId).toBe(1);
         expect(cfg.endpoint).toBe("https://a/v1");
     });

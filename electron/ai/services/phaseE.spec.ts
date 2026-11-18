@@ -9,7 +9,7 @@ const tmpDir = vi.hoisted(() => `${process.cwd()}/.tmp-test/phase-e-${process.pi
 vi.mock("electron", () => ({ app: { getPath: () => tmpDir } }));
 
 // 子 agent 的模型调用在 spec 里换成可控序列：第一轮要工具，第二轮给结论。
-const modelCalls: { tools: string[]; rounds: number }[] = [];
+const modelCalls: { tools: string[] }[] = [];
 let modelRound = 0;
 vi.mock("../reply/streaming", () => ({
     streamChatCompletion: async (_openai: any, params: any) => {

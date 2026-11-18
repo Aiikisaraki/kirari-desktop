@@ -14,6 +14,7 @@ import fs from "fs";
 import path from "path";
 import Database from "better-sqlite3";
 import * as storage from "../db/storage";
+import { homePath } from "../../kirari-home";
 
 /**
  * 目标库需要的建表语句。
@@ -70,8 +71,10 @@ export type LegacyDbMigrationResult = {
  * 顺序反了会被纯文本版本先占位、把完整的挡掉。
  */
 export function migrateLegacyChatDb(userDataDir: string): LegacyDbMigrationResult | null {
+    // 旧库在数据根**根目录**（它是待迁移遗留物，见 kirari-home 的说明）；
+    // 目标库在 database/ 子目录 —— 两者不再同目录，绝不能再用 userDataDir 拼。
     const legacy = path.join(userDataDir, "kirari.db");
-    const target = path.join(userDataDir, "pet_sessions.db");
+    const target = homePath("database", userDataDir);
     const kvKey = KV_PREFIX + path.basename(legacy);
 
     try {

@@ -14,7 +14,7 @@ const {
 
 // 新增表单
 const showForm = ref(false);
-const formType = ref<"onebot" | "qqofficial">("onebot");
+const formType = ref<"onebot" | "qqofficial">("qqofficial");
 const formName = ref("");
 const formWsUrl = ref("");
 const formToken = ref("");
@@ -49,11 +49,11 @@ async function handleAdd() {
     };
     await add(cfg);
   } else {
-    // QQ 官方机器人：第二阶段实现，先登记配置占位
+    // QQ 官方机器人（官方 WS 反向连接）：默认启用，连上即可收消息
     const cfg: AdapterConfigInput = {
       type: "qqofficial",
       name,
-      enabled: false,
+      enabled: true,
       config: {
         appId: formAppId.value.trim(),
         clientSecret: formSecret.value.trim(),
@@ -109,8 +109,8 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
       <span>机器人适配器</span>
     </h3>
     <p class="settings-card__desc">
-      接入 OneBot（NapCat / LLOneBot）或 QQ 官方机器人，让桌宠通过 QQ 收发消息。可同时挂多个适配器。
-      把某个 QQ 号设为「主人」后，该账号与桌面宠共享同一份聊天记录与记忆。
+      默认使用 QQ 官方机器人（官方 WebSocket 反向连接，合规稳定）。OneBot 作为通用协议端保留，用于非 QQ 的自有机器人框架。可同时挂多个适配器。
+      把某个账号设为主人后，该账号与桌宠共享同一份聊天记录与记忆。
     </p>
 
     <!-- 已配置适配器列表 -->
@@ -228,18 +228,18 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
         <div class="provider-row">
           <label class="provider-option">
             <input type="radio" value="onebot" v-model="formType" />
-            <span>OneBot（NapCat / LLOneBot）</span>
+            <span>OneBot（通用协议端，非 QQ 默认）</span>
           </label>
           <label class="provider-option">
             <input type="radio" value="qqofficial" v-model="formType" />
-            <span>QQ 官方机器人（即将支持）</span>
+            <span>QQ 官方机器人（默认推荐）</span>
           </label>
         </div>
       </div>
 
       <div class="field">
         <label class="field-label" for="ad-name">名称</label>
-        <input id="ad-name" v-model="formName" class="text-input" type="text" placeholder="如：NapCat 主号" />
+        <input id="ad-name" v-model="formName" class="text-input" type="text" placeholder="如：我的 QQ 机器人" />
       </div>
 
       <template v-if="isOneBot">
@@ -261,7 +261,7 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
           <label class="field-label" for="ad-secret">Client Secret</label>
           <input id="ad-secret" v-model="formSecret" class="text-input" type="password" placeholder="QQ 开放平台密钥" />
         </div>
-        <p class="settings-hint">QQ 官方机器人功能即将上线，此处可先登记配置。</p>
+        <p class="settings-hint">在 QQ 开放平台创建机器人后填入 AppID 与 Client Secret。无需公网回调、无需第三方 QQ 客户端在线。</p>
       </template>
 
       <div v-if="formError" class="settings-error">{{ formError }}</div>

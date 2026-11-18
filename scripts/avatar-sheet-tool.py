@@ -258,6 +258,8 @@ class Ctx:
         self.static_min = int(t.get("staticMinFrames", 3))
         # 坐/躺/悬空姿势的身高天然比站姿矮，别拿站姿的 390px 去卡它们
         self.height_exempt = set(t.get("heightExempt", []))
+        # 同理：被拎起来 / 悬空 / 坐着的姿势脚底不在同一水平面，底部对齐也无意义
+        self.bottom_exempt = set(t.get("bottomExempt", []))
         self.anchor_state = spec["anchor"]["state"]
         self.anchor_frame = int(spec["anchor"].get("frame", 0))
         self._anchor = None
@@ -352,7 +354,7 @@ def cmd_analyze(ctx: Ctx):
     print("-" * len(hdr))
     print(f"合计 {total_frames} 帧")
     disk = sum(f.stat().st_size for f in ctx.skin.glob("*.png")) / 1024 / 1024
-    print(f"磁盘 {disk:.1f} MB（含 preview_* 与 .bak）")
+    print(f"磁盘 {disk:.1f} MB（仅 PNG；preview_* 与 .bak 已于 2026-11 清理）")
     one_shot = [s for s in ctx.states() if not ctx.clips(s)[0]["loop"]]
     if one_shot:
         worst = max(one_shot, key=lambda s: ctx.clips(s)[0]["frames"] / max(1.0, ctx.clips(s)[0]["fps"]))
@@ -803,7 +805,7 @@ def cmd_verify(ctx: Ctx, only: str | None = None) -> int:
                     f"{state}/{clip['sheet']}: 角色高 {h_med:.0f}px 与锚图 {an['h']}px 差 "
                     f"{abs(h_med - an['h']) / an['h']:.0%} > {ctx.height_tol:.0%}"
                 )
-            if abs(b_med - an["bottom"]) > ctx.bottom_tol:
+            if abs(b_med - an["bottom"]) > ctx.bottom_tol and state not in ctx.bottom_exempt:
                 soft.append(
                     f"{state}/{clip['sheet']}: 脚底 y={b_med:.0f} 偏离锚图 {an['bottom']}px 超过 {ctx.bottom_tol}px"
                 )
@@ -1066,7 +1068,8 @@ def cmd_clean(src_dir: Path, dst_dir: Path, keep_shadow: bool, write: bool) -> i
 def cmd_pack(ctx: Ctx, src_dir: Path, state: str, fps: float, auto_trim: bool,
              loop: bool, sheet_name: str | None, write: bool,
              loop_crossfade: int = 0, align: str = "clip", scale_by: str = "height",
-             explicit_scale: float = 0.0, tail_anchor: int = 0) -> int:
+             explicit_scale: float = 0.0, tail_anchor: int = 0,
+             lift: int = 0) -> int:
     src = src_dir if src_dir.is_absolute() else (REPO_ROOT / src_dir)
     if not src.is_dir():
         die(f"找不到抠像后的帧目录：{src}")
@@ -1079,6 +1082,8 @@ def cmd_pack(ctx: Ctx, src_dir: Path, state: str, fps: float, auto_trim: bool,
 
     print(f"入库 {state}：{len(files)} 帧 → {sheet_name}（{fw}×{fh} / {fps}fps）")
     print(f"锚图基准：高 {an['h']}px  脚底 y={an['bottom']}  中心 x={an['cx']:.0f}")
+    if lift:
+        print(f"  整体上移 {lift}px（悬空姿态，底边不落地）")
 
     placed, scaled_w, width_capped = [], [], []
     # 参考帧：整段只认它一个。一次性动作的第 0 帧就是"锚图姿势"，
@@ -1129,7 +1134,9 @@ def cmd_pack(ctx: Ctx, src_dir: Path, state: str, fps: float, auto_trim: bool,
     ys0, xs0 = np.where(m0)
     ref_cx, ref_bottom = (xs0.min() + xs0.max() + 1) / 2.0, ys0.max() + 1
     px = round(an["cx"] - ref_cx * scale)
-    py = round(an["bottom"] - ref_bottom * scale)
+    # --lift：整体上移。悬空素材（drag）必须用，否则底边会被按回锚图的脚底线，
+    # "被拎起来"就变成"踮脚站着"。抬高量直接减在 y 上，不影响缩放。
+    py = round(an["bottom"] - ref_bottom * scale) - lift
 
     for p in files:
         im = Image.open(p).convert("RGBA")
@@ -1143,7 +1150,7 @@ def cmd_pack(ctx: Ctx, src_dir: Path, state: str, fps: float, auto_trim: bool,
             crop = im.crop((int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1))
             r = crop.resize((nw, nh), Image.LANCZOS)
             canvas = Image.new("RGBA", (fw, fh), (0, 0, 0, 0))
-            canvas.paste(r, (round(an["cx"] - nw / 2), round(an["bottom"] - nh)), r)
+            canvas.paste(r, (round(an["cx"] - nw / 2), round(an["bottom"] - nh) - lift), r)
             placed.append(canvas)
             scaled_w.append(nw)
             continue
@@ -1308,6 +1315,8 @@ def main(argv=None):
                     help="pack：循环态收尾，追加 N 帧 末帧→首帧 渐变（循环态建议 2）")
     ap.add_argument("--sheet", help="pack：输出精灵表文件名（默认 <state>.png）")
     ap.add_argument("--scale", type=float, default=0.0, help="pack：直接指定缩放系数（覆盖 --scale-by）")
+    ap.add_argument("--lift", type=int, default=0,
+                    help="pack：整体上移 N 像素（悬空/被拎起的素材必须用，默认 0=底边贴锚图脚底线）")
     ap.add_argument("--scale-by", choices=["height", "head", "face"], default="height",
                     help="pack：归一化基准。height=按角色包围盒高度（站姿动作）；"
                          "head=按头宽（会被散开的头发带偏）；"
@@ -1360,7 +1369,7 @@ def main(argv=None):
         return cmd_pack(ctx, Path(args.src_dir), args.state, args.fps,
                         args.auto_trim, args.loop, args.sheet, args.write,
                         max(0, args.loop_crossfade), args.align, args.scale_by, args.scale,
-                        max(0, args.tail_anchor))
+                        max(0, args.tail_anchor), args.lift)
     return 0
 
 

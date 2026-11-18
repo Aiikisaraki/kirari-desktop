@@ -40,7 +40,8 @@ export const LOCAL_SCOPE = "local";
 export const LOCAL_UID = 1;
 
 function fallbackPath(): string {
-    return path.join(os.homedir(), ".akisaki-kirari", "kirari.db");
+    // 主进程未显式注入时的兜底：与主进程同一份数据根布局（~/.kirari/database/pet_sessions.db）。
+    return path.join(os.homedir(), ".kirari", "database", "pet_sessions.db");
 }
 
 /**

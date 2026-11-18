@@ -38,10 +38,17 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 const AVATAR_ROOT = path.join(REPO_ROOT, 'resources', 'official-avatars');
 
 const DEFAULT_SKIN = 'kirari';
-// 需要补过渡帧的状态：9 个新动作（差异 > 2.6%）。
-// blink/happy/sleepy/speak/wave 与 idle 同批生成、首尾帧本就锚定（差异 0%~2.9%），不处理。
+// 需要补过渡帧的状态：旧一批一次性动作（差异 > 2.6%）。
+// 注意不要把新画风的 stretch/angry/attention/drag_start 写进来 —— 它们已是新素材，
+// 首尾帧与 idle 的差异都在 2% 左右（见 avatar-spec.json），无需也不应补过渡帧。
+// （旧的 Q 版前 stretch 曾被删除，现以全新画风重新加入，与新状态机一并接入。）
+//
+// ⚠️ 2026-11 Q 版重做后，这些 sheet 已换成新素材，而新素材的**首尾帧没有走本脚本锚定**
+// （`avatar-sheet-tool.py verify` 会对此报 SSIM 软警告，属已知情况）。
+// 因此现在直接跑本脚本**会真的改动这些新表**（每状态前插 N 帧 + 后插 M 帧，时长随之变长），
+// 不再像以前那样被幂等保护跳过。要试请先 `--dry-run`，并接受 frames.json 的 frames 计数变更。
 const DEFAULT_TARGETS = [
-    'bow', 'excited', 'nod', 'sad', 'shake', 'shy', 'stretch', 'surprised', 'thinking',
+    'bow', 'excited', 'nod', 'sad', 'shake', 'shy', 'surprised', 'thinking',
 ];
 const RESERVED_KEYS = new Set(['type', 'name', 'author', 'version', 'chatAvatar', 'personality']);
 

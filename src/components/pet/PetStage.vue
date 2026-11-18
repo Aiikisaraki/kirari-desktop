@@ -49,50 +49,107 @@ const electron = window.require?.('electron')
 const ipcRenderer = electron?.ipcRenderer as PetIpc | undefined
 
 /* ===================== 状态机调度器 ===================== */
-// 优先级：说话 > 情绪类(excited/happy/sad/surprised) > 交互类(wave/bow/nod/shake) > 思考 > 害羞 > 瞌睡 > 眨眼/伸懒腰 > 待机。
-// 低优先级状态不能打断高优先级（豆包互斥规则）；瞌睡的打断走专门的 markActivity/wakeUp。
+// 优先级分层（数值越大越"硬"，低优先级不能打断高优先级）：
+//   drag(200) / drag_start(200) 拖拽：最高且不可打断 —— 拎在手里时任何动作都必须让位
+//   speak(100) 说话
+//   60  情绪类：happy / excited / surprised / sad / angry
+//   50  交互类：wave / bow / nod / shake / head_tilt / attention / stretch
+//   40  思考
+//   30  害羞（抚摸）
+//   20  睡眠三段链：sleep_start → sleepy → sleep_end
+//   10  眨眼
+//    0  待机
+// 睡眠链虽然优先级低，但"被叫醒"要走 sleep_end 模板（见 wakeUp）；强事件
+//（说话、连接断开、报错、新消息）按设计允许硬切，不必等起床动作播完。
 const PRIORITY: Record<AvatarState, number> = {
   idle: 0,
   blink: 10,
-  stretch: 10,
+  // 睡眠三段链：同层，互相之间由睡眠链逻辑（而非优先级）决定走向
+  sleep_start: 20,
   sleepy: 20,
+  sleep_end: 20,
   shy: 30,
   thinking: 40,
   wave: 50,
   bow: 50,
   nod: 50,
   shake: 50,
+  head_tilt: 50,
+  attention: 50,
+  stretch: 50,
   happy: 60,
   excited: 60,
   surprised: 60,
   sad: 60,
+  angry: 60,
   speak: 100,
+  // drag_start 与 drag 同层：拖拽入场过渡不能被普通动作打断；
+  // 两者之间由拖拽流程自身的计时器决定走向（见 enterDragState）。
+  drag_start: 200,
+  drag: 200,
 }
 
-// durations 由 PetAvatar 加载 frames.json 后回填；此处给一次性动画一个兜底估计。
+// 一次性动作的真实时长来源是 frames.json（PetAvatar 加载后回填 durations）。
+// 下表只是"回填完成之前"那一小段窗口期的安全网：数值与当前内置皮肤一致，
+// 回填后一律以素材为准，因此不会与实际播放时长产生偏差。
 const FALLBACK_DUR: Partial<Record<AvatarState, number>> = {
-  blink: 11000,
-  wave: 5200,
-  happy: 5200,
-  shy: 4000,
-  surprised: 3000,
-  excited: 5000,
-  nod: 2000,
-  shake: 2000,
-  bow: 3500,
-  stretch: 4500,
+  blink: 200,
+  nod: 1208,
+  wave: 4167,
+  bow: 5042,
+  happy: 5042,
+  sad: 5042,
+  shake: 5042,
+  shy: 5042,
+  excited: 5042,
+  surprised: 5042,
+  thinking: 5042,
+  head_tilt: 5042,
+  angry: 5042,
+  attention: 5042,
+  stretch: 5042,
+  drag_start: 5042,
+  sleep_start: 5167,
+  sleep_end: 5042,
 }
 function durationOf(s: AvatarState): number {
   return avatarStore.durations[s] ?? FALLBACK_DUR[s] ?? 0
 }
 
-// 当前动画（一次性）播完回 idle 的统一计时器；loop 状态（speak/sleepy/idle）不自动回 idle。
+// 皮肤"能力检测"：过渡态（drag_start / sleep_start / sleep_end）是可选的 ——
+// 皮肤没有这些表时，调度器走"直连循环态"的降级路径，而不是切到一个缺素材的状态
+// （那样 SpriteRenderer 会每帧刷 missing 告警并回退 idle）。
+// durations 由 PetAvatar 在加载 frames.json 后回填，键集合 = manifest 状态集合
+// （loop 状态值为 0，但仍占一个键）。加载完成前的短暂空窗期按"内置皮肤有全部过渡态"
+// 处理，避免首帧拖拽误判为降级；这个窗口内用户几乎不可能完成一次拖拽。
+function hasState(s: AvatarState): boolean {
+  const d = avatarStore.durations
+  if (d && Object.keys(d).length > 0) return s in d
+  // 尚未回填：假定内置皮肤（含全部过渡态）
+  return true
+}
+
+// 当前动画（一次性）播完回 idle 的统一计时器；loop 状态（speak/sleepy/idle/drag）不自动回 idle。
 let actionTimer: ReturnType<typeof setTimeout> | null = null
 
+// 一次性动作播完后去哪：默认回 idle。睡眠链把两端接起来 ——
+// 入眠动作结束直接坐进 sleepy 循环，醒来动作结束回到 idle。
+// 只有这两个状态需要"不回家"的下一站，其余全部回 idle，所以这张表刻意保持最小。
+const CHAIN_NEXT: Partial<Record<AvatarState, AvatarState>> = {
+  sleep_start: 'sleepy',
+  sleep_end: 'idle',
+}
+
 // 请求切换状态，遵守优先级互斥。返回是否成功接管。
-function requestState(s: AvatarState): boolean {
+// force = 跳过优先级检查（仅用于"叫醒"这类必须能压过当前状态的反向切换）。
+function requestState(s: AvatarState, opts: { force?: boolean } = {}): boolean {
   const cur = avatarStore.currentState
-  if (PRIORITY[s] < PRIORITY[cur]) return false
+  if (!opts.force) {
+    if (PRIORITY[s] < PRIORITY[cur]) return false
+    // 拖拽中一切让位（PRIORITY 已保证，这里显式兜一层，避免将来调优先级时误放行）
+    // drag_start / drag 都算"正在拖拽"，彼此之间的切换由拖拽流程自己管，不走这里。
+    if ((cur === 'drag' || cur === 'drag_start') && s !== 'drag' && s !== 'drag_start') return false
+  }
   if (actionTimer) {
     clearTimeout(actionTimer)
     actionTimer = null
@@ -101,8 +158,11 @@ function requestState(s: AvatarState): boolean {
   const d = durationOf(s)
   if (d > 0) {
     actionTimer = setTimeout(() => {
-      if (avatarStore.currentState === s) avatarStore.setState('idle')
       actionTimer = null
+      // 期间被更高优先级抢走就不再改状态，避免踩掉别人
+      if (avatarStore.currentState === s) {
+        avatarStore.setState(CHAIN_NEXT[s] ?? 'idle')
+      }
     }, d)
   }
   return true
@@ -115,18 +175,34 @@ function requestState(s: AvatarState): boolean {
 let speakTimer: ReturnType<typeof setTimeout> | null = null
 let primed = false // 跳过首帧历史回灌，避免加载历史消息时误播动画
 
-function playSpeak() {
-  requestState('speak') // speak 优先级最高，可打断瞌睡/招手/高兴
+// 说话的收尾：2.5s 后回 idle，并小概率接一个高兴。
+// 抽出来是因为它有两条触发路径（正常说话 / 拖拽松手后恢复说话），
+// 后者绕开了 requestState，必须自己把这段计时器补上，否则会永远停在说话循环里。
+const SPEAK_TAIL_MS = 2500
+function armSpeakTail() {
   if (speakTimer) clearTimeout(speakTimer)
   speakTimer = setTimeout(() => {
     if (avatarStore.currentState === 'speak') avatarStore.setState('idle')
     maybeHappy(0.12) // 一轮对话结束小概率高兴
-  }, 2500)
+  }, SPEAK_TAIL_MS)
+}
+
+function playSpeak() {
+  // 只在真的接管成功后才挂收尾计时器：requestState 被挡掉时（比如正在 drag）
+  // 挂上去只会凭空排出一次 maybeHappy，等于给一次没发生的说话配了个尾巴。
+  if (requestState('speak')) armSpeakTail()
 }
 
 function playEmotionThenSpeak(emo: PetEmotion) {
-  requestState(emo)
+  // 情绪没抢到（当前状态优先级更高，例如已经在说话）就别排"等它播完"的空档，
+  // 否则会给一句本该立刻出现的回复硬加 5 秒等待。
+  if (!requestState(emo)) {
+    playSpeak()
+    return
+  }
   if (speakTimer) clearTimeout(speakTimer)
+  // requestState 已经按 emotion 时长挂了回 idle 计时器，这里改挂"播完接说话"，
+  // 必须先把上一个撤掉，否则两个计时器会同时开火。
   if (actionTimer) {
     clearTimeout(actionTimer)
     actionTimer = null
@@ -171,8 +247,9 @@ function tryGesture(
   if (!force) {
     const now = Date.now()
     if (now < (gestureCooldownUntil[s] ?? 0)) return false
-    // 轻动作不打断沉睡（保留趴桌观感）；情绪/事件类用 force 主动唤醒
-    if (skipIfSleepy && avatarStore.currentState === 'sleepy') return false
+    // 轻动作不打断沉睡（保留趴桌观感）；情绪/事件类用 force 主动唤醒。
+    // 睡眠链的三个状态都算"睡"，否则在入眠/起床动作中途插个小动作会把链条切断。
+    if (skipIfSleepy && isAsleep()) return false
   }
   const ok = requestState(s)
   if (ok && cooldown > 0) gestureCooldownUntil[s] = Date.now() + cooldown
@@ -196,9 +273,13 @@ function handleTap() {
   tapResetTimer = setTimeout(() => {
     tapCount = 0
   }, 2500)
-  if (tapCount >= 3) {
+  if (tapCount >= 5) {
+    // 连续狂点 5 次 = "别戳了" → 生气（必定尝试，仍受冷却限制）
     tapCount = 0
-    maybeHappy(1) // 必定尝试（仍受冷却限制）
+    tryGesture('angry', { cooldown: 15000 })
+  } else if (tapCount === 3) {
+    // 连点 3 次 = 高兴
+    maybeHappy(1)
   }
 }
 
@@ -220,15 +301,42 @@ function scheduleWave() {
   }, delay)
 }
 
-/* ===================== 伸懒腰（环境动作） ===================== */
-// 闲置时随机 2~4 分钟伸个懒腰，增加存在感；不打断思考/说话/沉睡。
+/* ===================== 举手示意 / 伸懒腰（随机闲置动作） ===================== */
+// attention（举手"我在这里"）与 stretch（伸懒腰）都是新画风的闲置小动作，
+// 本地随机触发 + 冷却，避免和 wave 挤在同一瞬。它们同时也由模型下发 emotion 驱动。
+const ATTENTION_COOLDOWN = 75 * 1000
+const STRETCH_COOLDOWN = 120 * 1000
+let attentionTimer: ReturnType<typeof setTimeout> | null = null
 let stretchTimer: ReturnType<typeof setTimeout> | null = null
+
+function maybeAttention(force = false) {
+  tryGesture('attention', { cooldown: ATTENTION_COOLDOWN, force })
+}
+function maybeStretch(force = false) {
+  tryGesture('stretch', { cooldown: STRETCH_COOLDOWN, force })
+}
+
+function scheduleAttention() {
+  const delay = 55000 + Math.random() * 70000 // 55~125s
+  attentionTimer = setTimeout(() => {
+    maybeAttention()
+    scheduleAttention()
+  }, delay)
+}
 function scheduleStretch() {
-  const delay = 120000 + Math.random() * 120000
+  const delay = (2 + Math.random() * 2) * 60 * 1000 // 2~4 分钟
   stretchTimer = setTimeout(() => {
-    tryGesture('stretch', { cooldown: 60000 })
+    maybeStretch()
     scheduleStretch()
   }, delay)
+}
+
+/* ===================== 歪头（互动动作） ===================== */
+// 素材只有 head_tilt 一张表，没有独立的"听你说"状态；这里用它承担"我在听"的语汇：
+// 你在对话框里敲字/刚发完消息时歪一下头。冷却较长，避免每次打字都抽一下。
+const HEAD_TILT_COOLDOWN = 20000
+function maybeHeadTilt(force = false): boolean {
+  return tryGesture('head_tilt', { cooldown: HEAD_TILT_COOLDOWN, force })
 }
 
 /* ===================== 思考（等待回复时持续） ===================== */
@@ -237,7 +345,7 @@ function scheduleStretch() {
 let thinkingTimer: ReturnType<typeof setInterval> | null = null
 let thinkingStartTimer: ReturnType<typeof setTimeout> | null = null
 function startThinking() {
-  if (avatarStore.currentState === 'sleepy') return
+  if (isAsleep()) return // 睡着时不思考：等对方真发消息再由 speak 硬切
   if (PRIORITY['thinking'] < PRIORITY[avatarStore.currentState]) return
   avatarStore.setState('thinking')
   if (thinkingTimer) clearInterval(thinkingTimer)
@@ -260,39 +368,83 @@ function stopThinking() {
   if (avatarStore.currentState === 'thinking') avatarStore.setState('idle')
 }
 
-/* ===================== 互动动作：点头 / 鞠躬 / 害羞 ===================== */
-// - nod：听到你发消息时点一下头回应
+/* ===================== 互动动作：点头 / 歪头 / 鞠躬 / 害羞 ===================== */
+// - head_tilt：对话框开着、你当面说话时歪头（"在听呢"）
+// - nod：对话框关着时远远听到你发消息，点一下头
 // - bow：对话框打开时鞠躬问候
 // - shy：光标在桌宠身上抚摸（移动）时害羞 —— 最强"互动感"
+const SLEEP_SIDE_STATES: AvatarState[] = ['sleep_start', 'sleepy', 'sleep_end']
 function onUserSpoke() {
+  // 对话框开着 = 你在"当面"跟她说 → 歪头倾听；关着 = 远远传来一句 → 点头
+  if (chatWindowOpen.value && maybeHeadTilt()) return
   tryGesture('nod', { cooldown: 1500 })
 }
 function onChatOpened() {
   tryGesture('bow', { force: true, skipIfSleepy: false })
 }
 
-/* ===================== 打瞌睡 ===================== */
-// 闲置 3~5 分钟无交互进入；任意交互立即打断回 idle（并小概率惊喜跳跃）。
+/* ===================== 睡眠三段链 ===================== */
+// 睡眠是唯一一条"多段连续"的动画链，不能交给 requestState 的“播完回 idle”计时器：
+//   sleep_start  起身伸懒腰 → 坐下      （一次性，5167ms，收尾即趴下）
+//     → sleepy   趴着睡的循环
+//       → sleep_end  坐起 → 站直 → 站定  （一次性，5042ms，末帧即 idle 姿态）
+//         → idle
+// 关键约束：
+//  - 入睡只在 idle 上发生，避免从说话/招手直接趴下。
+//  - 惊醒必须走 sleep_end，不能硬切 idle —— sleep_end 首帧是"坐着睡"的姿式，与 sleepy
+//    对齐；硬切 idle 会从趴着直接跳成站着。sleep_start / sleepy / sleep_end 三个状态
+//    优先级相同、且不在 CHAIN_NEXT 之外的路径上互相跳，所以中断只会发生在链条两端。
+//  - 强事件（说话 / 报错 / 新消息 / 连接变化）按设计允许硬切覆盖睡眠（force），此时不播
+//    sleep_end —— 用户正在等一个反应，不能让 TA 先看 5 秒起床动画。
 let sleepTimer: ReturnType<typeof setTimeout> | null = null
+let wakeTimer: ReturnType<typeof setTimeout> | null = null
+
+// 是否处于睡眠链中的任意一段：只认状态，不做旁路记账，避免两处真相打架。
+function isAsleep(): boolean {
+  return SLEEP_SIDE_STATES.includes(avatarStore.currentState)
+}
 
 function scheduleSleepy() {
   if (sleepTimer) clearTimeout(sleepTimer)
   const delay = (3 + Math.random() * 2) * 60 * 1000 // 3~5 分钟
   sleepTimer = setTimeout(() => {
+    sleepTimer = null
     if (avatarStore.currentState === 'idle') {
-      requestState('sleepy')
+      // sleep_start 是可选过渡态：皮肤没有就直连 sleepy 循环（首帧即睡姿，硬切可接受）。
+      // 有则播完自动接 sleepy（见 CHAIN_NEXT）。
+      requestState(hasState('sleep_start') ? 'sleep_start' : 'sleepy')
     } else {
       scheduleSleepy() // 当前忙，稍后重试
     }
   }, delay)
 }
 
+// 叫醒：从入眠动作或睡眠循环切到起床动作；已在 sleep_end 时不做任何事（防重复触发）。
+function wakeUp(): boolean {
+  if (!isAsleep()) return false
+  if (avatarStore.currentState === 'sleep_end') return false
+
+  // sleep_end 是可选过渡态：皮肤没有就从 sleepy 直接硬切 idle（无起床动画）。
+  if (!hasState('sleep_end')) {
+    avatarStore.setState('idle')
+    maybeHappy(0.12)
+    return true
+  }
+
+  if (!requestState('sleep_end', { force: true })) return false
+  gestureCooldownUntil['sleep_end'] = Date.now() + durationOf('sleep_end')
+  if (wakeTimer) clearTimeout(wakeTimer)
+  wakeTimer = setTimeout(() => {
+    wakeTimer = null
+    // 起床动作播完后（此刻应已回到 idle）才有睡醒彩蛋
+    if (avatarStore.currentState === 'idle') maybeHappy(0.12)
+  }, durationOf('sleep_end') + 50)
+  return true
+}
+
 function markActivity() {
   scheduleSleepy()
-  if (avatarStore.currentState === 'sleepy') {
-    avatarStore.setState('idle') // 惊醒
-    maybeHappy(0.12) // 唤醒彩蛋
-  }
+  wakeUp() // 有交互就叫醒；不在睡则直接返回 false
 }
 
 /* ===================== 眨眼（随机） ===================== */
@@ -320,10 +472,17 @@ watch(connected, (c) => {
   wasConnected = c
 })
 
+let lastErrorAt = 0
 watch(lastError, (err) => {
   if (err && err.trim()) {
-    // 聊天出错 / 无法满足：摇头
-    tryGesture('shake', { force: true, skipIfSleepy: false, cooldown: 8000 })
+    const now = Date.now()
+    // 短时间内连续报错 = 接连碰壁 → 生气；单次出错仍是摇头。
+    if (now - lastErrorAt < 8000) {
+      tryGesture('angry', { force: true, skipIfSleepy: false, cooldown: 15000 })
+    } else {
+      tryGesture('shake', { force: true, skipIfSleepy: false, cooldown: 8000 })
+    }
+    lastErrorAt = now
   }
 })
 
@@ -394,6 +553,7 @@ onMounted(() => {
   avatarStore.init()
   scheduleBlink()
   scheduleWave()
+  scheduleAttention()
   scheduleStretch()
   scheduleSleepy()
   window.addEventListener('focus', onFocus)
@@ -412,11 +572,14 @@ onBeforeUnmount(() => {
   if (actionTimer) clearTimeout(actionTimer)
   if (speakTimer) clearTimeout(speakTimer)
   if (waveTimer) clearTimeout(waveTimer)
-  if (hoverTimer) clearTimeout(hoverTimer)
+  if (attentionTimer) clearTimeout(attentionTimer)
   if (stretchTimer) clearTimeout(stretchTimer)
+  if (dragStartTimer) clearTimeout(dragStartTimer)
+  if (hoverTimer) clearTimeout(hoverTimer)
   if (thinkingTimer) clearInterval(thinkingTimer)
   if (thinkingStartTimer) clearTimeout(thinkingStartTimer)
   if (sleepTimer) clearTimeout(sleepTimer)
+  if (wakeTimer) clearTimeout(wakeTimer)
   if (blinkTimer) clearTimeout(blinkTimer)
   if (tapResetTimer) clearTimeout(tapResetTimer)
   ipcRenderer?.off('desktop-pet:cursor', onCursorPos)
@@ -425,19 +588,67 @@ onBeforeUnmount(() => {
 
 /* ===================== 拖拽 / 点击 ===================== */
 let pointerMoved = false
+// 拖拽前正在播的状态。松手后回到它（若它本身是一次性动作且已被打断，就回 idle）。
+let stateBeforeDrag: AvatarState | null = null
+// 是否已真正进入 drag 表现。pointerdown 只是"预备"，要等指针真的挪动才切 drag ——
+// 否则一次轻点也会先闪一帧"被拎起来"的姿势再跳去 handleTap 的表情。
+let dragStateEntered = false
+
+// 过渡态播完接 drag 循环的计时器（皮肤有 drag_start 时才用）。
+let dragStartTimer: ReturnType<typeof setTimeout> | null = null
+
+// 从 pointerdown 过渡到真正的拖拽：切 drag 循环态 + 冒出台词。
+// 过渡态 drag_start 是**可选**的：
+//  - 皮肤有 drag_start → 先播一次"被拎起"的惊恐起身，播完接 drag 循环；
+//    松手（stopDrag）可随时打断，不会卡在过渡里。
+//  - 皮肤没有 → 直接进 drag 循环（素材 frame 0 就是"被拎起"姿势，硬切入场不闪）。
+function enterDragState() {
+  if (dragStateEntered) return
+  dragStateEntered = true
+  stateBeforeDrag = avatarStore.currentState
+  setMessage('跟着你移动中。')
+  // 清掉一次性动作的收尾计时器，否则它到点会把当前状态顶成 idle
+  if (actionTimer) {
+    clearTimeout(actionTimer)
+    actionTimer = null
+  }
+  // 拖拽期间不喂闲置/睡眠计时器（startDrag 已处理），这里只需管过渡计时。
+  if (hasState('drag_start')) {
+    avatarStore.setState('drag_start')
+    if (dragStartTimer) clearTimeout(dragStartTimer)
+    dragStartTimer = setTimeout(() => {
+      dragStartTimer = null
+      // 松手可能已把状态改掉，只有仍在过渡态时才接循环
+      if (dragStateEntered && avatarStore.currentState === 'drag_start') {
+        avatarStore.setState('drag')
+      }
+    }, durationOf('drag_start'))
+  } else {
+    avatarStore.setState('drag')
+  }
+}
 
 function startDrag(event: PointerEvent) {
   if (event.pointerType === 'mouse' && event.button !== 0) return
 
   isDragging.value = true
   pointerMoved = false
+  dragStateEntered = false
   if (event.currentTarget instanceof HTMLElement) {
     event.currentTarget.setPointerCapture(event.pointerId)
   }
 
   ipcRenderer?.send('desktop-pet:drag-start')
-  setMessage('跟着你移动中。')
-  markActivity()
+  // 拖拽期间不喂闲置计时器也不叫醒：拎在手里本来就该是清醒的，
+  // 而 markActivity() 会在睡着时切到 sleep_end，和下面这行抢状态。
+  if (isAsleep()) wakeUp()
+  if (wakeTimer) {
+    // 起床彩蛋的计时器此刻已无意义（主角不再回 idle 而是 drag），直接撤掉
+    clearTimeout(wakeTimer)
+    wakeTimer = null
+  }
+  scheduleSleepy()
+
   window.addEventListener('pointermove', drag)
   window.addEventListener('pointerup', stopDrag)
   window.addEventListener('pointercancel', stopDrag)
@@ -446,6 +657,9 @@ function startDrag(event: PointerEvent) {
 
 function drag() {
   if (!isDragging.value) return
+  // 先切 drag 态再上报移动：主进程按"窗口起点 + 光标位移"算位置，
+  // 这里多等一帧只会让画面比窗口慢半拍。
+  enterDragState()
   pointerMoved = true
   ipcRenderer?.send('desktop-pet:drag-move')
 }
@@ -454,13 +668,39 @@ function stopDrag() {
   if (!isDragging.value) return
 
   isDragging.value = false
+  // 过渡计时器必须撤掉：松手后它若再触发，会把 idle/drag 之外的状态改回 drag
+  if (dragStartTimer) {
+    clearTimeout(dragStartTimer)
+    dragStartTimer = null
+  }
   ipcRenderer?.send('desktop-pet:drag-end')
-  setMessage('这里看起来不错。')
-  if (!pointerMoved) handleTap() // 没有拖动 = 一次轻点
   window.removeEventListener('pointermove', drag)
   window.removeEventListener('pointerup', stopDrag)
   window.removeEventListener('pointercancel', stopDrag)
   window.removeEventListener('blur', stopDrag)
+
+  if (!pointerMoved) {
+    // 没有拖动 = 一次轻点：全程没进过 drag 态，也没说过拖拽台词
+    handleTap()
+    return
+  }
+
+  setMessage('这里看起来不错。')
+  // 退出 drag：回到"拎起来之前那个还值得继续的表现"。
+  // 不在这里走 requestState —— drag 优先级最高，用普通通道请求任何状态都会被自己挡住
+  // （playSpeak 里的 requestState('speak') 会直接返回 false，所以不能调它）。
+  // 只有 speak 值得恢复：它是唯一"跨越拖拽仍然语义成立"的循环态（对话还在进行），
+  // 且恢复时必须自己补上回 idle 的计时器（armSpeakTail），否则会永远停在说话循环里。
+  // 其余情况一律回 idle：一次性动作已经过时，睡眠链被拎起来本就该醒（startDrag 已叫醒）。
+  const back = stateBeforeDrag
+  stateBeforeDrag = null
+  dragStateEntered = false
+  if (back === 'speak') {
+    avatarStore.setState('speak')
+    armSpeakTail()
+  } else {
+    avatarStore.setState('idle')
+  }
 }
 
 /* ===================== 抚摸 → 害羞 ===================== */

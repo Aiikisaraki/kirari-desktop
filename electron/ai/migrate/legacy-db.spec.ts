@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { migrateLegacyChatDb } from "./legacy-db";
 import * as storage from "../db/storage";
+import { homePath } from "../../kirari-home";
 
 /** 造一个旧版 kirari.db（表结构与 0.7.x 一致，没有 emotion / images_json 列）。 */
 function makeLegacyDb(p: string, msgs: { session_id: string; role: string; content: string; timestamp: string }[], opts?: { locations?: unknown[]; briefs?: unknown[] }) {
@@ -61,7 +62,10 @@ describe("旧库 kirari.db 迁移", () => {
     beforeEach(() => {
         dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "kirari-db-migrate-"));
         legacyPath = path.join(dataDir, "kirari.db");
-        targetPath = path.join(dataDir, "pet_sessions.db");
+        // 目标库在布局里的 database/ 子目录（legacy.db 用 homePath("database") 定位）。
+        // 旧库本身仍留在数据根根目录，它是要被消费掉的遗留物。
+        targetPath = homePath("database", dataDir);
+        fs.mkdirSync(path.dirname(targetPath), { recursive: true });
         // 目标库先由主进程开好（真实启动时 initEngine 已先跑过）
         storage.initDatabase(targetPath);
     });

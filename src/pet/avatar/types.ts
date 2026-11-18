@@ -3,23 +3,41 @@
 // 不关心底层是精灵帧（SpriteRenderer）还是 Live2D（Live2DRenderer）。
 // 这样即可在同一套框架下支持多种形象，并允许用户上传自定义精灵形象。
 
+// 全部状态必须在皮肤 frames.json 里有对应精灵表 —— 渲染器不再对缺失状态做静默兜底
+// （见 SpriteRenderer.setState 的 missing 告警分支）。新增状态时须同步：
+//   1) 本联合类型 2) sprite sheets + frames.json 3) PetStage 的 PRIORITY / FALLBACK_DUR
+//   4) 若允许模型下发，还要加进各处 PetEmotion 白名单。
 export type AvatarState =
-  | "idle"
-  | "blink"
-  | "speak"
-  | "wave"
-  | "happy"
-  | "sleepy"
-  // —— 以下为新增情绪/动作动画（对应 frames.json 中新增的精灵表）——
+  // —— 基础态 ——
+  | "idle" // 基础态：只含清醒段，循环
+  | "blink" // 眨眼：从 idle 首帧闭合再睁眼，200ms 一次性
+  | "speak" // 说话：循环
+  | "sleepy" // 打瞌睡：循环（睡眠三段链的中段）
+  // —— 情绪/动作动画 ——
+  | "wave" // 招手
+  | "happy" // 高兴跳跃
   | "bow" // 鞠躬
   | "excited" // 兴奋
   | "nod" // 点头
   | "sad" // 伤心
   | "shake" // 摇头
   | "shy" // 害羞
-  | "stretch" // 伸懒腰
   | "surprised" // 惊讶
-  | "thinking"; // 思考
+  | "thinking" // 思考
+  | "head_tilt" // 歪头：互动类，回应"听你说话"
+  | "angry" // 生气：叉腰闭眼憋气，模型下发 / 连续点击触发
+  | "attention" // 举手示意"我在这里"：与 wave（你好/再见）语义不同
+  | "stretch" // 伸懒腰打哈欠：清醒时的独立闲置动作（Q 版新素材，与 sleep_start 的入眠伸腰区分）
+  // —— 睡眠三段链：sleep_start → sleepy(循环) → sleep_end ——
+  // 三个状态都是**可选过渡态**：皮肤缺任一环时，调度器自动走"直连循环态"的降级路径：
+  //   缺 sleep_start → 直接进 sleepy；缺 sleep_end → 从 sleepy 直接硬切 idle。
+  | "sleep_start" // 入眠：起身伸懒腰后坐下，结尾接 sleepy
+  | "sleep_end" // 苏醒：从睡眠坐姿站起，结尾接 idle
+  // —— 拖拽 ——
+  // drag_start 为**可选过渡态**：皮肤有则拎起时先播一次惊恐起身再接 drag 循环；
+  // 没有则直接进 drag 循环（第 0 帧即"被拎起"姿势）。
+  | "drag_start" // 被拎起的瞬间：惊恐脸红站起，接 drag 循环
+  | "drag"; // 被拎起：循环，最高优先级且不可打断
 
 export type AvatarType = "sprite" | "live2d" | "image";
 
@@ -62,8 +80,11 @@ export interface PersonalityDialogues {
   surprised?: string[]     // 惊讶时台词
   thinking?: string[]      // 思考中台词
   excited?: string[]       // 兴奋时台词
-  // 新增交互场景
+  angry?: string[]         // 生气时台词
+  attention?: string[]     // 举手示意时台词
   stretch?: string[]       // 伸懒腰时台词
+  // 新增交互场景
+  head_tilt?: string[]     // 歪头（"在听你说"）时台词，键名与状态名一致
   nod?: string[]          // 点头确认时台词
   shake?: string[]        // 摇头拒绝时台词
   bow?: string[]          // 鞠躬时台词

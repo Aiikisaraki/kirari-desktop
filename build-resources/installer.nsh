@@ -5,11 +5,11 @@
 # 把本页插入到「选择安装目录」之后、「开始安装」之前。
 #
 # 行为：
-#   - 若 $APPDATA\akisaki-kirari\config.json 已存在 → 自动跳过本页（升级/重装）
+#   - 若 $PROFILE\.kirari\config.json 已存在 → 自动跳过本页（升级/重装）
 #   - 若不存在 → 显示本页，用户填写 Endpoint / Model / Key 后点「安装」直接开始安装
 #     （MUI2 最后一个预安装页的「下一步」按钮自动显示为「安装」）
 #
-# 收集值写入 $APPDATA\akisaki-kirari\config.json，
+# 收集值写入 $PROFILE\.kirari\config.json，
 # 主程序首次启动直接读取（桌宠自带大脑，不再经过后端）；勾选跳过则不写文件。
 # ============================================================================
 !include "LogicLib.nsh"
@@ -49,12 +49,12 @@ Var ModeSelectVal
 
 # ──────────────────────────────────────────────────────────────────────
 # full 版安装向导「选择默认模式」页（仅在 EDITION="full" 时插入）
-# 写入 $APPDATA\akisaki-kirari\pet-client.config.json 的 mode 字段，
+# 写入 $PROFILE\.kirari\pet-client.config.json 的 mode 字段，
 # 主程序据此决定本地启动后端还是连接远程服务端。
 # 升级 / 重装（pet-client.config.json 已存在）则跳过本页。
 # ──────────────────────────────────────────────────────────────────────
 Function ModeSelectShow
-  ${If} ${FileExists} "$APPDATA\akisaki-kirari\pet-client.config.json"
+  ${If} ${FileExists} "$PROFILE\.kirari\pet-client.config.json"
     Abort
   ${EndIf}
 
@@ -86,13 +86,13 @@ Function ModeSelectLeave
     StrCpy $ModeSelectVal "local"
   ${EndIf}
 
-  CreateDirectory "$APPDATA\akisaki-kirari"
+  CreateDirectory "$PROFILE\.kirari"
   ${If} $ModeSelectVal == "remote"
-    FileOpen $R0 "$APPDATA\akisaki-kirari\pet-client.config.json" w
+    FileOpen $R0 "$PROFILE\.kirari\pet-client.config.json" w
     FileWrite $R0 "{$\"mode$\":$\"remote$\",$\"server$\":{$\"wsUrl$\":$\"$\",$\"httpUrl$\":$\"$\"},$\"builtinToken$\":$\"kirari-local-builtin$\"}"
     FileClose $R0
   ${Else}
-    FileOpen $R0 "$APPDATA\akisaki-kirari\pet-client.config.json" w
+    FileOpen $R0 "$PROFILE\.kirari\pet-client.config.json" w
     FileWrite $R0 "{$\"mode$\":$\"local$\",$\"server$\":{$\"wsUrl$\":$\"ws://localhost:9089/ws$\",$\"httpUrl$\":$\"http://localhost:9089$\"},$\"builtinToken$\":$\"kirari-local-builtin$\"}"
     FileClose $R0
   ${EndIf}
@@ -104,7 +104,7 @@ Function ModelConfigShow
   ; 升级 / 重装检测：已有配置文件则完全跳过本页
   ; 用户将直接从「选择安装目录」进入「安装」确认，体验更流畅
   ; ══════════════════════════════════════════════════════════════════
-  ${If} ${FileExists} "$APPDATA\akisaki-kirari\config.json"
+  ${If} ${FileExists} "$PROFILE\.kirari\config.json"
     Abort
   ${EndIf}
 
@@ -166,9 +166,9 @@ Function ModelConfigLeave
     Return
   ${EndIf}
 
-  ; 写入 $APPDATA\akisaki-kirari\config.json（与 Electron userData 目录一致）
-  CreateDirectory "$APPDATA\akisaki-kirari"
-  FileOpen $R0 "$APPDATA\akisaki-kirari\config.json" w
+  ; 写入 $PROFILE\.kirari\config.json（与 Electron userData 目录一致）
+  CreateDirectory "$PROFILE\.kirari"
+  FileOpen $R0 "$PROFILE\.kirari\config.json" w
   FileWrite $R0 "{$\"endpoint$\":$\"$ModelCfgEndpointVal$\",$\"model$\":$\"$ModelCfgModelVal$\",$\"key$\":$\"$ModelCfgKeyVal$\"}"
   FileClose $R0
 FunctionEnd
@@ -251,7 +251,8 @@ FunctionEnd
 !ifdef BUILD_UNINSTALLER
 # ── 卸载前可选「清除所有配置和个人数据」自定义页 ──────────────────────
 # 在确认卸载前插入一个勾选页：勾选后于 customUnInstall 中删除
-# %APPDATA%\akisaki-kirari 与 %LOCALAPPDATA%\akisaki-kirari（配置/登录态/皮肤/日志全清）。
+# %APPDATA%\akisaki-kirari（Chromium 缓存）与 %LOCALAPPDATA%\akisaki-kirari，
+# 以及用户数据根 %USERPROFILE%\.kirari（配置/聊天库/皮肤/头像/日志全清）。
 # 默认不勾选，避免误删；仅卸载构建展开本段，安装构建不引用。
 Var UninstCleanChk
 Var UninstCleanState
@@ -263,7 +264,7 @@ Function un.CleanDataShow
     Abort
   ${EndIf}
   ${NSD_CreateLabel} 0 0 100% 28u "删除程序时，是否同时清除本机上的所有个人数据？"
-  ${NSD_CreateLabel} 0 30u 100% 32u "包括配置文件、登录态、已下载皮肤与日志（位于 %APPDATA%\akisaki-kirari 与 %LOCALAPPDATA%\akisaki-kirari）。此操作不可恢复。"
+  ${NSD_CreateLabel} 0 30u 100% 32u "包括配置文件、聊天记录、已下载皮肤与日志（位于 %USERPROFILE%\.kirari 与 %APPDATA%\akisaki-kirari）。此操作不可恢复。"
   ${NSD_CreateCheckBox} 0 66u 100% 12u "同时清除所有配置和个人数据"
   Pop $UninstCleanChk
   nsDialogs::Show
@@ -282,6 +283,11 @@ UninstPage custom un.CleanDataShow un.CleanDataLeave
     DetailPrint "清理开机启动登录项返回: $R0"
   ${EndIf}
   ${If} $UninstCleanState == 1
+    ; 用户数据根（~/.kirari）：配置 / 聊天库 / 技能 / 皮肤 / 头像 / 日志
+    ${If} $PROFILE != ""
+      RMDir /r "$PROFILE\.kirari"
+    ${EndIf}
+    ; Chromium 缓存（sessionData 仍留在 %APPDATA%，随数据根拆分后单独清）
     ${If} $APPDATA != ""
       RMDir /r "$APPDATA\akisaki-kirari"
     ${EndIf}

@@ -5,12 +5,21 @@ import * as db from "./ai/db/storage";
 import type { AiModelSettings } from "./ai/aiContext";
 import { readModelConfigFile } from "./model-config";
 import type { LocalKnowledge, RetrievedPassage } from "../src/knowledge/localKnowledge";
+import { EMOTION_WHITELIST } from "./ai/types";
+import type { PetEmotion } from "./ai/types";
 
 export type ChatAuthor = "user" | "pet" | "system";
 
-// 对话回答可携带的情绪标签：用于前端"情绪优先"播放（先播情绪动画再播说话）。
+// 对话回答可携带的情绪标签：用于渲染层"情绪优先"播放（先播情绪动画再播说话）。
 // 由模型在回复解析后给出；本模块只消费，不负责生成。
-export type PetEmotion = "happy" | "wave";
+// 取值定义与白名单在 ai/types.ts，本文件不再重复维护一份收窄的联合类型 ——
+// 原先这里写死 "happy" | "wave"，导致模型给出 nod/bow/shy 等标签会被静默丢弃。
+export type { PetEmotion };
+
+// 统一的情绪校验：只放行 ai/types.ts 白名单内的值，其余（脏数据 / 模型幻觉 / 旧版本残留）一律 null。
+function acceptEmotion(raw: unknown): PetEmotion | null {
+    return typeof raw === "string" && EMOTION_WHITELIST.has(raw) ? (raw as PetEmotion) : null;
+}
 
 export type ChatMessage = {
     id: string;
@@ -21,6 +30,10 @@ export type ChatMessage = {
     emotion?: PetEmotion | null;
     // 关联图片（用户发送的图片、或 AI 返回的图片），URL 或 base64 data URL。
     images?: string[];
+    // 组网 requestId：发起方与广播回来的同一条用户输入用这个字段合并，避免重复显示。
+    relayRequestId?: string;
+    // 广播来源设备名，非本机发起的 prompt 会带上，方便界面标注。
+    fromName?: string;
 };
 
 export type ChatStateSnapshot = {
@@ -64,15 +77,25 @@ type ChatSessionOptions = {
     readSettings?: () => AiModelSettings | null;
     /**
      * 组网出口：本机作为叶子时，把请求上行给主机。
-     * 返回 true 表示已成功上行（本地不再调模型，等广播回复）。
+     * 返回 requestId 表示已成功上行（本地不再调模型，等广播 prompt + reply）。
      * 第三参 kbContext 是本机私人知识库的检索结果 —— 主机没有我们的本地
      * 知识库，不带就等于白配了（回答准确度全靠它）。
-     * 未提供 / 返回 false → 走本地独立调用。
+     * 未提供 / 返回 null → 走本地独立调用。
      */
-    relaySender?: (content: string, images: string[], kbContext: RetrievedPassage[]) => boolean;
+    relaySender?: (content: string, images: string[], kbContext: RetrievedPassage[]) => string | null;
 };
 
 /** 主机广播回来的回复（结构见 net/protocol.ts） */
+export type RelayPromptFrame = {
+    requestId: string;
+    fromDeviceId: string;
+    fromName?: string;
+    sessionId: string;
+    content: string;
+    images?: string[];
+    askedAt: number;
+};
+
 export type RelayResultFrame = {
     requestId: string;
     speech: string;
@@ -136,8 +159,10 @@ export class ChatSessionService {
     private readonly localKnowledge: LocalKnowledge | undefined;
     private readonly readSettings: () => AiModelSettings | null;
     private readonly relaySender:
-        | ((content: string, images: string[], kbContext: RetrievedPassage[]) => boolean)
+        | ((content: string, images: string[], kbContext: RetrievedPassage[]) => string | null)
         | undefined;
+    /** 已经显示过的广播用户输入（按 requestId 去重，防止重连重放时刷屏） */
+    private readonly shownRelayPrompts = new Set<string>();
     /** 已经显示过的广播回复（按 requestId 去重，防止重连重放时刷屏） */
     private readonly shownRelayReplies = new Set<string>();
     private initialized = false;
@@ -240,7 +265,7 @@ export class ChatSessionService {
             author: row.role === "assistant" ? "pet" : row.role === "user" ? "user" : "system",
             text,
             timestamp: row.timestamp,
-            emotion: (row.emotion as PetEmotion | null) ?? null,
+            emotion: acceptEmotion(row.emotion),
             images: images.length ? images : undefined,
         };
     }
@@ -305,10 +330,7 @@ export class ChatSessionService {
         this.state.waitingForReply = true;
         this.state.lastError = "";
         this.state.connected = true;
-        this.state.messages.push(this.createMessage("user", text, undefined, images));
-        this.persist();
         this.emit();
-        this.armReplyTimeout();
 
         // ── 私人知识库检索（一次检索，两条路共用）──
         // 上行组网时带给主机；本地回答时注入引擎，跳过重复检索。
@@ -324,10 +346,19 @@ export class ChatSessionService {
 
         // ── 组网：本机是叶子且已连上主机 ──
         // 请求上行给主机，由主机（唯一出口）调用模型并把结果广播回来。
-        // 本地**不**再调模型 —— 这正是「一条消息只有一份回复」的落地方式。
-        if (this.relaySender && this.relaySender(text, images, kbContext)) {
-            return true; // 等 applyRelayResult 收尾
+        // 用户消息本身也由主机的 relay_prompt 广播统一落地，这样所有节点看到的
+        // 是同一条（同一 requestId），不会出现「提问方本地有一条、别人没有」。
+        const relayRequestId = this.relaySender?.(text, images, kbContext) ?? null;
+        if (relayRequestId) {
+            this.armReplyTimeout();
+            return true; // 等 relay_prompt + applyRelayResult 收尾
         }
+
+        // 本地独立调用：用户消息在这里落地（组网路径已由 relay_prompt 负责）
+        this.state.messages.push(this.createMessage("user", text, undefined, images));
+        this.persist();
+        this.emit();
+        this.armReplyTimeout();
 
         const controller = new AbortController();
         this.abortController = controller;
@@ -349,8 +380,7 @@ export class ChatSessionService {
             this.state.waitingForReply = false;
             this.state.lastError = "";
             // 情绪标签：仅接受白名单值，避免脏数据破坏前端状态机
-            const emotion: PetEmotion | null =
-                result.emotion === "happy" || result.emotion === "wave" ? result.emotion : null;
+            const emotion = acceptEmotion(result.emotion);
             const replyImages = Array.isArray(result.images)
                 ? result.images.filter((x: string) => typeof x === "string" && x.trim())
                 : [];
@@ -377,6 +407,32 @@ export class ChatSessionService {
         }
     }
 
+
+    /**
+     * 显示主机广播回来的用户输入。
+     *
+     * 发起方在 sendMessage 里没有本地插入 user message，而是等这帧回来统一落地；
+     * 其他设备则直接新建一条。这样全网看到的文本 / 图片 / 作者 / requestId 完全一致。
+     */
+    applyRelayPrompt(frame: RelayPromptFrame): void {
+        if (this.disposed) return;
+        const text = String(frame.content || "");
+        if (!text && !(Array.isArray(frame.images) && frame.images.length)) return;
+        if (this.shownRelayPrompts.has(frame.requestId)) return;
+        this.shownRelayPrompts.add(frame.requestId);
+        if (this.shownRelayPrompts.size > 200) {
+            const keep = [...this.shownRelayPrompts].slice(-100);
+            this.shownRelayPrompts.clear();
+            for (const id of keep) this.shownRelayPrompts.add(id);
+        }
+
+        const msg = this.createMessage("user", text, undefined, frame.images);
+        msg.relayRequestId = frame.requestId;
+        msg.fromName = frame.fromName;
+        this.state.messages.push(msg);
+        this.persist();
+        this.emit();
+    }
     /**
      * 显示主机广播回来的回复。
      *
@@ -399,8 +455,7 @@ export class ChatSessionService {
         }
 
         this.clearReplyTimeout();
-        const emotion: PetEmotion | null =
-            frame.emotion === "happy" || frame.emotion === "wave" ? frame.emotion : null;
+        const emotion = acceptEmotion(frame.emotion);
         this.state.messages.push(this.createMessage("pet", text, emotion));
         this.state.waitingForReply = false;
         this.state.lastError = "";
@@ -446,7 +501,9 @@ export class ChatSessionService {
         author: ChatAuthor;
         text: string;
         images?: string[];
-        emotion?: PetEmotion | null;
+        // 上游（BotAdapter / 其他协议端）透传的原始值，这里统一过 acceptEmotion 白名单，
+        // 不收窄成 PetEmotion —— 收窄会把校验责任推给调用方，多一处就多一个漏点。
+        emotion?: string | null;
     }): void {
         const text = (msg.text || "").trim();
         const images = Array.isArray(msg.images)
@@ -471,8 +528,7 @@ export class ChatSessionService {
                 return;
             }
             this.lastPetSpeech = text;
-            const emotion =
-                msg.emotion === "happy" || msg.emotion === "wave" ? msg.emotion : undefined;
+            const emotion = acceptEmotion(msg.emotion) ?? undefined;
             this.state.messages.push(this.createMessage("pet", text, emotion, images));
             this.state.waitingForReply = false;
             this.state.bubbleMessage = text.length <= 10 ? text : LONG_REPLY_PROMPT;

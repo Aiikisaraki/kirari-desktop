@@ -5,8 +5,9 @@
 // 主进程直接 import，不再经过 WebSocket / HTTP，桌宠因此可以脱离后端独立工作。
 
 // ── 情绪标签 ────────────────────────────────────────────────────────────────
-// 需与前端 AvatarState 的情绪白名单保持一致：基础态 idle / blink / sleepy / speak 不在内。
-// 新增动画状态时同步扩展这里。
+// 需与渲染层 AvatarState 的情绪子集保持一致（src/stores/chat.ts 的 PetEmotion）：
+// 基础态 idle / blink / sleepy / speak 不在内；由系统调度、模型无权下发的
+// sleep_start / sleep_end / drag / drag_start 也不在内。新增动画状态时同步扩展这里。
 export type PetEmotion =
     | "happy"
     | "wave"
@@ -16,9 +17,12 @@ export type PetEmotion =
     | "sad"
     | "shake"
     | "shy"
-    | "stretch"
     | "surprised"
-    | "thinking";
+    | "thinking"
+    | "head_tilt"
+    | "angry"
+    | "attention"
+    | "stretch";
 
 export const EMOTION_VALUES: readonly PetEmotion[] = [
     "happy",
@@ -29,9 +33,12 @@ export const EMOTION_VALUES: readonly PetEmotion[] = [
     "sad",
     "shake",
     "shy",
-    "stretch",
     "surprised",
     "thinking",
+    "head_tilt",
+    "angry",
+    "attention",
+    "stretch",
 ] as const;
 
 export const EMOTION_WHITELIST: ReadonlySet<string> = new Set<string>(EMOTION_VALUES);

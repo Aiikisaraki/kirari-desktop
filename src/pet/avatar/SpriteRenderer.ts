@@ -29,8 +29,31 @@ const FADE_MS: Partial<Record<AvatarState, number>> = {
     nod: 200,
     excited: 200,
     shy: 190,
-    stretch: 190,
     thinking: 190,
+    head_tilt: 190,
+    // idle 是**所有一次性动作的归宿**，因此"回 idle"是最高频的切换。
+    // 实测（`_seam_audit.py` / `_align_audit.py`，预乘 RGB+alpha 平均绝对差）：
+    //   wave/happy/bow/nod/shy/sad/shake/surprised/thinking/excited/head_tilt 末帧→idle#0
+    //     全部 1.40%–2.22%，160ms 足够；
+    //   但 sleep_end 末帧→idle#0 = 4.87%（居中对齐后仍 4.02%，不是单纯位移，
+    //     是"站定姿势"与 idle 的构图差），而 idle 自身相邻帧噪声只有 0.37%，
+    //     160ms 盖不住 → 会看到一次轻微顿挫。
+    // 统一给 220ms：只影响"回到 idle"这一族（其余切换的 target 是具体动作，不取这个值），
+    // 对 1.4%–2.2% 的那些只是更柔一点，没有副作用；4.87% 的这次被摊薄到可接受。
+    idle: 220,
+    // 硬切（0）：只给"入场姿态已经和上一状态吻合、或必须一次性成立"的那几个。
+    // 依据是接缝实测（见 7-状态机接入说明.md §4.5），不是叙事想象：
+    //  drag        —— 整帧被抬高 65px（脚离地），居中后残差仅 2.9% = 纯位移；
+    //                 任何淡入都会被读成"变慢/粘手"，必须瞬时。
+    //  sleep_start —— 首帧就≈idle（差 3.33%，属 idle→两侧常态），本来没有可藏的跳变；
+    //                 而它是一条 5.17s 的入睡链头，尾帧必须停在坐姿好接 sleepy，
+    //                 给淡入只会拖慢"突然困了"的起势。真正的跳变在**出口**（见下），
+    //                 由 `sleepy` 的 160ms 默认溶解负责。
+    //  sleep_end   —— 首帧就是 sleepy 的坐姿（差 2.40%，低于 sleepy 自身 p95 3.44%），
+    //                 硬接连得上；且醒来要"干脆"，淡入会显得没睡醒。
+    drag: 0,
+    sleep_start: 0,
+    sleep_end: 0,
 };
 // 未单独标定的状态使用该默认时长
 const FADE_MS_DEFAULT = 160;
@@ -298,7 +321,15 @@ export class SpriteRenderer implements AvatarRenderer {
 
     setState(state: AvatarState): void {
         if (!this.manifest) return;
-        // 该形象没有此状态则用基础态兜底（如切换后缺少某动作的素材）
+        // 状态必须与皮肤素材 1:1。缺素材不再静默兜底 —— 每次切换都会打一条醒目告警，
+        // 把"皮肤少了一张表"暴露出来，而不是让它悄悄播 idle（那样只会被当成动作没做）。
+        if (!this.manifest[state]) {
+            console.error(
+                `[SpriteRenderer] 皮肤缺少状态 "${state}" 的精灵表，已回退到 "${this.baseStateName}"。` +
+                    `请把该状态的 sheet 与 frames.json 条目补齐（当前皮肤已定义：` +
+                    `${Object.keys(this.manifest).join(", ")}）。`,
+            );
+        }
         const target: AvatarState = this.manifest[state]
             ? state
             : this.baseStateName;
