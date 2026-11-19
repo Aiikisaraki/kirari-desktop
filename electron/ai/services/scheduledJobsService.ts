@@ -9,6 +9,7 @@ import { isDue, fireJob } from "kirari-agent";
 import type { ScheduledJob } from "kirari-agent";
 import { jobStore } from "../events/jobStore";
 import { recorder } from "../events/recorder";
+import { getOwnerKeySync } from "../db/storage";
 import * as briefSchedule from "./briefSchedule";
 import * as workspaceTask from "./workspaceTask";
 
@@ -48,6 +49,61 @@ export function setPlatformDeliverer(handler: PlatformDeliver | null): void {
 }
 
 /**
+ * 这条提醒该不该在**主人的桌面**上开口？
+ *
+ * ── 在防什么（2026-11-20 用户澄清后重写）──────────────────────────
+ *   「桌面端本就只有主人能连，这是我自己的桌宠，机器人是它的智能核心，
+ *     别人怎么可能连接我的机器人的大脑呢，让她和其他人对话也是建立在我的人际
+ *     关系上」
+ *
+ * 说得对 —— 桌宠只有这一台，**不存在"别人的桌面"**。所以这里不判"连接归谁"，
+ * 只判一件事：这条提醒**归谁**，是不是这台桌面的人。
+ *
+ * 她在 QQ 上同时跟很多人说话。朋友的提醒到点时，正确去向是回 QQ 给朋友本人；
+ * 如果也往桌面塞一份，主人看到的就是「她的任务怎么跑到我这儿来了」—— 报障原话。
+ *
+ * 取值语义：
+ *   · `_local`       本机桌面自己建的提醒 → 就是给这台桌面的，收
+ *   · 空            老任务没有归属字段 → 照常收（不因噎废食）
+ *   · 等于本机主人   → 收
+ *   · 其他任何人     → 不收，走平台那条腿回给他
+ *   · 查不到主人是谁（全新装机）且这条有归属 → fail-closed，不收
+ *
+ * @param job 待送达的任务
+ * @param ownerOfSystem 本机主人是谁；省略时按需从库里查（单测可直接传）
+ */
+export function shouldSpeakOnDesktop(
+    job: ScheduledJob,
+    ownerOfSystem?: string | null,
+): boolean {
+    const ownerKey = String((job as any).ownerKey || "").trim();
+    // 没有归属信息（老任务）或本机自建 → 不拦。
+    if (!ownerKey || ownerKey === "_local") return true;
+
+    let desktopOwner = ownerOfSystem;
+    if (desktopOwner === undefined) {
+        try {
+            desktopOwner = getOwnerKeySync();
+        } catch {
+            desktopOwner = null;
+        }
+    }
+    if (!desktopOwner) {
+        console.warn(
+            `[sched] 提醒 job=${job.jobId} 有归属 ${ownerKey} 但查不到本机主人，不注入桌面`,
+        );
+        return false;
+    }
+    if (ownerKey !== desktopOwner) {
+        console.log(
+            `[sched] 提醒 job=${job.jobId} 归属 ${ownerKey} 不是本机主人，不注入桌面`,
+        );
+        return false;
+    }
+    return true;
+}
+
+/**
  * 把一条提醒真正送到用户手上，返回送达的通道数。
  *
  * ── 为什么不能只推桌面（2026-11-20 用户报障）────────────────────
@@ -72,8 +128,8 @@ export function deliverReminder(job: ScheduledJob): number {
     let sentDesktop = 0;
     let sentPlatform = 0;
 
-    // ① 桌面
-    if (deliverDesktop) {
+    // ① 桌面 —— 先判该不该让它在**主人的桌面**上开口，见 shouldSpeakOnDesktop
+    if (deliverDesktop && shouldSpeakOnDesktop(job)) {
         try {
             sentDesktop = deliverDesktop(job) ? 1 : 0;
         } catch (e) {

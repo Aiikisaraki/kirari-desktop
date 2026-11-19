@@ -25,7 +25,7 @@ import { initEngine, shutdownEngine, chat as engineChat, ensureContext } from ".
 import { NetManager } from "kirari-net";
 import type { HostExecutor, RelayBackfill } from "kirari-net";
 import { setupNetIpc } from "./net/ipc";
-import { saveMessage as saveChatMessage, LOCAL_UID, getOwnerKeySync } from "./ai/db/storage";
+import { saveMessage as saveChatMessage, LOCAL_UID } from "./ai/db/storage";
 import { ensureLocalSessionId } from "./ai/local-session";
 import { migrateLegacyChatJson } from "./ai/migrate/legacy-chat";
 import { migrateLegacyChatDb } from "./ai/migrate/legacy-db";
@@ -2662,25 +2662,9 @@ app.whenReady().then(async () => {
   // 两条都失败时 deliverReminder 会明确告警，不再假装成功。
   scheduledJobsService.setDesktopDeliverer((job) => {
     try {
-      // ── 归属校验（2026-11-20 身份排查 / A1 桌面侧）──────────────────
-      //
-      // 桌面界面只有一个：这台机器的使用者。别人的提醒注入进来，用户看到的就是
-      // 「她的任务怎么跑到我这儿来了」—— 报障原话。
-      //
-      // 判断依据不能是"猜"，只能是任务自带的归属：
-      //   · 有 ownerKey 且不是本机主人 → 这条不该出现在这个桌面（交给平台那条腿）
-      //   · 没有 ownerKey（老任务）→ 只有 sessionId 明确是本机会话时才当主人自己的
-      //   · 查不到主人是谁（全新装机）→ fail-closed，不注入
-      const ownerKey = String((job as any).ownerKey || "").trim();
-      if (ownerKey) {
-        const desktopOwner = getOwnerKeySync();
-        if (!desktopOwner || ownerKey !== desktopOwner) {
-          console.log(
-            `[sched] 提醒 job=${job.jobId} 归属 ${ownerKey} 不是本机主人，不注入桌面`,
-          );
-          return false;
-        }
-      }
+      // 归属校验已上移进 scheduledJobsService.shouldSpeakOnDesktop（那里可单测，
+      // 并且要在"调这个回调之前"就判掉）。能走到这里，说明这条提醒确定是
+      // 这台桌面的人自己的。
       // job.payload 就是提醒文本（ScheduledJob 里它本来就是文本）。返回值表示是否真送到。
       return ensureChatSessionService().injectProactiveMessage(job.payload, "happy");
     } catch (e) {

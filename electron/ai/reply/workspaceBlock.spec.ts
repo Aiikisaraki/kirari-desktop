@@ -186,7 +186,6 @@ describe("提醒送达 · 两条腿 + 都失败要告警", () => {
         expect(scheduledJobsService.deliverReminder(makeJob())).toBe(1);
         expect(seen).toEqual(["该喝水啦"]);
     });
-
     it("桌面没开（返回 false）+ 平台会话也没有 → 0，且要 warn 不再静默", () => {
         const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
         scheduledJobsService.setDesktopDeliverer(() => false);
@@ -235,6 +234,68 @@ describe("提醒送达 · 两条腿 + 都失败要告警", () => {
         // 桌面炸了，平台还是得发出去 —— 否则一个异常就把提醒整个吞了
         expect(scheduledJobsService.deliverReminder(makeJob({ sessionId: "bot-qq-private:1" }))).toBe(1);
         warn.mockRestore();
+    });
+});
+
+// ── ★ 归属判定：这条提醒该不该在**主人的桌面**上开口 ──────────────────
+//
+// 用户澄清：「桌面端本就只有主人能连，这是我自己的桌宠，机器人是它的智能核心，
+// 别人怎么可能连接我的机器人的大脑呢，让她和其他人对话也是建立在我的人际关系上」
+//
+// 所以这里防的**不是"别人的桌面"**（不存在），而是：她在 QQ 上同时跟很多人说话，
+// 朋友的提醒到点该回 QQ 给朋友，不能顺手在主人自己的桌面上也弹一份 ——
+// 那正是报障原话「她的任务怎么跑到我这儿来了」。
+describe("★ 提醒归属：只有这台桌面的人自己的提醒才在桌面开口", () => {
+    const OWNER = "1980308740";
+    const FRIEND = "1658359753";
+    const jobWith = (ownerKey: unknown) =>
+        ({ jobId: "j1", payload: "该喝水啦", sessionId: "x", ownerKey }) as never;
+
+    it("本机自建的提醒（_local）→ 收", () => {
+        expect(scheduledJobsService.shouldSpeakOnDesktop(jobWith("_local"), OWNER)).toBe(true);
+    });
+
+    it("没有归属字段的老任务 → 收（不因噎废食）", () => {
+        expect(scheduledJobsService.shouldSpeakOnDesktop(jobWith(undefined), OWNER)).toBe(true);
+        expect(scheduledJobsService.shouldSpeakOnDesktop(jobWith(""), OWNER)).toBe(true);
+    });
+
+    it("主人自己的提醒 → 收", () => {
+        expect(scheduledJobsService.shouldSpeakOnDesktop(jobWith(OWNER), OWNER)).toBe(true);
+    });
+
+    it("★ 朋友的提醒 → 不收（原来会弹在主人桌面上）", () => {
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        expect(scheduledJobsService.shouldSpeakOnDesktop(jobWith(FRIEND), OWNER)).toBe(false);
+        expect(log.mock.calls.map((c) => String(c[0])).join("")).toContain("不是本机主人");
+        log.mockRestore();
+    });
+
+    it("有归属但查不到本机主人 → fail-closed（宁可不说，不乱说）", () => {
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        expect(scheduledJobsService.shouldSpeakOnDesktop(jobWith(FRIEND), null)).toBe(false);
+        warn.mockRestore();
+    });
+
+    it("★ 朋友的提醒被挡后，平台那条腿仍然要发（提醒不能因此消失）", () => {
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        const desktop = vi.fn(() => true);
+        const platform = vi.fn(() => true);
+        scheduledJobsService.setDesktopDeliverer(desktop);
+        scheduledJobsService.setPlatformDeliverer(platform);
+        const job = {
+            jobId: "j-friend",
+            payload: "记得吃药",
+            sessionId: `bot-qq-private:${FRIEND}`,
+            ownerKey: FRIEND,
+        } as never;
+        // 查不到本机主人 → 桌面那条被 fail-closed 挡掉，但平台照发
+        expect(scheduledJobsService.deliverReminder(job)).toBe(1);
+        expect(desktop).not.toHaveBeenCalled();
+        expect(platform).toHaveBeenCalledTimes(1);
+        log.mockRestore();
+        scheduledJobsService.setDesktopDeliverer(null);
+        scheduledJobsService.setPlatformDeliverer(null);
     });
 });
 
