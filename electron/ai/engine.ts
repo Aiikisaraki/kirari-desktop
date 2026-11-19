@@ -20,6 +20,7 @@ import { setFrontendTools } from "./tools";
 import * as capabilities from "./capabilities/registry";
 import { setPrivateKnowledgeProvider } from "./knowledge/privateKnowledge";
 import type { RetrievedPassage } from "./knowledge/types";
+import type { RawScene } from "./reply/sceneContext";
 import type { ToolSpec } from "./types";
 
 let initialized = false;
@@ -137,6 +138,11 @@ export type ChatOptions = {
     skillPrompts?: string[];
     /** 机器人场景：按群号/QQ号隔离位置记忆 */
     locationScope?: string | null;
+    /**
+     * 场合信息（群聊/私聊、群名、发言人）。机器人链路从适配器一路带下来，
+     * 用于注入【当前场合】段：决定语气松紧 + 守住群聊隐私边界。
+     */
+    scene?: RawScene | null;
     /** 阶段 D：能力作用域（本地 UI / 组网 hostExecutor / 机器人），隔离 frontend 工具与技能执行器 */
     capabilityScope?: string | null;
     /**
@@ -187,6 +193,7 @@ export async function chat(options: ChatOptions): Promise<ReplyResult> {
         persona = null,
         skillPrompts = [],
         locationScope = null,
+        scene = null,
         capabilityScope = null,
         kbContext = null,
         onDelta = null,
@@ -218,6 +225,7 @@ export async function chat(options: ChatOptions): Promise<ReplyResult> {
             images,
             sessionId,
             locationScope,
+            scene,
             capabilityScope,
             kbContext: kbNormalized,
             onDelta,

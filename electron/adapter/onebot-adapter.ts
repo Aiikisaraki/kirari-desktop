@@ -211,6 +211,10 @@ export class OneBotAdapter extends BotAdapter {
       text,
       images,
       isGroup: msgType === "group",
+      // 场合细节（原本被丢弃）→ 注入 system prompt，决定语气与隐私边界
+      senderName: String(frame.sender?.card || frame.sender?.nickname || "").trim(),
+      senderRole: String(frame.sender?.role || "").trim(),
+      groupName: String((frame as any).group_name || "").trim(),
     };
     console.log(`[onebot] 解析完成 text="${text}" images=${images.length} → emitMessage`);
     this.emitMessage(incoming);

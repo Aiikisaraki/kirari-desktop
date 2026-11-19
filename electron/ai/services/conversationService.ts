@@ -22,6 +22,9 @@ import {
 } from "../reply/promptBuilder";
 import { preflightTools, detectCorrectionIntent } from "../reply/intent";
 import { buildTimeContext } from "../reply/timeContext";
+import { buildSceneContext, type RawScene } from "../reply/sceneContext";
+import { buildCharter } from "../reply/charter";
+import * as memory from "./memory";
 import * as selfOps from "./selfOps";
 import * as locationSvc from "./locationService";
 import { streamChatCompletion, polishToolResult } from "../reply/streaming";
@@ -68,6 +71,12 @@ export type GetReplyOptions = {
     kbContext?: RetrievedPassage[] | null;
     /** 阶段 D：能力作用域（本地 UI / 组网 hostExecutor / 机器人），隔离 frontend 工具与技能执行器 */
     capabilityScope?: string | null;
+    /**
+     * 场合信息：群聊/私聊、群名、发言人。
+     * 用于注入【当前场合】段——让模型知道该收着还是放松，并守住群聊隐私边界。
+     * 缺省（桌宠本机一对一）按「一对一对话」处理。
+     */
+    scene?: RawScene | null;
     /** 外部取消（用户点了停止生成） */
     signal?: AbortSignal;
     /**
@@ -154,6 +163,7 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
         persona = null,
         kbContext = null,
         capabilityScope = null,
+        scene = null,
         onDelta = null,
         signal,
     } = options;
@@ -388,6 +398,45 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
         // 阶段 C：把该会话尚未完成的任务拼进 system.base，实现「新消息进来先恢复未完成任务」。
         const taskResume = taskRuntime.resumeBlock(sessionId);
         if (taskResume) systemPrompt += taskResume;
+
+        // 场合感知：告诉模型此刻在群聊还是私聊、对谁说话、该收着还是放松，
+        // 并给出群聊隐私红线与「别像模板」的语气要求。
+        systemPrompt += buildSceneContext(scene);
+
+        // 元指令（根本准则）：比人格更高一层，约束底线行为。永远追加、不可被覆盖。
+        systemPrompt += buildCharter();
+
+        // 长期记忆：按当前场合可见的记忆池做联想检索（跨对话存续的关键）。
+        try {
+            const mem = await memory.buildMemoryBlock(
+                {
+                    sessionId,
+                    uid: aiContext.userid,
+                    isGroup: String(scene?.chatType || "") === "group",
+                    counterpartId: scene?.senderId ? String(scene.senderId) : undefined,
+                    // 管理权限角色（owner/admin/user）。只影响"能改什么设置"，
+                    // 不影响她记得谁——记忆按人分池，与权限无关。
+                    role: scene?.role ? String(scene.role) : null,
+                    displayName: scene?.senderName ? String(scene.senderName) : null,
+                    platform: scene?.platform ? String(scene.platform) : null,
+                },
+                text || "",
+            );
+            if (mem.block) systemPrompt += mem.block;
+        } catch (e: any) {
+            console.warn("[aiReply] 记忆注入失败（已忽略）:", e?.message || e);
+        }
+
+        // 记忆机制的使用指引：只给判断标准，不逼她每轮都调工具。
+        systemPrompt +=
+            "\n\n【关于记忆 · 什么时候该动用 remember】" +
+            "\n你有跨对话的长期记忆（工具名 memory）。它不依赖当前这场对话，所以对方下次换个窗口找你，你依然认得。" +
+            "\n值得记：对方明确说「记住这个」、透露长期偏好与习惯（忌口、作息、称呼偏好）、重要个人信息、" +
+            "你们约定以后要怎么做、发生了一件以后可能还会提起的事。" +
+            "\n不值得记：寒暄、一次性问答、闲聊里随口提的细节、你自己刚说过的话。" +
+            "\n记的时候 scope 想清楚：关于主人本人的长期事实 → self；关于此刻这个人 → person；" +
+            "关于这个群/这个场合大家的事 → scene；通用约定与常识 → global。" +
+            "\n不确定要不要记就先别记；记错了比没记更麻烦。对方说「忘了这件事」时用 action=forget。";
 
         // 阶段 D：SKILL.md 渐进披露——system 里只放目录摘要，正文用 load_skill 按需加载。
         const skillCatalog = skillMd.catalogBlock();
@@ -719,6 +768,13 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
                         turnId,
                         uid: aiContext.userid,
                         origin: "desktop",
+                        // 记忆/自我运维要判断「是不是主人在说话」「这是不是群聊」——
+                        // 从本轮 scene 透传，避免工具里再猜一遍。
+                        isOwner: typeof scene?.isOwner === "boolean" ? scene!.isOwner : null,
+                        isGroup: String(scene?.chatType || "") === "group",
+                        counterpartId: scene?.senderId ? String(scene.senderId) : undefined,
+                        // 管理权限角色（owner/admin/user）；self_* 工具按它判可读/可写范围
+                        role: scene?.role ? String(scene.role) : null,
                         // 前端执行器兜底（兼容尚未按新接口注册的调用方），形态 (name, args)。
                         invokeFrontendTool: aiContext.invokeFrontendTool,
                     });

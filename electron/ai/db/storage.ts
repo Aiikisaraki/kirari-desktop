@@ -63,9 +63,26 @@ export function initDatabase(dbPath?: string): DB {
     db.pragma("busy_timeout = 5000");
     db.exec(SCHEMA);
     migrateUiColumns();
+    migrateMemoryColumns();
     ensureSessionEventsSchema();
     ensureTaskSchemas();
     return db;
+}
+
+/**
+ * memories 表的老库补列：about_person 是「这条记忆关于谁」，与 subject 正交。
+ *
+ * 为什么必须补：核心版和桌宠版共用一个 pet_sessions.db。任一端先把 memories
+ * 表建成旧结构（没有 about_person），另一端再查就会报 no such column。
+ * 幂等：先查 PRAGMA 再加（SQLite 的 ADD COLUMN 没有 IF NOT EXISTS）。
+ */
+function migrateMemoryColumns(): void {
+    if (!db) return;
+    const cols = (db.prepare("PRAGMA table_info(memories)").all() as { name: string }[]).map((c) => c.name);
+    if (!cols.length) return; // 表还不存在（由 SCHEMA 建，含该列）
+    if (!cols.includes("about_person")) db.exec("ALTER TABLE memories ADD COLUMN about_person TEXT");
+    // 索引放在补列之后建，两种结构都能成功
+    db.exec("CREATE INDEX IF NOT EXISTS idx_memories_about ON memories(about_person, deleted)");
 }
 
 /**
@@ -173,6 +190,66 @@ const SCHEMA = `
     UNIQUE(userid, date)
   );
   CREATE INDEX IF NOT EXISTS idx_daily_memory_user_date ON daily_memory(userid, date);
+
+  -- ── 长期记忆（与核心版 src/db/dbStorage.js 的 memories 表逐列一致）──────
+  -- 记忆不能挂在 session_id 上，否则新开一个对话她就像不认识你。改为按 subject
+  -- 分层 + visibility 控制跨场合可见性，两个维度都由本表字段表达。
+  -- subject：person::{key}（每个对话者独立池）/ self::{uid} / scene::{scope} / global
+  -- about_person：这条内容说的是谁（A 转述 B 的事时，池子在 A、内容关于 B）
+  -- visibility：public（任何场合可提）/ private（仅私下）/ secret（仅当事人本人）
+  CREATE TABLE IF NOT EXISTS memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'fact',
+    content TEXT NOT NULL,
+    visibility TEXT NOT NULL DEFAULT 'private',
+    origin_session TEXT,
+    about_person TEXT,
+    source TEXT NOT NULL DEFAULT 'owner',
+    importance INTEGER NOT NULL DEFAULT 3,
+    hits INTEGER NOT NULL DEFAULT 0,
+    last_hit_at DATETIME,
+    deleted INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(subject, deleted);
+  CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind, deleted);
+  -- 注意：about_person 的索引不在这里建。老库的 memories 表可能是没有该列的旧结构，
+  -- 上面的 CREATE TABLE IF NOT EXISTS 对它是空操作，紧接着建该列的索引会直接报
+  -- "no such column: about_person" 把整个 initDatabase 打断。统一放到
+  -- migrateMemoryColumns() 里，补完列再建索引。
+
+  -- ── 人（每个对话者一份稳定档案）────────────────────────────────────
+  -- 身份不是「主人 / 客人」二元。每个跟她说过话的人都在这里有自己的一条记录，
+  -- 各自有独立的记忆池。role 只表达**管理权限**（谁能改她的设置、看她的内部状态），
+  -- 不决定她记得谁、也不决定记忆给谁看。
+  CREATE TABLE IF NOT EXISTS people (
+    person_key TEXT PRIMARY KEY,
+    role TEXT NOT NULL DEFAULT 'user',
+    display_name TEXT,
+    platform TEXT,
+    alias TEXT,
+    notes TEXT,
+    first_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  -- ── 记忆关联（联想网络）────────────────────────────────────────────
+  -- 「这些记忆可以随着人际关系的拓展而产生互相关联」：
+  --   (person:1001) --knows--> (person:2002)  A 和 B 认识
+  --   (memories:12)  --about--> (person:1001) 这条记忆是关于 A 的
+  CREATE TABLE IF NOT EXISTS memory_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    a TEXT NOT NULL,
+    b TEXT NOT NULL,
+    relation TEXT NOT NULL DEFAULT 'related',
+    weight INTEGER NOT NULL DEFAULT 3,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(a, b, relation)
+  );
+  CREATE INDEX IF NOT EXISTS idx_memory_links_a ON memory_links(a, relation);
+  CREATE INDEX IF NOT EXISTS idx_memory_links_b ON memory_links(b, relation);
 
   -- 轻量键值对（与核心版 dbStorage.js 同名同结构）。
   -- 当前用途：记「旧版聊天记录已迁移」这类一次性动作的完成凭据 —— 迁移成功后写入键，
@@ -586,6 +663,362 @@ export async function upsertDailyBrief(
         )
         .run(uid, date, briefText, JSON.stringify(topics));
     return true;
+}
+
+// ---------------------------------------------------------------- 长期记忆 DAO
+// 与核心版 dbStorage 的同名方法语义一致（两端共库，列名相同）。只负责存取，
+// 「该不该记 / 谁能看到」的判断在 ai/services/memory.ts。
+
+export type MemoryRow = {
+    id: number;
+    subject: string;
+    kind: string;
+    content: string;
+    visibility: string;
+    originSession: string | null;
+    aboutPerson: string | null;
+    source: string;
+    importance: number;
+    hits: number;
+    lastHitAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+};
+
+type RawMemoryRow = {
+    id: number;
+    subject: string;
+    kind: string;
+    content: string;
+    visibility: string;
+    origin_session: string | null;
+    about_person: string | null;
+    source: string;
+    importance: number;
+    hits: number;
+    last_hit_at: string | null;
+    created_at: string;
+    updated_at: string;
+};
+
+function mapMemoryRow(r: RawMemoryRow): MemoryRow {
+    return {
+        id: r.id,
+        subject: r.subject,
+        kind: r.kind,
+        content: r.content,
+        visibility: r.visibility,
+        originSession: r.origin_session,
+        aboutPerson: r.about_person || null,
+        source: r.source,
+        importance: r.importance,
+        hits: r.hits,
+        lastHitAt: r.last_hit_at,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+    };
+}
+
+export async function addMemory(row: {
+    subject?: string;
+    kind?: string;
+    content: string;
+    visibility?: string;
+    originSession?: string | null;
+    aboutPerson?: string | null;
+    source?: string;
+    importance?: number;
+}): Promise<number | null> {
+    const content = String(row.content || "").trim();
+    if (!content) return null;
+    const info = getDb()
+        .prepare(
+            `INSERT INTO memories (subject, kind, content, visibility, origin_session, about_person, source, importance)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+            String(row.subject || "global"),
+            String(row.kind || "fact"),
+            content.slice(0, 2000),
+            ["public", "private", "secret"].includes(String(row.visibility)) ? String(row.visibility) : "private",
+            row.originSession || null,
+            row.aboutPerson || null,
+            String(row.source || "owner"),
+            Math.min(5, Math.max(1, Number(row.importance) || 3)),
+        );
+    return Number(info.lastInsertRowid);
+}
+
+export async function listMemories(
+    subjects: string[],
+    opts: { limit?: number; includeDeleted?: boolean } = {},
+): Promise<MemoryRow[]> {
+    const subs = (Array.isArray(subjects) ? subjects : [subjects]).filter(Boolean).map(String);
+    if (!subs.length) return [];
+    const ph = subs.map(() => "?").join(", ");
+    const rows = getDb()
+        .prepare(
+            `SELECT * FROM memories WHERE subject IN (${ph}) ${opts.includeDeleted ? "" : "AND deleted = 0"}
+             ORDER BY importance DESC, id DESC LIMIT ?`,
+        )
+        .all(...subs, Math.min(500, Math.max(1, Number(opts.limit) || 120))) as RawMemoryRow[];
+    return rows.map(mapMemoryRow);
+}
+
+export async function findMemoryByContent(subject: string, content: string): Promise<MemoryRow | null> {    const row = getDb()
+        .prepare("SELECT * FROM memories WHERE subject = ? AND deleted = 0 AND content = ? LIMIT 1")
+        .get(String(subject), String(content || "").trim().slice(0, 2000)) as RawMemoryRow | undefined;
+    return row ? mapMemoryRow(row) : null;
+}
+
+export async function updateMemory(
+    id: number,
+    patch: { content?: string; visibility?: string; importance?: number },
+): Promise<boolean> {
+    const sets: string[] = [];
+    const vals: unknown[] = [];
+    if (patch.content !== undefined) {
+        const c = String(patch.content || "").trim();
+        if (!c) return false;
+        sets.push("content = ?");
+        vals.push(c.slice(0, 2000));
+    }
+    if (patch.visibility !== undefined && ["public", "private", "secret"].includes(patch.visibility)) {
+        sets.push("visibility = ?");
+        vals.push(patch.visibility);
+    }
+    if (patch.importance !== undefined) {
+        sets.push("importance = ?");
+        vals.push(Math.min(5, Math.max(1, Number(patch.importance) || 3)));
+    }
+    if (!sets.length) return false;
+    sets.push("updated_at = CURRENT_TIMESTAMP");
+    vals.push(Number(id));
+    const info = getDb().prepare(`UPDATE memories SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+    return info.changes > 0;
+}
+
+export async function deleteMemory(id: number): Promise<boolean> {
+    const info = getDb()
+        .prepare("UPDATE memories SET deleted = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .run(Number(id));
+    return info.changes > 0;
+}
+
+export async function deleteMemoriesBySubject(subject: string): Promise<number> {
+    const info = getDb()
+        .prepare("UPDATE memories SET deleted = 1, updated_at = CURRENT_TIMESTAMP WHERE subject = ? AND deleted = 0")
+        .run(String(subject));
+    return info.changes;
+}
+
+export async function touchMemory(ids: number[]): Promise<number> {
+    const list = (Array.isArray(ids) ? ids : []).map(Number).filter(Number.isFinite);
+    if (!list.length) return 0;
+    const stmt = getDb().prepare(
+        "UPDATE memories SET hits = hits + 1, last_hit_at = CURRENT_TIMESTAMP WHERE id = ?",
+    );
+    let n = 0;
+    for (const id of list) n += stmt.run(id).changes;
+    return n;
+}
+
+export async function memoryStats(): Promise<{ total: number; bySubject: { subject: string; count: number }[] }> {
+    const rows = getDb()
+        .prepare("SELECT subject, COUNT(*) AS n FROM memories WHERE deleted = 0 GROUP BY subject ORDER BY n DESC LIMIT 200")
+        .all() as { subject: string; n: number }[];
+    const total = getDb().prepare("SELECT COUNT(*) AS n FROM memories WHERE deleted = 0").get() as { n: number } | undefined;
+    return { total: total ? total.n : 0, bySubject: rows.map((r) => ({ subject: r.subject, count: r.n })) };
+}
+
+/** 按「这条记忆关于谁」取（跨 subject 池）。用于想起某个人相关的事。 */
+export async function listMemoriesAbout(personKey: string, opts: { limit?: number } = {}): Promise<MemoryRow[]> {
+    const k = String(personKey || "").trim();
+    if (!k) return [];
+    const rows = getDb()
+        .prepare(
+            `SELECT * FROM memories WHERE about_person = ? AND deleted = 0
+             ORDER BY importance DESC, id DESC LIMIT ?`,
+        )
+        .all(k, Math.min(500, Math.max(1, Number(opts.limit) || 120))) as RawMemoryRow[];
+    return rows.map(mapMemoryRow);
+}
+
+// ---------------------------------------------------------------- 人物档案（people）
+
+export type PersonRow = {
+    personKey: string;
+    role: string;
+    displayName: string | null;
+    platform: string | null;
+    alias: string | null;
+    notes: string | null;
+    firstSeenAt: string;
+    lastSeenAt: string;
+};
+
+function mapPersonRow(r: any): PersonRow {
+    return {
+        personKey: r.person_key,
+        role: r.role,
+        displayName: r.display_name,
+        platform: r.platform,
+        alias: r.alias,
+        notes: r.notes,
+        firstSeenAt: r.first_seen_at,
+        lastSeenAt: r.last_seen_at,
+    };
+}
+
+/**
+ * 建档/刷新。role 只表达管理权限，不影响记忆归属。
+ * COALESCE 保护：新消息没带昵称时不要把已有昵称覆盖成空。
+ */
+export async function upsertPerson(row: {
+    personKey?: string;
+    role?: string;
+    displayName?: string | null;
+    platform?: string | null;
+    alias?: string | null;
+}): Promise<boolean> {
+    const key = String(row.personKey || "").trim();
+    if (!key) return false;
+    getDb()
+        .prepare(
+            `INSERT INTO people (person_key, role, display_name, platform, alias)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(person_key) DO UPDATE SET
+               display_name = COALESCE(excluded.display_name, people.display_name),
+               platform     = COALESCE(excluded.platform, people.platform),
+               role         = CASE WHEN excluded.role = 'owner' THEN 'owner' ELSE people.role END,
+               last_seen_at = CURRENT_TIMESTAMP`,
+        )
+        .run(
+            key,
+            ["owner", "admin", "user"].includes(String(row.role)) ? String(row.role) : "user",
+            row.displayName || null,
+            row.platform || null,
+            row.alias || null,
+        );
+    return true;
+}
+
+export async function getPerson(personKey: string): Promise<PersonRow | null> {
+    const r = getDb().prepare("SELECT * FROM people WHERE person_key = ?").get(String(personKey || ""));
+    return r ? mapPersonRow(r) : null;
+}
+
+export async function listPeople(limit = 200): Promise<PersonRow[]> {
+    const rows = getDb()
+        .prepare("SELECT * FROM people ORDER BY last_seen_at DESC LIMIT ?")
+        .all(Math.min(500, Math.max(1, Number(limit) || 200))) as any[];
+    return rows.map(mapPersonRow);
+}
+
+export async function setPersonRole(personKey: string, role: string): Promise<boolean> {
+    if (!["owner", "admin", "user"].includes(role)) return false;
+    return getDb().prepare("UPDATE people SET role = ? WHERE person_key = ?").run(role, String(personKey || "")).changes > 0;
+}
+
+export async function setPersonNotes(personKey: string, notes: string): Promise<boolean> {
+    return (
+        getDb()
+            .prepare("UPDATE people SET notes = ? WHERE person_key = ?")
+            .run(String(notes || "").slice(0, 2000), String(personKey || "")).changes > 0
+    );
+}
+
+export async function setPersonAlias(personKey: string, alias: string): Promise<boolean> {
+    return (
+        getDb()
+            .prepare("UPDATE people SET alias = ? WHERE person_key = ?")
+            .run(String(alias || "").slice(0, 100), String(personKey || "")).changes > 0
+    );
+}
+
+/** 谁是拥有者（管理权判定）。 */
+export async function getOwnerKey(): Promise<string | null> {
+    const r = getDb()
+        .prepare("SELECT person_key FROM people WHERE role = 'owner' ORDER BY first_seen_at ASC LIMIT 1")
+        .get() as { person_key: string } | undefined;
+    return r ? r.person_key : null;
+}
+
+// ---------------------------------------------------------------- 记忆关联（memory_links）
+
+export type LinkRow = { id: number; a: string; b: string; relation: string; weight: number; other: string };
+
+/** 建立/更新关联。人—人、人—事、事—事都走这里。 */
+export async function addLink(a: string, b: string, relation = "related", weight = 3): Promise<boolean> {
+    const A = String(a || "").trim();
+    const B = String(b || "").trim();
+    if (!A || !B || A === B) return false;
+    getDb()
+        .prepare(
+            `INSERT INTO memory_links (a, b, relation, weight) VALUES (?, ?, ?, ?)
+             ON CONFLICT(a, b, relation) DO UPDATE SET weight = excluded.weight`,
+        )
+        .run(A, B, String(relation || "related"), Math.min(5, Math.max(1, Number(weight) || 3)));
+    return true;
+}
+
+/** 取某个节点的关联网络（双向）。 */
+export async function listLinks(node: string, relation: string | null = null): Promise<LinkRow[]> {
+    const n = String(node || "").trim();
+    if (!n) return [];
+    const sql = relation
+        ? "SELECT * FROM memory_links WHERE (a = ? OR b = ?) AND relation = ? ORDER BY weight DESC LIMIT 200"
+        : "SELECT * FROM memory_links WHERE a = ? OR b = ? ORDER BY weight DESC LIMIT 200";
+    const args = relation ? [n, n, String(relation)] : [n, n];
+    const rows = getDb().prepare(sql).all(...args) as any[];
+    return rows.map((r) => ({
+        id: r.id,
+        a: r.a,
+        b: r.b,
+        relation: r.relation,
+        weight: r.weight,
+        other: r.a === n ? r.b : r.a,
+    }));
+}
+
+export async function removeLink(a: string, b: string, relation = "related"): Promise<boolean> {
+    return (
+        getDb()
+            .prepare("DELETE FROM memory_links WHERE a = ? AND b = ? AND relation = ?")
+            .run(String(a || ""), String(b || ""), String(relation || "related")).changes > 0
+    );
+}
+
+/**
+ * 联想扩散：从起点出发沿 memory_links 走 1-2 跳。
+ * 用于「A 和 B 是朋友，所以 B 的公开的事在 A 面前也能自然想起」。
+ */
+export async function expandLinks(
+    nodes: string[],
+    opts: { depth?: number; minWeight?: number } = {},
+): Promise<LinkRow[]> {
+    const seen = new Set((Array.isArray(nodes) ? nodes : []).map(String).filter(Boolean));
+    if (!seen.size) return [];
+    const depth = Math.min(2, Math.max(1, Number(opts.depth) || 1));
+    const minWeight = opts.minWeight != null ? Number(opts.minWeight) : 1;
+    let frontier = [...seen];
+    const found: LinkRow[] = [];
+    for (let d = 0; d < depth; d += 1) {
+        const next: string[] = [];
+        for (const node of frontier) {
+            const links = await listLinks(node);
+            for (const l of links) {
+                if (l.weight < minWeight) continue;
+                if (seen.has(l.other)) continue;
+                seen.add(l.other);
+                next.push(l.other);
+                found.push(l);
+            }
+        }
+        if (!next.length) break;
+        frontier = next;
+    }
+    return found;
 }
 
 // ---------------------------------------------------------------- 工具函数

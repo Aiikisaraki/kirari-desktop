@@ -36,6 +36,9 @@ async function dispatch(args: any, ctx: any = {}): Promise<string> {
         uid: ctx.uid,
         capScope: ctx.capScope,
         origin: ctx.origin,
+        // 角色决定能读哪些主题（owner/admin/user 阶梯），isOwner 仅为兼容旧调用
+        role: ctx.role,
+        isOwner: ctx.isOwner,
     });
 }
 

@@ -60,6 +60,13 @@ export interface BotIncoming {
   text: string;
   images: string[]; // base64 data URL 或 http(s) URL
   isGroup: boolean;
+  // ── 场合细节（2026-11-19 起采集）：原本这些字段在适配器里被整包丢弃，
+  //    导致模型不知道在跟谁说话、也不知道群里还有别人，只能套固定卖萌句式，
+  //    还可能把私聊内容说进群里。现在一路透传到 system prompt 的【当前场合】段。
+  senderName?: string; // 群名片 / 昵称
+  senderRole?: string; // owner / admin / member（OneBot 才有）
+  groupName?: string; // 群名（部分 OneBot 实现会在 message 帧带 group_name）
+  memberCount?: number; // 群人数（拿不到就留空）
 }
 
 // 后端 → 适配器 的统一出站消息

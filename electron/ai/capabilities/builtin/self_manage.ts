@@ -31,7 +31,13 @@ const capability: Capability = defineCapability({
 });
 
 async function dispatch(args: any, ctx: any = {}): Promise<string> {
-    return selfOps.manage(args?.action, args || {}, { sessionId: ctx.sessionId, uid: ctx.uid, origin: ctx.origin });
+    return selfOps.manage(args?.action, args || {}, {
+        sessionId: ctx.sessionId,
+        uid: ctx.uid,
+        origin: ctx.origin,
+        role: ctx.role,
+        isOwner: ctx.isOwner,
+    });
 }
 
 export { capability, dispatch };

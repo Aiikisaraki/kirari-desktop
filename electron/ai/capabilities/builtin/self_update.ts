@@ -34,7 +34,13 @@ async function dispatch(args: any, ctx: any = {}): Promise<string> {
     if (typeof args?.reason === "string" && args.reason.trim()) {
         policy.audit({ action: "self_update_reason", detail: args.reason.trim(), sessionId: ctx.sessionId, uid: ctx.uid, origin: ctx.origin });
     }
-    return selfOps.update(args?.fields, { sessionId: ctx.sessionId, uid: ctx.uid, origin: ctx.origin });
+    return selfOps.update(args?.fields, {
+        sessionId: ctx.sessionId,
+        uid: ctx.uid,
+        origin: ctx.origin,
+        role: ctx.role,
+        isOwner: ctx.isOwner,
+    });
 }
 
 export { capability, dispatch };

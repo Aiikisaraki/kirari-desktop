@@ -1,4 +1,5 @@
 import type { PetBackendResponse } from "./types";
+import type { RawScene } from "../ai/reply/sceneContext";
 import type { LocalKnowledge } from "../../src/knowledge/localKnowledge";
 import * as engine from "../ai/engine";
 import type { AiModelSettings } from "../ai/aiContext";
@@ -71,11 +72,13 @@ export class BotBackendClient {
         images: string[];
         sessionId: string;
         locationScope: string | null;
+        /** 场合信息：群聊/私聊、群名、发言人（注入 system prompt 用） */
+        scene?: RawScene | null;
     }): Promise<boolean> {
         const settings = this.readSettings();
         if (!engine.isConfigured(settings)) return false;
 
-        const { content, images, sessionId, locationScope } = payload;
+        const { content, images, sessionId, locationScope, scene = null } = payload;
         try {
             const result = await engine.chat({
                 settings: settings!,
@@ -83,6 +86,7 @@ export class BotBackendClient {
                 text: content,
                 images: Array.isArray(images) ? images : [],
                 locationScope: locationScope ?? null,
+                scene,
                 persona: collectBasePersona() || null,
                 skillPrompts: collectSkillPrompts(),
             });

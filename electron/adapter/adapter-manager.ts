@@ -5,6 +5,7 @@ import { BotBackendClient } from "./bot-backend-client";
 import type { AdapterConfig, AdapterStatus, BotIncoming, PetBackendResponse } from "./types";
 import type { LocalKnowledge } from "../../src/knowledge/localKnowledge";
 import * as db from "../ai/db/storage";
+import * as memory from "../ai/services/memory";
 
 // 主人在其他协议端（如 QQ）发起的对话，需要同步进桌宠聊天框。
 // 由 main.ts 注入一个回调，内部转发到 ChatSessionService.injectExternalMessage。
@@ -220,13 +221,38 @@ export class AdapterManager {
     this.knownAccounts.set(adapter.id, accts);
 
     // owner → scope=null（共享登录 uid）；guest → 独立 scope
-    const isOwner = adapter.ownerAccount != null && msg.senderId === adapter.ownerAccount;
+    // ⚠️ 必须同时要求「不是群聊」：群里的发言是多人上下文，即使发言人是主人，
+    //    也不能并进桌宠主对话——否则群聊内容会混进私聊历史，反向也会把私聊内容带到群里
+    //    （2026-11-19 用户报的隐私问题）。与核心版 botManager 的 isOwner 判定同语义。
+    //
+    // 注意区分两件事：
+    //   sessionId/scope —— 这段对话记在哪儿（群聊必须独立，见上）。
+    //   role            —— 这个人在管理权限上的级别（owner/admin/user），
+    //                      由 people 档案决定，与"她记得谁"无关。
+    // 每个说话的人都有自己的档案和记忆池，主人只是权限最高的那一位，不是唯一被记住的那位。
+    const isOwnerAccount = adapter.ownerAccount != null && msg.senderId === adapter.ownerAccount && !msg.isGroup;
+    let role = "user";
+    try {
+      const person = await memory.touchPerson({
+        personKey: msg.senderId,
+        displayName: msg.senderName || null,
+        platform: adapter.id,
+        // 配置里的 owner 账号首次出现时授予 owner；其余保持已有角色
+        role: isOwnerAccount ? "owner" : undefined,
+      });
+      role = person?.role || (isOwnerAccount ? "owner" : "user");
+    } catch (e: any) {
+      console.warn("[adapter] 人物档案更新失败（已忽略）:", e?.message || e);
+      role = isOwnerAccount ? "owner" : "user";
+    }
+    // 拥有者私聊才并入主对话；拥有者在群里不并（见上）。
+    const isOwner = isOwnerAccount && role === "owner" ? true : isOwnerAccount;
     const scope = isOwner ? null : `${adapter.id}::${msg.senderId}`;
     // 客人会话前缀必须是 bot-（不是 bot:）—— 两端 FOREIGN_SESSION_PREFIXES 都按
     // "bot-" 排除；用冒号会被 ensureLocalSessionId 当成本机会话并进主对话（群聊泄漏）。
     // 与核心版 botManager 的 bot-<适配器>-<对话键> 格式对齐。
     const sessionId = isOwner ? this.opts.getDesktopSessionId() : `bot-${adapter.id}-${msg.conversationKey}`;
-    console.log(`[adapter] isOwner=${isOwner} scope=${scope} session=${sessionId}`);
+    console.log(`[adapter] role=${role} isOwner=${isOwner} scope=${scope} session=${sessionId}`);
 
     // 主人账号：先把用户在协议端的输入同步到桌宠聊天框（与桌面自身发消息表现一致）。
     if (isOwner && this.opts.pushOwnerMessage) {
@@ -258,6 +284,20 @@ export class AdapterManager {
       images: msg.images,
       sessionId,
       locationScope: scope,
+      // 场合信息：让她知道在群聊/私聊、对谁说话，从而决定语气松紧与隐私边界。
+      scene: {
+        chatType: msg.isGroup ? "group" : "private",
+        groupId: msg.replyGroupId || "",
+        groupName: msg.groupName || "",
+        senderName: msg.senderName || "",
+        senderRole: msg.senderRole || "",
+        senderId: msg.senderId || "",
+        isOwner,
+        // 管理权限角色：只影响她能改什么设置，不影响她记得谁、怎么称呼谁
+        role,
+        memberCount: msg.memberCount,
+        platform: adapter.id,
+      },
     });
     console.log(`[adapter] backend.send → ${ok ? "已发送" : "失败(未连接)"}`);
     if (!ok) {

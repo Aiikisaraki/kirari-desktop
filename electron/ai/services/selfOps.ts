@@ -11,6 +11,7 @@ import * as modelConfig from "../../model-config";
 import { taskStore } from "../events/taskStore";
 import { jobStore } from "../events/jobStore";
 import * as policy from "./selfOpsPolicy";
+import * as memory from "./memory";
 import { homePath } from "../../kirari-home";
 
 export const TOPICS = ["readme", "capabilities", "settings", "models", "tasks", "reminders", "thinking", "diagnose", "logs", "audit"] as const;
@@ -20,6 +21,19 @@ export interface SelfCtx {
     uid?: number;
     capScope?: string;
     origin?: string;
+    /**
+     * 管理权限角色：owner / admin / user。
+     *
+     * 身份不是「主人 / 客人」二元，而是一条连续的管理权限阶梯：
+     *   owner —— 拥有者，最高管理权：全部可读、可改设置、可动任务提醒
+     *   admin —— 被信任的人：可读运行状态与能力，但改不了任何设定
+     *   user  —— 普通对话者：只有公开面（她是谁、能做什么、什么语气）
+     *
+     * 注意 role 只表达**管理权限**，不表达"她记得谁"——记忆按人分池，与权限无关。
+     * 缺省时由 isOwner 兜底推导（兼容旧调用点）。
+     */
+    role?: string | null;
+    isOwner?: boolean | null;
 }
 
 function friendlyTime(ms: number): string {
@@ -70,15 +84,67 @@ export function buildManifest(ctx: SelfCtx = {}): string {
 }
 
 /** 通用读。 */
+/**
+ * 角色 → 能读哪些自我运维主题。
+ * 见 SelfCtx.role 的说明：这是一条管理权限阶梯，不是"主人/客人"二元。
+ */
+const READ_TIERS: Record<string, string[] | null> = {
+    owner: null, // null = 全部
+    admin: ["readme", "capabilities", "thinking", "models", "diagnose"],
+    user: ["readme", "capabilities", "thinking"],
+};
+
+function readTier(role: string): string[] | null {
+    return role in READ_TIERS ? READ_TIERS[role] : READ_TIERS.user;
+}
+
+/**
+ * 从 ctx 解析角色。
+ *
+ * 缺省规则很重要：**本机对话就是拥有者本人在操作**——桌宠聊天框、控制台
+ * 这些入口没有经过任何 bot 适配器，只可能是设备主人自己。如果这里默认降级成
+ * 普通用户，她会连自己的设置都改不了，等于把最高权限入口锁死。
+ * 只有 bot- 前缀的远程会话（QQ 等平台进来的人）才需要按 people 档案判角色。
+ */
+function roleOf(ctx: SelfCtx): string {
+    if (ctx.role) return String(ctx.role);
+    if (ctx.isOwner === true) return "owner";
+    if (ctx.isOwner === false) return "user";
+    if (!ctx.sessionId || !/^bot[-:]/.test(String(ctx.sessionId))) return "owner";
+    return "user";
+}
+
+/**
+ * 场合闸门：群聊里说话所有成员都看得见。
+ *
+ * 这不是「群聊里没有权限」，而是「有些话不能在这个场合说出口」。
+ * 即便是 owner 本人，在群里读出自己的模型密钥/任务清单，也等于当众公开；
+ * 所以群聊里一律只保留公开面，让他私聊来问。
+ */
+function groupGate(topic: string, ctx: SelfCtx): string | null {
+    if (!memory.isGroupSession(ctx.sessionId)) return null;
+    const safePublic = ["readme", "capabilities", "thinking"];
+    if (safePublic.includes(topic)) return null;
+    return `现在是在群里，${topic} 这类私下的东西不方便当众说。要聊这个我们私聊。`;
+}
+
 export function read(topic: unknown, ctx: SelfCtx = {}): string {
     const t = String(topic || "readme").toLowerCase();
     const sid = ctx.sessionId;
+    const gate = groupGate(t, ctx);
+    if (gate) return gate;
+    const tier = readTier(roleOf(ctx));
+    if (tier && !tier.includes(t)) {
+        return `关于${t}这件事我暂时不方便跟你说细的。你要是想了解我能做什么，我可以讲讲。`;
+    }
     switch (t) {
         case "readme":
             return [
                 "# Kirari 自我说明",
-                "- 我是 Kirari，主人的虚拟桌宠少女。",
-                "- 我有这些通用能力工具：self_read（查询自己）、self_update（受控修改设置）、self_manage（增删改自己的任务与提醒）、load_skill（按需加载技能）、subagent（委派子任务），以及时间/天气/搜索/生图/plan/schedule_reminder。",
+                "- 我是 Kirari，一个虚拟桌宠少女，跑在拥有者的设备上。",
+                "- 跟我说话的人各有自己的档案和记忆：我记得每个人的事，但只在该说的时候说。",
+                "- 拥有者对我的设定有最高管理权；其他人可以跟我聊天、让我记事，但改不了我的设定。",
+                "- 我有这些通用能力工具：self_read（查询自己）、self_update（受控修改设置）、self_manage（增删改自己的任务与提醒）、memory（长期记忆）、load_skill（按需加载技能）、subagent（委派子任务），以及时间/天气/搜索/生图/plan/schedule_reminder。",
                 "- 完整工具清单在我的自我认知清单里；要查细节用 self_read(topic)。",
                 `- 可读 topic：${TOPICS.join(" / ")}。`,
                 "- 可写字段与校验规则见 self_update 的说明；凭证（key/apiKey/endpoint/token）只读，绝不读出明文也不给改。",
@@ -200,6 +266,16 @@ function applyField(key: string, value: unknown): void {
 
 /** 受控写：先全量校验，再写，逐项审计；agentProfile 结构失败整体回滚。 */
 export function update(fields: unknown, ctx: SelfCtx = {}): string {
+    // 改设置属于私下行为。群里不落笔改、也不回显改了什么（回显就是泄露），
+    // 拥有者自己在群里提也一样——让他私聊说一句，一句话就好。
+    if (memory.isGroupSession(ctx.sessionId)) {
+        return "group: 现在在群里，改自己设置的事我们私聊说。你私下跟我说一句，我立刻改。";
+    }
+    // 管理权是分级的：只有 owner 能改她的设定。admin 可以看、可以问，
+    // 但不能改——否则"被信任"就等于"被接管"了。
+    if (roleOf(ctx) !== "owner") {
+        return "noperm: 改设定这件事只有拥有者能做。你可以问我现在的状态，但改动得他点头。";
+    }
     if (!fields || typeof fields !== "object" || Array.isArray(fields)) {
         return "error: self_update 需要 fields 对象，例如 {\"thinking.mode\":\"on\"}";
     }
@@ -262,6 +338,15 @@ export function manage(action: unknown, args: any = {}, ctx: SelfCtx = {}): stri
     const a = String(action || "");
     if (!(MANAGE_ACTIONS as readonly string[]).includes(a)) {
         return `error: 未知 action「${a}」。可用：${MANAGE_ACTIONS.join(" / ")}`;
+    }
+    // 群里不操作提醒/任务：建了、改了、取消了都会在群里回显，等于把私下的安排公开。
+    if (memory.isGroupSession(ctx.sessionId)) {
+        return "group: 提醒和任务的事我们私聊弄，群里说一声就行，具体我来记。";
+    }
+    // 任务/提醒是拥有者的私人安排，只有他能改。别人可以让我记新的事，
+    // 但不能动已经排好的东西。
+    if (roleOf(ctx) !== "owner") {
+        return "noperm: 提醒和任务是拥有者那边排的，我不能替他改。你要是想让我记点什么，直接跟我说。";
     }
     const now = Date.now();
 
