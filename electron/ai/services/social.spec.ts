@@ -159,4 +159,25 @@ describe("social（人际环境与周围世界）", () => {
         expect(p!.contact?.nickname).toBeTruthy();
         expect(p!.groups.map((g) => g.groupId)).toContain("111");
     });
+
+    it("带连字符的 adapterId 不会把查询过滤成空（线上真实形态）", async () => {
+        // 实测线上的适配器 id 是 bot-mvwi1tw3-x1b5 这种自带连字符的。
+        // 早期用 /^bot-([^-]+)-/ 切 sessionId 只抓到第一段，导致
+        // social 查询全部按错误 adapterId 过滤成空 —— 她又会"答不上来"。
+        const hyphenId = "adp-abc-123";
+        await db.upsertSocialGroups(hyphenId, [{ groupId: "900", groupName: "连字符群", memberCount: 5 }]);
+        const { dispatch } = await import("../capabilities/builtin/social");
+        const out = await dispatch({ action: "overview" }, { sessionId: `bot-${hyphenId}-private:1001` });
+        // 只有 1 个群，且不是"还没同步"的降级提示
+        expect(out).toContain("1 个");
+        expect(out).not.toContain("还没同步");
+    });
+
+    it("三种会话键（group/private/channel）都能切出 adapterId", async () => {
+        const { dispatch } = await import("../capabilities/builtin/social");
+        for (const key of ["group:900:1001", "private:1001", "channel:chan1"]) {
+            const out = await dispatch({ action: "overview" }, { sessionId: `bot-adp-abc-123-${key}` });
+            expect(out, key).toContain("1 个");
+        }
+    });
 });

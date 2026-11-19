@@ -58,9 +58,20 @@ const capability: Capability = defineCapability({
     truncateChars: 6000,
 });
 
-/** 从会话 id 里猜适配器（bot-<adapterId>-... 形状）。 */
+/**
+ * 从会话 id 里切出适配器。
+ *
+ * 会话 id 形状是 `bot-<adapterId>-<conversationKey>`，conversationKey 只有
+ * 固定几种开头（group:/private:/channel:/dm:），所以按"会话键前缀"回切才稳。
+ *
+ * ⚠️ 千万别写成 /^bot-([^-]+)-/ —— 适配器 id 本身可能含连字符
+ * （线上实测 `bot-mvwi1tw3-x1b5`），那样只切到 `mvwi1tw3`，社交查询会全被
+ * 错误的 adapterId 过滤成空，她又会答"我不知道自己在哪些群"。
+ */
+const CONVERSATION_KEY_RE = /^bot-(.+?)-(?:group|private|channel|dm):/i;
+
 function adapterFromSession(sessionId?: string): string | null {
-    const m = String(sessionId || "").match(/^bot-([^-]+)-/);
+    const m = String(sessionId || "").match(CONVERSATION_KEY_RE);
     return m ? m[1] : null;
 }
 
