@@ -171,7 +171,10 @@ export async function buildEnvironmentBlock(opts: { adapterId?: string | null } 
 
         const lines: string[] = [];
         lines.push("\n\n【你周围的环境 · 这些是事实，不用猜】");
-        if (opts.adapterId) lines.push(`- 接入方式：${opts.adapterId}（OneBot 协议端）。`);
+        if (opts.adapterId) {
+            // 别把内部适配器 id 念给她听——那是实现细节，她只会在回答里复读乱码。
+            lines.push(`- 你现在是通过 QQ（OneBot 协议端）跟人联系的。`);
+        }
         lines.push(
             `- 你在 ${overview.groups} 个群里，通讯录里有 ${overview.contacts} 个好友；` +
                 `这些群里一共有 ${overview.members} 个不同的人。`,
