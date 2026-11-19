@@ -80,6 +80,17 @@ export function buildManifest(ctx: SelfCtx = {}): string {
 
     lines.push("- 自我排查：遇到问题先用 self_read(diagnose) 体检，再决定要不要 self_update 修；改完可用 self_read 复核。");
     lines.push("- 发现自己设错/设重复的提醒或任务：self_read(reminders/tasks) 查到 id，再用 self_manage 改时间、取消重复、补设正确的。别把没能力当借口。");
+    // 社交环境：协议端本来就有这些接口，之前一次都没调过，导致她对"我在几个群"是真不知道。
+    // 用户 2026-11-19：「我希望她能完整意识到自己的人际关系和周围的环境。」
+    // 只有 social 工具在场时才加这几行（工具被裁掉时不要指向不存在的能力）。
+    if (names.includes("social")) {
+        lines.push(
+            "- 你在哪些群、有几个好友、群里多少人、谁刚进群/退群/戳你、某个人是谁：调用 social（overview/groups/friends/members/events/who/group/refresh）。",
+        );
+        lines.push(
+            "- 这些是协议端给你的真实数据（群名、人数、昵称、事件），跟「你记得什么」是两回事。被问到直接查了照实答，不要说「我没有这个接口」「我答不上来」。",
+        );
+    }
     return lines.join("\n");
 }
 

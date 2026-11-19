@@ -251,6 +251,64 @@ const SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_memory_links_a ON memory_links(a, relation);
   CREATE INDEX IF NOT EXISTS idx_memory_links_b ON memory_links(b, relation);
 
+  -- ── 社交环境快照（她所处的真实世界）────────────────────────────────
+  -- 用户 2026-11-19：「我希望她能完整意识到自己的人际关系和周围的环境」——
+  -- 「我在几个群」「有几个好友」「群里有多少人」这些是**协议端就知道**的事实，
+  -- 不该靠猜。这些表缓存 get_group_list / get_friend_list / get_group_member_list
+  -- 的结果，以及 notice 事件（谁加群/退群/戳一戳），让她随时能查到自己的处境。
+  -- 与核心版 dbStorage.js 的 social_* 表同名同结构（共用同一个库文件）。
+  CREATE TABLE IF NOT EXISTS social_groups (
+    adapter_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    group_name TEXT,
+    member_count INTEGER,
+    max_member_count INTEGER,
+    notes TEXT,
+    reply_enabled INTEGER NOT NULL DEFAULT 0,
+    first_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (adapter_id, group_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS social_contacts (
+    adapter_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    nickname TEXT,
+    remark TEXT,
+    person_key TEXT,
+    first_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (adapter_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_social_contacts_person ON social_contacts(person_key);
+
+  CREATE TABLE IF NOT EXISTS social_group_members (
+    adapter_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    nickname TEXT,
+    card TEXT,
+    role TEXT,
+    last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (adapter_id, group_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_social_members_group ON social_group_members(adapter_id, group_id);
+  CREATE INDEX IF NOT EXISTS idx_social_members_user ON social_group_members(adapter_id, user_id);
+
+  -- 环境事件流：notice 帧（进群/退群/戳一戳/名片变更…）。
+  CREATE TABLE IF NOT EXISTS social_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    adapter_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    group_id TEXT,
+    actor_id TEXT,
+    target_id TEXT,
+    detail TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS idx_social_events_time ON social_events(created_at);
+  CREATE INDEX IF NOT EXISTS idx_social_events_group ON social_events(adapter_id, group_id, created_at);
+
   -- 轻量键值对（与核心版 dbStorage.js 同名同结构）。
   -- 当前用途：记「旧版聊天记录已迁移」这类一次性动作的完成凭据 —— 迁移成功后写入键，
   -- 之后无论源文件还在不在（已被删 / 被改名 / 用户手工放回来）都不会重复导入。
@@ -1019,6 +1077,341 @@ export async function expandLinks(
         frontier = next;
     }
     return found;
+}
+
+// ---------------------------------------------------------------- 社交环境
+// 用户 2026-11-19：「我希望她能完整意识到自己的人际关系和周围的环境。」
+// 这些是协议端就知道的事实（几个群/几个好友/群里多少人/谁加群了/谁戳你了），
+// 缓存下来她随时能查，而不是靠猜或答"我没有接口"。
+// 与核心版 dbStorage.js 的 social_* DAO 同名同语义，两端共用同一个库文件。
+
+export type SocialGroupRow = {
+    adapterId: string;
+    groupId: string;
+    groupName: string | null;
+    memberCount: number | null;
+    maxMemberCount: number | null;
+    notes: string | null;
+    replyEnabled: boolean;
+    firstSeenAt: string;
+    lastSyncedAt: string;
+};
+
+export type SocialContactRow = {
+    adapterId: string;
+    userId: string;
+    nickname: string | null;
+    remark: string | null;
+    personKey: string | null;
+    firstSeenAt: string;
+    lastSyncedAt: string;
+};
+
+export type SocialMemberRow = {
+    adapterId: string;
+    groupId: string;
+    userId: string;
+    nickname: string | null;
+    card: string | null;
+    role: string | null;
+    lastSyncedAt: string;
+};
+
+export type SocialEventRow = {
+    id: number;
+    adapterId: string;
+    eventType: string;
+    groupId: string | null;
+    actorId: string | null;
+    targetId: string | null;
+    detail: string | null;
+    createdAt: string;
+};
+
+/** 安全转整数：NaN/空值一律给 null，避免把 undefined 写进 SQLite。 */
+function toInt(v: unknown): number | null {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.trunc(n) : null;
+}
+
+function strOrNull(v: unknown): string | null {
+    if (v == null) return null;
+    const s = String(v).trim();
+    return s ? s.slice(0, 2000) : null;
+}
+
+function mapSocialGroupRow(r: Record<string, unknown>): SocialGroupRow {
+    return {
+        adapterId: String(r.adapter_id),
+        groupId: String(r.group_id),
+        groupName: (r.group_name as string) || null,
+        memberCount: r.member_count as number | null,
+        maxMemberCount: r.max_member_count as number | null,
+        notes: (r.notes as string) || null,
+        replyEnabled: !!r.reply_enabled,
+        firstSeenAt: String(r.first_seen_at),
+        lastSyncedAt: String(r.last_synced_at),
+    };
+}
+
+function mapSocialContactRow(r: Record<string, unknown>): SocialContactRow {
+    return {
+        adapterId: String(r.adapter_id),
+        userId: String(r.user_id),
+        nickname: (r.nickname as string) || null,
+        remark: (r.remark as string) || null,
+        personKey: (r.person_key as string) || null,
+        firstSeenAt: String(r.first_seen_at),
+        lastSyncedAt: String(r.last_synced_at),
+    };
+}
+
+function mapSocialMemberRow(r: Record<string, unknown>): SocialMemberRow {
+    return {
+        adapterId: String(r.adapter_id),
+        groupId: String(r.group_id),
+        userId: String(r.user_id),
+        nickname: (r.nickname as string) || null,
+        card: (r.card as string) || null,
+        role: (r.role as string) || null,
+        lastSyncedAt: String(r.last_synced_at),
+    };
+}
+
+function mapSocialEventRow(r: Record<string, unknown>): SocialEventRow {
+    return {
+        id: Number(r.id),
+        adapterId: String(r.adapter_id),
+        eventType: String(r.event_type),
+        groupId: (r.group_id as string) || null,
+        actorId: (r.actor_id as string) || null,
+        targetId: (r.target_id as string) || null,
+        detail: (r.detail as string) || null,
+        createdAt: String(r.created_at),
+    };
+}
+
+export async function upsertSocialGroups(
+    adapterId: string,
+    groups: { groupId: string; groupName?: string | null; memberCount?: number | null; maxMemberCount?: number | null }[],
+): Promise<number> {
+    const ad = String(adapterId || "");
+    if (!ad) return 0;
+    const stmt = getDb().prepare(
+        `INSERT INTO social_groups (adapter_id, group_id, group_name, member_count, max_member_count)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(adapter_id, group_id) DO UPDATE SET
+           group_name = COALESCE(excluded.group_name, social_groups.group_name),
+           member_count = COALESCE(excluded.member_count, social_groups.member_count),
+           max_member_count = COALESCE(excluded.max_member_count, social_groups.max_member_count),
+           last_synced_at = CURRENT_TIMESTAMP`,
+    );
+    let n = 0;
+    for (const g of Array.isArray(groups) ? groups : []) {
+        const gid = String(g.groupId || "").trim();
+        if (!gid) continue;
+        n += stmt.run(ad, gid, g.groupName || null, toInt(g.memberCount), toInt(g.maxMemberCount)).changes;
+    }
+    return n;
+}
+
+export async function listSocialGroups(adapterId: string | null = null): Promise<SocialGroupRow[]> {
+    const db = getDb();
+    const rows = adapterId
+        ? db.prepare("SELECT * FROM social_groups WHERE adapter_id = ? ORDER BY member_count DESC, group_id ASC").all(adapterId)
+        : db.prepare("SELECT * FROM social_groups ORDER BY adapter_id ASC, member_count DESC").all();
+    return (rows as Record<string, unknown>[]).map(mapSocialGroupRow);
+}
+
+export async function getSocialGroup(adapterId: string, groupId: string): Promise<SocialGroupRow | null> {
+    const row = getDb()
+        .prepare("SELECT * FROM social_groups WHERE adapter_id = ? AND group_id = ?")
+        .get(String(adapterId || ""), String(groupId || "")) as Record<string, unknown> | undefined;
+    return row ? mapSocialGroupRow(row) : null;
+}
+
+export async function setSocialGroupNotes(adapterId: string, groupId: string, notes: string): Promise<boolean> {
+    const info = getDb()
+        .prepare("UPDATE social_groups SET notes = ? WHERE adapter_id = ? AND group_id = ?")
+        .run(String(notes || "").slice(0, 2000), String(adapterId || ""), String(groupId || ""));
+    return info.changes > 0;
+}
+
+/** 同步适配器配置里"哪些群允许回复"，让她知道自己在这群能不能开口。 */
+export async function syncGroupReplyFlags(
+    adapterId: string,
+    cfg: { groupReplyMode?: string; groupFilter?: string; groupAllowlist?: string[]; groupBlocklist?: string[] } = {},
+): Promise<number> {
+    const ad = String(adapterId || "");
+    if (!ad) return 0;
+    const db = getDb();
+    db.prepare("UPDATE social_groups SET reply_enabled = 0 WHERE adapter_id = ?").run(ad);
+    const mode = String(cfg.groupReplyMode || "off");
+    if (mode === "off") return 0;
+    const filter = String(cfg.groupFilter || "whitelist");
+    let allow: string[] = [];
+    if (filter === "whitelist") allow = (cfg.groupAllowlist || []).map(String).filter(Boolean);
+    else {
+        const block = new Set((cfg.groupBlocklist || []).map(String).filter(Boolean));
+        allow = (db.prepare("SELECT group_id FROM social_groups WHERE adapter_id = ?").all(ad) as { group_id: string }[])
+            .map((r) => r.group_id)
+            .filter((g) => !block.has(g));
+    }
+    const stmt = db.prepare("UPDATE social_groups SET reply_enabled = 1 WHERE adapter_id = ? AND group_id = ?");
+    let n = 0;
+    for (const g of allow) n += stmt.run(ad, g).changes;
+    return n;
+}
+
+export async function upsertSocialContacts(
+    adapterId: string,
+    contacts: { userId: string; nickname?: string | null; remark?: string | null }[],
+): Promise<number> {
+    const ad = String(adapterId || "");
+    if (!ad) return 0;
+    const stmt = getDb().prepare(
+        `INSERT INTO social_contacts (adapter_id, user_id, nickname, remark, person_key)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(adapter_id, user_id) DO UPDATE SET
+           nickname = COALESCE(excluded.nickname, social_contacts.nickname),
+           remark = COALESCE(excluded.remark, social_contacts.remark),
+           person_key = COALESCE(excluded.person_key, social_contacts.person_key),
+           last_synced_at = CURRENT_TIMESTAMP`,
+    );
+    let n = 0;
+    for (const c of Array.isArray(contacts) ? contacts : []) {
+        const uid = String(c.userId || "").trim();
+        if (!uid) continue;
+        n += stmt.run(ad, uid, c.nickname || null, c.remark || null, uid).changes;
+    }
+    return n;
+}
+
+export async function listSocialContacts(adapterId: string | null = null): Promise<SocialContactRow[]> {
+    const db = getDb();
+    const rows = adapterId
+        ? db.prepare("SELECT * FROM social_contacts WHERE adapter_id = ? ORDER BY user_id ASC").all(adapterId)
+        : db.prepare("SELECT * FROM social_contacts ORDER BY adapter_id ASC, user_id ASC").all();
+    return (rows as Record<string, unknown>[]).map(mapSocialContactRow);
+}
+
+/** 整组替换某群的成员表（成员变动后重新拉一遍最省事）。 */
+export async function replaceGroupMembers(
+    adapterId: string,
+    groupId: string,
+    members: { userId: string; nickname?: string | null; card?: string | null; role?: string | null }[],
+): Promise<number> {
+    const ad = String(adapterId || "");
+    const gid = String(groupId || "");
+    if (!ad || !gid) return 0;
+    const db = getDb();
+    db.prepare("DELETE FROM social_group_members WHERE adapter_id = ? AND group_id = ?").run(ad, gid);
+    const stmt = db.prepare(
+        `INSERT INTO social_group_members (adapter_id, group_id, user_id, nickname, card, role)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(adapter_id, group_id, user_id) DO UPDATE SET
+           nickname = excluded.nickname, card = excluded.card, role = excluded.role,
+           last_synced_at = CURRENT_TIMESTAMP`,
+    );
+    let n = 0;
+    for (const m of Array.isArray(members) ? members : []) {
+        const uid = String(m.userId || "").trim();
+        if (!uid) continue;
+        n += stmt.run(ad, gid, uid, m.nickname || null, m.card || null, m.role || null).changes;
+    }
+    return n;
+}
+
+export async function listGroupMembers(adapterId: string, groupId: string, limit = 500): Promise<SocialMemberRow[]> {
+    // 排序：群主 → 管理员 → 普通成员。直接 ORDER BY role ASC 会得到
+    // admin/member/owner 的字母序（把群主排到最后），所以显式给权重。
+    const rows = getDb()
+        .prepare(
+            `SELECT * FROM social_group_members WHERE adapter_id = ? AND group_id = ?
+             ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END ASC, user_id ASC
+             LIMIT ?`,
+        )
+        .all(String(adapterId || ""), String(groupId || ""), Math.min(2000, Math.max(1, Number(limit) || 500)));
+    return (rows as Record<string, unknown>[]).map(mapSocialMemberRow);
+}
+
+/** 某人在哪些群里（反查「他和我共同在哪个群」）。 */
+export async function groupsOfMember(adapterId: string, userId: string): Promise<SocialGroupRow[]> {
+    const rows = getDb()
+        .prepare(
+            `SELECT g.* FROM social_groups g
+             JOIN social_group_members m ON m.adapter_id = g.adapter_id AND m.group_id = g.group_id
+             WHERE m.adapter_id = ? AND m.user_id = ?
+             ORDER BY g.member_count DESC`,
+        )
+        .all(String(adapterId || ""), String(userId || ""));
+    return (rows as Record<string, unknown>[]).map(mapSocialGroupRow);
+}
+
+export async function addSocialEvent(row: {
+    adapterId: string;
+    eventType: string;
+    groupId?: string | null;
+    actorId?: string | null;
+    targetId?: string | null;
+    detail?: string | null;
+}): Promise<boolean> {
+    const ad = String(row?.adapterId || "");
+    const type = String(row?.eventType || "").trim();
+    if (!ad || !type) return false;
+    getDb()
+        .prepare(
+            `INSERT INTO social_events (adapter_id, event_type, group_id, actor_id, target_id, detail)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+            ad,
+            type,
+            strOrNull(row.groupId),
+            strOrNull(row.actorId),
+            strOrNull(row.targetId),
+            strOrNull(row.detail),
+        );
+    return true;
+}
+
+export async function listSocialEvents(
+    opts: { adapterId?: string | null; groupId?: string | null; limit?: number } = {},
+): Promise<SocialEventRow[]> {
+    const where: string[] = [];
+    const args: unknown[] = [];
+    if (opts.adapterId) {
+        where.push("adapter_id = ?");
+        args.push(String(opts.adapterId));
+    }
+    if (opts.groupId) {
+        where.push("group_id = ?");
+        args.push(String(opts.groupId));
+    }
+    const sql = `SELECT * FROM social_events${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY id DESC LIMIT ?`;
+    args.push(Math.min(500, Math.max(1, Number(opts.limit) || 50)));
+    const rows = getDb().prepare(sql).all(...args);
+    return (rows as Record<string, unknown>[]).map(mapSocialEventRow);
+}
+
+/** 整体社交概况：几个群、几个好友、多少成员、最近事件。 */
+export async function socialOverview(
+    adapterId: string | null = null,
+): Promise<{ groups: number; contacts: number; members: number; people: number; events: number }> {
+    const db = getDb();
+    const whereAd = adapterId ? " WHERE adapter_id = ?" : "";
+    const args = adapterId ? [String(adapterId)] : [];
+    const count = (sql: string, a: unknown[] = []): number => {
+        const r = db.prepare(sql).get(...a) as { n: number } | undefined;
+        return r ? r.n : 0;
+    };
+    return {
+        groups: count(`SELECT COUNT(*) AS n FROM social_groups${whereAd}`, args),
+        contacts: count(`SELECT COUNT(*) AS n FROM social_contacts${whereAd}`, args),
+        members: count(`SELECT COUNT(DISTINCT user_id) AS n FROM social_group_members${whereAd}`, args),
+        people: count("SELECT COUNT(*) AS n FROM people"),
+        events: count(`SELECT COUNT(*) AS n FROM social_events${whereAd}`, args),
+    };
 }
 
 // ---------------------------------------------------------------- 工具函数

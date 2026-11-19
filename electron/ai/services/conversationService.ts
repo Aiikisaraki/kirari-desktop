@@ -25,6 +25,7 @@ import { buildTimeContext } from "../reply/timeContext";
 import { buildSceneContext, type RawScene } from "../reply/sceneContext";
 import { buildCharter } from "../reply/charter";
 import * as memory from "./memory";
+import * as social from "./social";
 import * as selfOps from "./selfOps";
 import * as locationSvc from "./locationService";
 import { streamChatCompletion, polishToolResult } from "../reply/streaming";
@@ -405,6 +406,19 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
 
         // 元指令（根本准则）：比人格更高一层，约束底线行为。永远追加、不可被覆盖。
         systemPrompt += buildCharter();
+
+        // 社交环境：几个群、几个好友、多少人在周围、谁刚进群/戳她。
+        // 用户 2026-11-19：「我希望她能完整意识到自己的人际关系和周围的环境。」
+        // 这些是协议端的真实数据，不是记忆——两者互不替代（记忆走下面的 memory 块）。
+        try {
+            const envBlock = await social.buildEnvironmentBlock({
+                adapterId: scene?.platform ? String(scene.platform) : null,
+            });
+            if (envBlock) systemPrompt += envBlock;
+        } catch (e: any) {
+            // 环境摘要是增强项，读失败也不能让整轮回复挂掉
+            console.warn("[conversationService] 社交环境摘要注入失败（已忽略）:", e?.message || e);
+        }
 
         // 长期记忆：按当前场合可见的记忆池做联想检索（跨对话存续的关键）。
         try {

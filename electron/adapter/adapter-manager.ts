@@ -2,10 +2,20 @@ import { BotAdapter } from "./bot-adapter";
 import { OneBotAdapter } from "./onebot-adapter";
 import { QQOfficialAdapter } from "./qqofficial-adapter";
 import { BotBackendClient } from "./bot-backend-client";
-import type { AdapterConfig, AdapterStatus, BotIncoming, PetBackendResponse } from "./types";
+import type { AdapterConfig, AdapterStatus, BotIncoming, BotNotice, PetBackendResponse } from "./types";
 import type { LocalKnowledge } from "../../src/knowledge/localKnowledge";
 import * as db from "../ai/db/storage";
 import * as memory from "../ai/services/memory";
+import * as social from "../ai/services/social";
+
+// 当前存活的 AdapterManager 单例，供能力层（social 的 refresh 动作）拿到
+// 正在运行的适配器实例去协议端重新拉数据。main.ts 每次重建都会覆盖。
+let activeManager: AdapterManager | null = null;
+
+/** 取一个正在运行的适配器实例；没有就返回 null（能力层据此给出人话提示）。 */
+export function getAdapter(adapterId?: string): BotAdapter | null {
+  return activeManager ? activeManager.getAdapter(adapterId) : null;
+}
 
 // 主人在其他协议端（如 QQ）发起的对话，需要同步进桌宠聊天框。
 // 由 main.ts 注入一个回调，内部转发到 ChatSessionService.injectExternalMessage。
@@ -50,16 +60,77 @@ export class AdapterManager {
   init(): void {
     if (this.inited) return;
     this.inited = true;
+    activeManager = this;
     const configs = this.opts.getAdaptersConfig();
     for (const cfg of configs) {
       const inst = this.createInstance(cfg);
       if (!inst) continue;
-      this.instances.set(cfg.id, inst);
-      this.knownAccounts.set(cfg.id, new Set());
-      inst.on("message", (msg: BotIncoming) => void this.handleIncoming(inst, msg));
+      this.attach(inst);
       if (cfg.enabled) inst.connect();
     }
     this.backend.connect();
+  }
+
+  /**
+   * 统一挂载事件监听：消息、环境事件（notice）、连接就绪。
+   * 社交环境同步（群列表/好友/群成员）必须在 ready 之后做——刚 open 时协议端
+   * 可能还没准备好接受 action 调用。
+   */
+  private attach(inst: BotAdapter): void {
+    this.instances.set(inst.id, inst);
+    if (!this.knownAccounts.has(inst.id)) this.knownAccounts.set(inst.id, new Set());
+    inst.on("message", (msg: BotIncoming) => void this.handleIncoming(inst, msg));
+    inst.on("notice", (evt: BotNotice) => void this.handleNotice(inst, evt));
+    inst.on("ready", () => void this.syncSocial(inst));
+  }
+
+  /** 拉一遍这个适配器的社交环境（群、好友、群成员），失败只记日志。 */
+  private async syncSocial(inst: BotAdapter): Promise<void> {
+    try {
+      const cfg = this.opts.getAdaptersConfig().find((c) => c.id === inst.id);
+      const r = await social.syncAdapter(inst as any, (cfg?.config || {}) as Record<string, unknown>);
+      if (r.ok) {
+        console.log(`[social] ${inst.id} 社交环境已同步：${r.groups} 群 / ${r.friends} 好友 / ${r.members} 群成员`);
+      } else {
+        console.log(`[social] ${inst.id} 跳过同步（${r.reason}）`);
+      }
+    } catch (e: any) {
+      console.warn("[social] 同步失败（已忽略）:", e?.message || e);
+    }
+  }
+
+  /**
+   * 环境事件落库；成员变动（进群/退群）稍后刷新该群成员表。
+   * 请求类事件（加好友/加群）只记录——同意与否是人的决定，不能自动放行。
+   */
+  private async handleNotice(inst: BotAdapter, evt: BotNotice): Promise<void> {
+    try {
+      await social.recordEvent({
+        adapterId: evt.adapterId || inst.id,
+        eventType: evt.eventType,
+        groupId: evt.groupId || null,
+        actorId: evt.actorId || null,
+        targetId: evt.targetId || null,
+        detail: evt.detail || null,
+      });
+      console.log(`[social] 事件 ${evt.eventType} ${evt.detail || ""}`);
+    } catch (e: any) {
+      console.warn("[social] 事件落库失败（已忽略）:", e?.message || e);
+    }
+    // 有人进出群 → 过 3 秒重拉成员表（等协议端状态稳定）
+    if (evt.groupId && social.affectsMembership(evt.eventType)) {
+      setTimeout(() => {
+        void social
+          .refreshGroup(inst as any, String(evt.groupId))
+          .catch((e) => console.warn("[social] 刷新群成员失败（已忽略）:", e?.message || e));
+      }, 3000);
+    }
+  }
+
+  /** 取一个正在运行的适配器实例（能力层「刷新」用）。 */
+  getAdapter(adapterId?: string): BotAdapter | null {
+    if (adapterId) return this.instances.get(adapterId) || null;
+    return this.instances.values().next().value || null;
   }
 
   private createInstance(cfg: AdapterConfig): BotAdapter | null {
@@ -95,9 +166,7 @@ export class AdapterManager {
 
     const inst = this.createInstance(full);
     if (inst) {
-      this.instances.set(id, inst);
-      this.knownAccounts.set(id, new Set());
-      inst.on("message", (msg: BotIncoming) => void this.handleIncoming(inst, msg));
+      this.attach(inst);
       if (full.enabled) inst.connect();
     }
     this.emitStatus();
@@ -278,6 +347,23 @@ export class AdapterManager {
         });
       }
     };
+    // 群名/人数：消息帧里通常没有，从 social 缓存里补。
+    // 没有这一步，「当前场合」段就只剩「一个群里」，她不知道自己身处几十人的什么群，
+    // 语气和分寸都无从判断（用户 2026-11-19 报的问题之一）。
+    let groupName = msg.groupName || "";
+    let memberCount = msg.memberCount;
+    if (msg.isGroup && msg.replyGroupId) {
+      try {
+        const g = await db.getSocialGroup(adapter.id, msg.replyGroupId);
+        if (g) {
+          if (!groupName && g.groupName) groupName = g.groupName;
+          if (typeof memberCount !== "number" && typeof g.memberCount === "number") memberCount = g.memberCount;
+        }
+      } catch (e: any) {
+        console.warn("[adapter] 读取群信息失败（已忽略）:", e?.message || e);
+      }
+    }
+
     this.backend.onResponse(sessionId, onResp);
     const ok = await this.backend.send({
       content: msg.text,
@@ -288,14 +374,14 @@ export class AdapterManager {
       scene: {
         chatType: msg.isGroup ? "group" : "private",
         groupId: msg.replyGroupId || "",
-        groupName: msg.groupName || "",
+        groupName,
         senderName: msg.senderName || "",
         senderRole: msg.senderRole || "",
         senderId: msg.senderId || "",
         isOwner,
         // 管理权限角色：只影响她能改什么设置，不影响她记得谁、怎么称呼谁
         role,
-        memberCount: msg.memberCount,
+        memberCount,
         platform: adapter.id,
       },
     });
@@ -315,5 +401,6 @@ export class AdapterManager {
   dispose(): void {
     for (const inst of this.instances.values()) inst.disconnect();
     this.backend.disconnect();
+    if (activeManager === this) activeManager = null;
   }
 }

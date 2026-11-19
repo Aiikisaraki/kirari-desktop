@@ -13,6 +13,8 @@ export class OneBotAdapter extends BotAdapter {
   private loginEcho = "";
   // get_image 异步回调：echo → { resolve, timer }，用于把 OneBot 缓存文件名解析为真实图片字节。
   private pendingImages = new Map<string, { resolve: (v: string | null) => void; timer: ReturnType<typeof setTimeout> }>();
+  // 通用 action 回调等待表（callAction 用）：echo -> { resolve, timer }
+  private pendingActions = new Map<string, { resolve: (v: any) => void; timer: ReturnType<typeof setTimeout> }>();
 
   connect(): void {
     if (this.disposed || this.ws) return;
@@ -54,6 +56,15 @@ export class OneBotAdapter extends BotAdapter {
       this.setError("");
       console.log(`[onebot] 已连接 ${this.name}`);
       this.fetchLoginInfo();
+      // 连上就把「我周围有什么」拉一遍：群列表、好友、群成员。
+      // 不阻塞消息处理，失败也只是保留旧缓存。（由 adapter-manager 监听 ready 事件）
+      setTimeout(() => {
+        try {
+          this.emit("ready");
+        } catch (e) {
+          console.warn("[onebot] 社交环境同步失败（已忽略）:", e instanceof Error ? e.message : e);
+        }
+      }, 1500);
     };
     ws.onmessage = (ev: { data: string }) => this.handleFrame(ev.data);
     ws.onclose = () => {
@@ -82,6 +93,8 @@ export class OneBotAdapter extends BotAdapter {
     // 清理未完成的 get_image 等待，避免泄漏/悬挂回调
     for (const pend of this.pendingImages.values()) clearTimeout(pend.timer);
     this.pendingImages.clear();
+    for (const pend of this.pendingActions.values()) clearTimeout(pend.timer);
+    this.pendingActions.clear();
     if (this.ws) {
       try {
         this.ws.close();
@@ -133,7 +146,32 @@ export class OneBotAdapter extends BotAdapter {
       if (frame.echo === this.loginEcho && frame.data && frame.data.user_id) {
         this.selfQQ = String(frame.data.user_id);
         console.log(`[onebot] 登录账号 QQ=${this.selfQQ}`);
+        return;
       }
+      // 通用 callAction 回包（get_group_list / get_friend_list / get_group_member_list …）
+      if (typeof frame.echo === "string" && frame.echo.startsWith("kirari-act-")) {
+        const pend = this.pendingActions.get(frame.echo);
+        if (pend) {
+          clearTimeout(pend.timer);
+          this.pendingActions.delete(frame.echo);
+          // retcode 非 0（接口未实现/权限不足）也当失败，返回 null 让上层降级
+          const ok = frame.retcode === 0 || frame.retcode === undefined;
+          pend.resolve(ok ? (frame.data ?? null) : null);
+        }
+        return;
+      }
+      return;
+    }
+
+    // notice 帧：谁进群/退群、谁戳一戳、名片变了……
+    // 这些原来被 post_type !== "message" 整包丢弃，她对"身边发生了什么"完全无感。
+    if (frame && frame.post_type === "notice") {
+      this.handleNotice(frame);
+      return;
+    }
+    // 请求帧（加好友/加群邀请）：只记录，不自动同意——涉及身份决策必须交给人。
+    if (frame && frame.post_type === "request") {
+      this.handleRequest(frame);
       return;
     }
     // 只处理事件推送（post_type 存在）
@@ -229,6 +267,178 @@ export class OneBotAdapter extends BotAdapter {
     } catch {
       /* ignore */
     }
+  }
+
+  // ── 社交环境拉取（她所处真实世界的事实来源）─────────────────────────
+  // 用户 2026-11-19：「我希望她能完整意识到自己的人际关系和周围的环境。」
+  // 这几组接口协议端本来就有，之前一次都没调过，所以她对"我在几个群"是真不知道。
+
+  /**
+   * 通用 OneBot action 调用：发一帧 {action, params, echo}，等回包。
+   * 与核心版 onebotAdapter.callAction 同语义。
+   */
+  private callAction(action: string, params: Record<string, unknown> = {}, timeoutMs = 8000): Promise<any> {
+    return new Promise((resolve) => {
+      if (!this.ws || this.ws.readyState !== 1) {
+        resolve(null);
+        return;
+      }
+      const echo = `kirari-act-${++this.echoSeq}`;
+      const timer = setTimeout(() => {
+        this.pendingActions.delete(echo);
+        resolve(null);
+      }, Math.max(500, timeoutMs));
+      this.pendingActions.set(echo, { resolve, timer });
+      try {
+        this.ws.send(JSON.stringify({ action, params: params || {}, echo }));
+      } catch {
+        clearTimeout(timer);
+        this.pendingActions.delete(echo);
+        resolve(null);
+      }
+    });
+  }
+
+  /** 我加入了哪些群（含群名/人数）。 */
+  async fetchGroupList(): Promise<{ groupId: string; groupName: string; memberCount: number | null; maxMemberCount: number | null }[] | null> {
+    const data = await this.callAction("get_group_list", {}, 10000);
+    if (!Array.isArray(data)) return null;
+    return data
+      .map((g: any) => ({
+        groupId: String(g.group_id ?? g.groupId ?? ""),
+        groupName: String(g.group_name ?? g.groupName ?? "").trim(),
+        memberCount: toNumOrNull(g.member_count ?? g.memberCount),
+        maxMemberCount: toNumOrNull(g.max_member_count ?? g.maxMemberCount),
+      }))
+      .filter((g) => g.groupId);
+  }
+
+  /** 我的好友列表。 */
+  async fetchFriendList(): Promise<{ userId: string; nickname: string | null; remark: string | null }[] | null> {
+    const data = await this.callAction("get_friend_list", {}, 10000);
+    if (!Array.isArray(data)) return null;
+    return data
+      .map((f: any) => ({
+        userId: String(f.user_id ?? f.userId ?? ""),
+        nickname: String(f.nickname ?? f.remark ?? "").trim() || null,
+        remark: String(f.remark ?? "").trim() || null,
+      }))
+      .filter((f) => f.userId);
+  }
+
+  /** 某个群的成员列表（谁在里面）。 */
+  async fetchGroupMemberList(
+    groupId: string,
+  ): Promise<{ userId: string; nickname: string | null; card: string | null; role: string | null }[] | null> {
+    const gid = String(groupId || "").trim();
+    if (!gid) return null;
+    const data = await this.callAction("get_group_member_list", { group_id: gid, no_cache: true }, 15000);
+    if (!Array.isArray(data)) return null;
+    return data
+      .map((m: any) => ({
+        userId: String(m.user_id ?? m.userId ?? ""),
+        nickname: String(m.nickname ?? "").trim() || null,
+        card: String(m.card ?? "").trim() || null,
+        role: String(m.role ?? "").trim() || null,
+      }))
+      .filter((m) => m.userId);
+  }
+
+  /**
+   * notice 事件 → 统一事件对象，交给上层（social 服务）落库。
+   * OneBot v11 的 notice_type 有：group_increase / group_decrease / group_upload /
+   * group_admin / group_ban / group_recall / friend_add / friend_recall / notify(poke)。
+   */
+  private handleNotice(frame: any): void {
+    if (frame.self_id) this.selfQQ = String(frame.self_id);
+    const noticeType = String(frame.notice_type || "");
+    const subType = String(frame.sub_type || "");
+    const groupId = frame.group_id ? String(frame.group_id) : null;
+    const userId = frame.user_id != null ? String(frame.user_id) : null;
+    const targetId = frame.target_id != null ? String(frame.target_id) : null;
+
+    // notify 下面再分 poke（戳一戳）/ lucky_king 等，统一归成 notify:poke 这种形式
+    const eventType =
+      noticeType === "notify" ? `notify:${subType || "unknown"}` : `${noticeType}${subType ? `:${subType}` : ""}`;
+
+    // 感兴趣的才记（其余事件噪声大，记了也没用）
+    const INTERESTING = new Set([
+      "group_increase:approve",
+      "group_increase:invite",
+      "group_decrease:leave",
+      "group_decrease:kick",
+      "group_decrease:kick_me",
+      "group_admin:set",
+      "group_admin:unset",
+      "group_recall",
+      "friend_add",
+      "notify:poke",
+      "group_ban:ban",
+      "group_ban:lift_ban",
+      "group_upload",
+    ]);
+    if (!INTERESTING.has(eventType)) return;
+
+    let detail = "";
+    switch (eventType.split(":")[0]) {
+      case "group_increase":
+        detail = `${userId || "有人"} 加入了群${groupId ? ` ${groupId}` : ""}`;
+        break;
+      case "group_decrease":
+        detail = `${userId || "有人"} ${subType === "kick" ? "被移出" : "离开了"}群${groupId ? ` ${groupId}` : ""}`;
+        break;
+      case "group_admin":
+        detail = `${userId || "有人"} ${subType === "set" ? "成为" : "不再是"}管理员（群 ${groupId || ""}）`;
+        break;
+      case "group_recall":
+        detail = `${userId || "有人"} 撤回了一条消息${groupId ? `（群 ${groupId}）` : ""}`;
+        break;
+      case "friend_add":
+        detail = `${userId || "有人"} 加你为好友`;
+        break;
+      case "notify":
+        detail =
+          subType === "poke"
+            ? `${userId || "有人"} 戳了戳${targetId && targetId === this.selfQQ ? "你" : ` ${targetId || "某人"} `}`
+            : `通知：${subType}`;
+        break;
+      case "group_ban":
+        detail = `${userId || "有人"} 在群 ${groupId || ""} ${subType === "ban" ? "被禁言" : "解除禁言"}`;
+        break;
+      case "group_upload":
+        detail = `${userId || "有人"} 在群 ${groupId || ""} 上传了文件`;
+        break;
+      default:
+        detail = eventType;
+    }
+
+    this.emitNotice({
+      adapterId: this.id,
+      eventType,
+      groupId,
+      actorId: userId,
+      targetId,
+      detail,
+    });
+  }
+
+  /** 加好友/加群邀请：只上报，不自动同意（身份决策必须由人来做）。 */
+  private handleRequest(frame: any): void {
+    const subType = String(frame.sub_type || "");
+    const userId = frame.user_id != null ? String(frame.user_id) : null;
+    const groupId = frame.group_id ? String(frame.group_id) : null;
+    const comment = String(frame.comment || "").trim();
+    this.emitNotice({
+      adapterId: this.id,
+      eventType: `request:${subType || "unknown"}`,
+      groupId,
+      actorId: userId,
+      targetId: null,
+      detail:
+        subType === "group"
+          ? `${userId || "有人"} 申请加入群 ${groupId || ""}${comment ? `（留言：${comment}）` : ""}`
+          : `${userId || "有人"} 申请加你为好友${comment ? `（留言：${comment}）` : ""}`,
+    });
   }
 
   // 从消息里提取所有被 @ 的 QQ（同时支持 CQ 字符串与数组段格式；"all" 表示 @全体成员）
@@ -400,4 +610,10 @@ export class OneBotAdapter extends BotAdapter {
     };
     this.ws.send(JSON.stringify(action));
   }
+}
+
+/** 安全转数字：协议端有时给字符串，有时给 null/undefined。 */
+function toNumOrNull(v: unknown): number | null {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
 }

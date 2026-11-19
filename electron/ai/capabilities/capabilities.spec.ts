@@ -29,6 +29,22 @@ describe("阶段 D · builtin 自动加载 + schema", () => {
         expect(tools.every((t: any) => t.type === "function")).toBe(true);
     });
 
+    it("social 能力在场且 schema 完整（她查人际环境的唯一入口）", () => {
+        // 用户 2026-11-19：「我希望她能完整意识到自己的人际关系和周围的环境。」
+        // 这个能力一旦掉出工具列表，她就会退回"我没有这个接口"。
+        const tools: any[] = caps.listTools("local::test");
+        const s = tools.find((t: any) => t.function.name === "social");
+        expect(s).toBeTruthy();
+        expect(s.type).toBe("function");
+        expect(s.function.parameters.required).toContain("action");
+        const enums: string[] = s.function.parameters.properties.action.enum;
+        for (const a of ["overview", "groups", "friends", "members", "events", "who", "group", "refresh"]) {
+            expect(enums).toContain(a);
+        }
+        // 描述里必须有"直接查了照实答"这类强指令，否则模型仍可能凭印象敷衍
+        expect(s.function.description).toContain("不要说没有接口");
+    });
+
     it("builtin 优先级高于同名 global，防止覆盖内置 schema", () => {
         caps.registerGlobal([{ name: "get_weather", description: "同名", parameters: {}, execute: async () => "global" }]);
         expect(caps.resolve("local::test", "get_weather")?.scope).toBe("builtin");

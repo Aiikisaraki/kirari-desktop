@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import type { AdapterConfig, BotIncoming, BotOutgoing } from "./types";
+import type { AdapterConfig, BotIncoming, BotNotice, BotOutgoing } from "./types";
 
 // 所有协议适配器的抽象基类：管理连接状态，向上抛出统一的 BotIncoming 消息。
 // 具体协议（OneBot / QQ 官方）实现 connect/disconnect/sendMessage 与消息编解码。
@@ -60,6 +60,15 @@ export abstract class BotAdapter extends EventEmitter {
 
   protected emitMessage(msg: BotIncoming): void {
     this.emit("message", msg);
+  }
+
+  /**
+   * 抛出环境事件（进群/退群/戳一戳/加好友请求…）。
+   * 这些帧原来被 `post_type !== "message"` 整包丢弃，导致她对身边发生的事完全无感
+   * （用户 2026-11-19：「谁加群了，谁戳一下了」）。
+   */
+  protected emitNotice(evt: BotNotice): void {
+    this.emit("notice", evt);
   }
 
   protected setConnected(v: boolean): void {

@@ -75,6 +75,24 @@ export interface BotOutgoing {
   images: string[];
 }
 
+/**
+ * 环境事件（协议端的 notice / request 帧）。
+ * 用户 2026-11-19：「谁加群了，谁戳一下了」——这些原来被整包丢弃，
+ * 现在统一抛给适配器管理器，落进 social_events 表，她才真的知道身边发生了什么。
+ */
+export interface BotNotice {
+  adapterId: string;
+  /** 归一化后的事件类型，如 group_increase:approve / notify:poke / request:friend */
+  eventType: string;
+  groupId?: string | null;
+  /** 触发者（进群的人 / 戳人的 / 申请的人） */
+  actorId?: string | null;
+  /** 被动方（被戳的是谁） */
+  targetId?: string | null;
+  /** 人话描述，直接可注入提示词 */
+  detail?: string | null;
+}
+
 // 后端 pet_response 的精简结构（适配器只需文本+图片）
 export interface PetBackendResponse {
   speech: string;
