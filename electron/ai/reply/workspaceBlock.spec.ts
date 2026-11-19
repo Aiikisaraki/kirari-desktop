@@ -28,6 +28,7 @@ import * as workspaceTask from "../services/workspaceTask";
 import { buildWorkspaceBlock, resolveOwnerForBlock, MAX_TASKS_IN_PROMPT } from "./workspaceBlock";
 import * as workspaceCap from "../capabilities/builtin/workspace";
 import * as scheduledJobsService from "../services/scheduledJobsService";
+import { vagueGist } from "../services/memory";
 import type { ScheduledJob } from "kirari-agent";
 
 /** 两个人。用真实 QQ 号形态，顺便验证纯数字不会被 safeSegment 拦。 */
@@ -296,6 +297,52 @@ describe("★ 提醒归属：只有这台桌面的人自己的提醒才在桌面
         log.mockRestore();
         scheduledJobsService.setDesktopDeliverer(null);
         scheduledJobsService.setPlatformDeliverer(null);
+    });
+});
+
+// ── ★ VAGUE 档不得注入原文 ────────────────────────────────────────────
+//
+// 用户要求「既不是完全记忆隔离，也不是完全泄露隐私」。旧实现对 VAGUE 的处理
+// 是把原文注进 prompt、再附一句「别把细节讲出去」—— 等于先把秘密交出去
+// 再嘱咐保密。漏一轮就漏了，所以改成注入前就压成话题方向。
+describe("★ 别人的私事只给话题方向，不给原文", () => {
+
+    it("医疗细节不泄露（只 9 个字，截断/抽首句都挡不住）", () => {
+        const out = vagueGist("她妈妈下周要做手术，费用还差三万");
+        expect(out).toContain("身体状况");
+        expect(out).not.toContain("手术");
+        expect(out).not.toContain("妈妈");
+        expect(out).not.toContain("三万");
+    });
+
+    it("感情八卦不泄露", () => {
+        const out = vagueGist("小美跟张三在偷偷交往");
+        expect(out).toContain("感情");
+        expect(out).not.toContain("交往");
+        expect(out).not.toContain("张三");
+    });
+
+    it("★ 单字关键词不能误伤（「毛病」不是身体状况）", () => {
+        const out = vagueGist('想改掉"啥都说"的毛病：在公众场合控制音量');
+        expect(out).not.toContain("身体状况");
+        expect(out).toContain("分寸");
+    });
+
+    it("任何输出都不含原文里的连续 4 字片段", () => {
+        const inputs = [
+            "她妈妈下周要做手术，费用还差三万",
+            "小美跟张三在偷偷交往",
+            "老板上个月把我辞退了，房贷还不上了",
+            "最近失眠很严重，焦虑得不行",
+        ];
+        for (const src of inputs) {
+            const out = vagueGist(src);
+            for (let i = 0; i + 4 <= src.length; i++) {
+                const frag = src.slice(i, i + 4);
+                if (/^[，。、：；！？\s]/.test(frag)) continue;
+                expect(out).not.toContain(frag);
+            }
+        }
     });
 });
 

@@ -310,6 +310,54 @@ export function sanitizeForSubject(content?: string, opts: { dropNames?: string[
 }
 
 /**
+ * 把一条别人的私事压成「只知道大概方向」的一句话。
+ *
+ * ── 为什么要这一步（2026-11-20）────────────────────────────────────
+ * 用户的原始要求是「既不是完全记忆隔离，也不是完全泄露隐私」。
+ * 上一版对 DISCLOSURE.VAGUE 的处理是**把原文注进去**，后面附一句
+ * 「别把细节讲出去」—— 那等于把秘密交给一个被叮嘱要保密的模型：
+ * 只要有一轮没守住，细节就已经在对方屏幕上了。
+ *
+ * 真正的「模糊」要在**注入之前**就做到：她只拿到话题方向，
+ * 拿不到可泄露的细节。知道"这位朋友在意说话分寸"是够用的，
+ * 不需要知道原话是怎么写的。
+ *
+ * ⚠️ 不要用"截断原文 / 抽首句"来实现模糊。试过，不安全：
+ *    「她妈妈下周要做手术」只有 9 个字，截断和首句都完整保留了下来 ——
+ *    而医疗细节恰恰是最不该漏的那类。任何**包含原文片段**的方案都挡不住。
+ *
+ * 所以这里改成**按话题归类**：从内容里认出"这是关于哪一类事"，
+ * 只输出那个类别的说法，**一个原文片段都不带**。
+ * 好处是可以证明不会泄露 —— 输出只可能来自下面这张固定的表。
+ *
+ * ⚠️ 类别表里**不要用单字关键词**。曾经写了 /病|妈|爸/ 之类，结果
+ *    「想改掉『啥都说』的**毛病**：控制音量」被"病"命中，判成"身体状况"。
+ *    单字在中文里几乎必然误伤，一律用词。
+ */
+export function vagueGist(content?: string): string {
+    const s = String(content || "").trim();
+    if (!s) return "（有一件事，但细节她想不起来了）";
+
+    // 顺序有意义 —— 越敏感/越具体的类排前面。
+    const TOPICS: Array<[RegExp, string]> = [
+        [/手术|住院|生病|癌症|身体|健康|吃药|复查|治疗|体检/, "身体状况"],
+        [/出轨|劈腿|交往|恋爱|感情|分手|结婚|离婚|暗恋|喜欢谁|对象/, "感情上的事"],
+        [/借钱|还钱|欠钱|欠债|工资|收入|费用|花销|存钱|房贷|租金/, "钱上的事"],
+        [/被开除|被辞退|辞职|找工作|面试|同事|老板|加班|工作|跳槽/, "工作上的事"],
+        [/吵架|争吵|矛盾|闹翻|冷战|得罪|关系/, "跟人的关系"],
+        [/说话|吐槽|音量|大声|碎嘴|多嘴|分寸|场合|礼貌|毛病/, "说话做事的分寸"],
+        [/压力|心情|情绪|焦虑|难过|失眠|抑郁|疲累/, "心情状态"],
+        [/考试|成绩|学习|学校|作业|毕业|挂科/, "学业上的事"],
+        [/习惯|改掉|戒掉|坚持|早睡|作息|锻炼|减肥/, "想改的习惯"],
+        [/家人|家里|父母|妈妈|爸爸|孩子|老婆|老公|亲戚/, "家里的事"],
+    ];
+    for (const [re, label] of TOPICS) {
+        if (re.test(s)) return `（大概是${label}，具体细节她记不清了）`;
+    }
+    return "（有一件跟她有关的私事，她只记得大概，说不清细节）";
+}
+
+/**
  * 从这句话里认出「对方正在问起谁」。
  *
  * 只在一对一里做。判据很克制：对方提到的人名/标识必须能在 people 表里对上，
@@ -760,10 +808,20 @@ export async function buildMemoryBlock(
             // 一条 OPEN 但 epistemic=rumor 的记忆，可以说，但绝不能说成事实。
             const epi = String((m as any).epistemic || "fact");
             if (epi === EPISTEMIC.HEARSAY || epi === EPISTEMIC.RUMOR) hasUnverified = true;
-            const body =
-                level === DISCLOSURE.DEIDENTIFY
-                    ? sanitizeForSubject(m.content, { dropNames: crossNames })
-                    : m.content;
+            // 披露档位决定**注入什么内容**，不只是加一句提示：
+            //   OPEN       → 原文（这就是你的、你该知道的）
+            //   DEIDENTIFY → 原文但抹掉第三方姓名（当事人有权知道内容，无权知道谁在说）
+            //   VAGUE      → ★ 压成话题方向，原文根本不进 prompt
+            // 最后一条是这次修的：原来 VAGUE 也注入原文，只靠一句「别讲出去」约束，
+            // 那等于把细节交出去再嘱咐保密 —— 漏一轮就漏了。
+            let body: string;
+            if (level === DISCLOSURE.OPEN) {
+                body = String(m.content || "");
+            } else if (level === DISCLOSURE.DEIDENTIFY) {
+                body = sanitizeForSubject(m.content, { dropNames: crossNames });
+            } else {
+                body = vagueGist(m.content);
+            }
             const hint = disclosureHint(level) + epistemicHint(epi);
             lines.push(`  - ${body}${hint}`);
         }
