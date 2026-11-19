@@ -34,6 +34,16 @@ export interface SelfCtx {
      */
     role?: string | null;
     isOwner?: boolean | null;
+    /**
+     * 本机可信入口标记（桌宠聊天框 / 控制台）。
+     *
+     * 2026-11-20 身份排查新增：roleOf 原先靠 sessionId 前缀猜身份，
+     * 导致所有非 bot 前缀的路径（桌面 session_*、子代理 sub::*、工作空间
+     * workspace:*、组网 net:*）全被判成 owner。现在改成只认显式声明，
+     * 本机入口必须由调用方显式打上这个标记。
+     */
+    trustedLocal?: boolean;
+    displayName?: string | null;
 }
 
 function friendlyTime(ms: number): string {
@@ -112,17 +122,32 @@ function readTier(role: string): string[] | null {
 /**
  * 从 ctx 解析角色。
  *
- * 缺省规则很重要：**本机对话就是拥有者本人在操作**——桌宠聊天框、控制台
- * 这些入口没有经过任何 bot 适配器，只可能是设备主人自己。如果这里默认降级成
- * 普通用户，她会连自己的设置都改不了，等于把最高权限入口锁死。
- * 只有 bot- 前缀的远程会话（QQ 等平台进来的人）才需要按 people 档案判角色。
+ * ── 2026-11-20 身份隔离大排查：这里原来是全系统最大的一个洞 ──────────
+ * 原实现是 `if (!sessionId || !/^bot[-:]/.test(sessionId)) return "owner"`，
+ * 即「只要 sessionId 不以 bot 开头就当主人」。但**不以 bot 开头的路径有多条**：
+ *   桌面聊天框 session_<ts> / 子代理 sub::x::y / 工作空间任务 workspace:o:t / 组网 net:d:s
+ * 它们全被判成 owner，于是任何一条路径都能改人格、读密钥掩码、建「提醒主人」的提醒。
+ * 用户报的「她以为自己是主人」就是从这里来的。
+ *
+ * 现在的原则：**权限只认显式声明，不猜 sessionId 形状**。
+ *   · ctx.role / ctx.isOwner 由入口显式给出
+ *   · 没有显式声明 → 一律按最低权限 user（fail-closed）
+ *   · 本机入口（桌宠聊天框 / 控制台）由调用方显式标 trustedLocal / isOwner
+ *
+ * 猜错的代价是主人多按一次，猜反的代价是外人拿到最高权限。
+ * 本文件与 kirari-core 的 src/services/selfOps.js 必须保持一致。
  */
-function roleOf(ctx: SelfCtx): string {
+export function roleOf(ctx: SelfCtx): string {
     if (ctx.role) return String(ctx.role);
     if (ctx.isOwner === true) return "owner";
     if (ctx.isOwner === false) return "user";
-    if (!ctx.sessionId || !/^bot[-:]/.test(String(ctx.sessionId))) return "owner";
+    if (ctx.trustedLocal === true) return "owner";
     return "user";
+}
+
+/** 本机可信入口的 ctx 标记（桌宠聊天框 / 控制台）。 */
+export function trustedLocalCtx(ctx: SelfCtx = {} as SelfCtx): SelfCtx {
+    return { ...ctx, trustedLocal: true, isOwner: true, role: "owner" };
 }
 
 /**

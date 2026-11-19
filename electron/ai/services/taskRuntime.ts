@@ -24,6 +24,19 @@ export type TaskToolCtx = {
     turnId: string;
     uid: number;
     origin: "core" | "desktop";
+    /**
+     * 2026-11-20 身份排查：身份三元组必须随 ctx 流到这里。
+     *
+     * 提醒落库时要记下「这条归谁」（ownerKey），文案要分「提醒主人」还是
+     * 「提醒{名字}」。以前这三个字段都没有，于是所有人一律被喊「主人」，
+     * 且到点推送没有归属依据 —— 这正是「分不清谁是谁」的直接来源。
+     */
+    role?: string | null;
+    isOwner?: boolean | null;
+    displayName?: string | null;
+    counterpartId?: string | null;
+    senderId?: string | null;
+    trustedLocal?: boolean;
 };
 
 function newId(prefix: string): string {
@@ -68,6 +81,22 @@ export function handleScheduleReminder(args: unknown, ctx: TaskToolCtx): string 
     try {
         const now = Date.now();
         const spec = parseReminder(args, now);
+
+        // 这条提醒是谁设的、那人是不是主人。到点时只剩这条 job，
+        // 不存下来就分不清「该对谁说话」—— 以前所有人被当成主人，一律喊「提醒主人」。
+        const isOwnerPerson = String(ctx.role || "") === "owner";
+        const whoName = String(ctx.displayName || "").trim();
+        const target = isOwnerPerson ? "主人" : (whoName || "你");
+
+        // ── 2026-11-20 身份排查（B1）：提醒原来完全没有闸门 ─────────────
+        // 任何人（含群里任何人）都能建，无角色、无配额；而同一件事走
+        // self_manage.create_reminder 却是 owner-only。两条路两套权限，
+        // 模型必然用宽的那条 —— 用户报的正是「她以为自己是主人就给我下任务」。
+        // 现在统一成「谁都能给自己设提醒，但推不到别人桌面上」。
+        if (String(ctx.sessionId || "").includes("group:")) {
+            return "群里不方便设定时提醒（到点会变成对整群的发言）。你私聊我，我帮你记着。";
+        }
+
         const job = createJob({
             jobId: newId("job"),
             sessionId: ctx.sessionId,
@@ -80,10 +109,24 @@ export function handleScheduleReminder(args: unknown, ctx: TaskToolCtx): string 
             recurrence: "once",
             now,
         });
+        // 归属人必须落库：到点时只有这条 job，没有会话上下文可推。
+        // 解析不出来就拒绝，绝不退化成 '_local'（退化就等于推到主人桌面）。
+        let ownerKey = "";
+        try {
+            ownerKey = String(
+                String(ctx.counterpartId || ctx.senderId || "").trim() ||
+                (String(ctx.sessionId || "").startsWith("bot-") ? "" : "_local"),
+            ).trim();
+        } catch { ownerKey = ""; }
+        if (!ownerKey) {
+            return "我现在还分不清这条提醒该归谁，怕设完推错人。你私聊我再说一次？";
+        }
+        (job as any).ownerKey = ownerKey;
+
         jobStore.save(job, "job_created");
         advancePendingStep(ctx.sessionId, "reminder", null, `已设置：${spec.title}`, now);
         const when = new Date(spec.dueAt).toLocaleString("zh-CN");
-        return `已设好提醒「${spec.title}」，将在 ${when} 提醒主人：${spec.payload}`;
+        return `已设好提醒「${spec.title}」，将在 ${when} 提醒${target}：${spec.payload}`;
     } catch (e) {
         return `error: 设置提醒失败——${e instanceof Error ? e.message : String(e)}`;
     }

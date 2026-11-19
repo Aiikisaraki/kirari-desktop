@@ -19,13 +19,13 @@ import * as scheduledJobsService from "./ai/services/scheduledJobsService";
 import * as briefSchedule from "./ai/services/briefSchedule";
 import * as workspaceTask from "./ai/services/workspaceTask";
 import * as dailyBriefingService from "./ai/services/dailyBriefingService";
-import { AdapterManager } from "./adapter/adapter-manager";
-import type { AdapterConfig, AdapterStatus } from "./adapter/types";
+import { AdapterManager, getAdapter } from "./adapter/adapter-manager";
+import type { AdapterConfig, AdapterStatus, BotIncoming } from "./adapter/types";
 import { initEngine, shutdownEngine, chat as engineChat, ensureContext } from "./ai/engine";
 import { NetManager } from "kirari-net";
 import type { HostExecutor, RelayBackfill } from "kirari-net";
 import { setupNetIpc } from "./net/ipc";
-import { saveMessage as saveChatMessage, LOCAL_UID } from "./ai/db/storage";
+import { saveMessage as saveChatMessage, LOCAL_UID, getOwnerKeySync } from "./ai/db/storage";
 import { ensureLocalSessionId } from "./ai/local-session";
 import { migrateLegacyChatJson } from "./ai/migrate/legacy-chat";
 import { migrateLegacyChatDb } from "./ai/migrate/legacy-db";
@@ -485,6 +485,76 @@ function reRegisterFrontendTools(): void {
   } catch (e) {
     console.warn("[frontend-tools] 重新注册工具失败（可能需要重连）:", e instanceof Error ? e.message : String(e));
   }
+}
+
+// 主动把一句话回发到某个平台会话（QQ 私聊/群/频道）。与核心版
+// src/bot/botManager.js 的 pushToUserSession 逐条同语义 —— 两端必须一致，
+// 否则「在 QQ 里定的提醒在 QQ 里收不到」这种 bug 只在一边出现。
+//
+// sessionId 形如 `bot-<adapterId>-<conversationKey>`，conversationKey 是
+// `private:<userId>` / `group:<groupId>:<userId>` / `channel:...` / `dm:...`。
+//
+// @returns 是否真的发出去了（true 只是「已交给适配器」，异步发送失败由日志体现）
+function pushToPlatformSession(sessionId: string, text: string): boolean {
+  const sid = String(sessionId || "");
+  const body = String(text || "").trim();
+  if (!sid || !body) return false;
+
+  // 本地/控制台会话（纯 uuid）没有平台通道，只能靠桌面那条腿，这里直接不处理。
+  if (!sid.startsWith("bot-")) return false;
+  if (!adapterManager) return false;
+
+  const rest = sid.slice("bot-".length);
+  // adapterId 自身可能带连字符（bot-mvwi1tw3-x1b5），所以按已知 id 前缀匹配，
+  // 不能简单 split("-") —— 那正是之前社交查询全被过滤成空的同一个坑。
+  let adapterId = "";
+  for (const st of adapterManager.list()) {
+    if (rest === st.id || rest.startsWith(`${st.id}-`)) {
+      adapterId = st.id;
+      break;
+    }
+  }
+  if (!adapterId) {
+    console.warn(`[adapter] 主动回发找不到适配器（sessionId=${sid}）`);
+    return false;
+  }
+  const adapter = getAdapter(adapterId);
+  if (!adapter) return false;
+
+  const conversationKey = rest.slice(adapterId.length + 1);
+  if (!conversationKey) return false;
+
+  // 还原成 adapter.sendMessage 需要的 target 形状
+  const privateM = /^private:(.+)$/.exec(conversationKey);
+  const groupM = /^group:([^:]+):(.*)$/.exec(conversationKey);
+  const channelM = /^channel:(.+)$/.exec(conversationKey);
+  const dmM = /^dm:(.+)$/.exec(conversationKey);
+
+  let target: BotIncoming | null = null;
+  if (groupM) {
+    target = { adapterId, isGroup: true, replyGroupId: groupM[1], senderId: groupM[2] || "", conversationKey, text: "", images: [] };
+  } else if (privateM) {
+    target = { adapterId, isGroup: false, senderId: privateM[1], conversationKey, text: "", images: [] };
+  } else if (channelM) {
+    target = { adapterId, isGroup: true, replyGroupId: channelM[1], senderId: "", conversationKey, text: "", images: [] };
+  } else if (dmM) {
+    target = { adapterId, isGroup: false, senderId: dmM[1], conversationKey, text: "", images: [] };
+  }
+  if (!target || (!target.senderId && !target.replyGroupId)) return false;
+
+  // sendMessage 是 async，但调用方（调度器）不 await —— 这里自己兜住异常，
+  // 免得变成 unhandled rejection 把进程告警刷屏。
+  // QQ 官方适配器要求「被动消息上下文」（msg_id），主动推送必然失败；
+  // 那种情况只能落日志，让用户知道这条提醒没送到。
+  Promise.resolve()
+    .then(() => adapter!.sendMessage(target!, { text: body, images: [] }))
+    .then(() => {
+      console.log(`[adapter] 已主动回发到 ${conversationKey}`);
+    })
+    .catch((e: any) => {
+      console.warn(`[adapter] 主动回发失败（${conversationKey}）:`, e?.message || e);
+    });
+  return true;
 }
 
 // 创建并初始化机器人适配器管理器（各协议适配器 + 本进程 AI 引擎）。
@@ -2380,9 +2450,17 @@ app.whenReady().then(async () => {
     if (workspaceTask.isWorkspaceSession(sessionId)) {
       const payload = workspaceTask.parsePayload(content);
       if (payload && payload.taskId) {
+        // owner 三级兜底（与核心版 net/bootstrap.js 的主机执行器逐条对齐）：
+        //   ① payload.owner —— 建任务时存下来的，最准
+        //   ② 会话 id 里的 owner —— 老格式 `workspace:<taskId>` 没有，退而求其次
+        //   ③ LEGACY_OWNER —— 都没有。宁可落 _legacy 目录，也**不能**回退成公共目录：
+        //      那会让所有历史任务重新混在一起，按人隔离就白做了。
+        const owner =
+          payload.owner || workspaceTask.ownerFromSession(sessionId) || workspaceTask.LEGACY_OWNER;
         // payload 里没有 title：标题以主机自己 meta.json 为准（用户可能在主机上改过），
         // 传空字符串让 runLocally 回落到 meta 里的值。
         const r = await workspaceTask.runLocally({
+          owner,
           taskId: payload.taskId,
           title: "",
           instruction: payload.instruction || "",
@@ -2573,15 +2651,46 @@ app.whenReady().then(async () => {
   await ensureChatSessionService().init();
   await ensureChatSessionService().refreshHistory();
   // 阶段 C：定时任务到点提醒 → 注入当前聊天会话并广播 chat:state；随后启动调度器
-  // （先补跑停机期间到点的任务）。放在聊天服务就绪后，保证 onFire 回调可用。
-  scheduledJobsService.setFireHandler((job) => {
+  // （先补跑停机期间到点的任务）。放在聊天服务就绪后，保证回调可用。
+  //
+  // ── 两条腿（2026-11-20 用户报障）──────────────────────────────
+  //   「六点多的时候，它还知道要7点提醒我，但是到了7点也没提醒我」
+  //
+  // 原因：提醒几乎都是在 QQ 里定的，而原先只有「推桌面界面」这一条路。到点那一刻
+  // 桌面没开 → 推给 0 个连接 → 消息静默消失，job 却仍然被标成 fired。
+  // 所以现在①推桌面（桌宠能开口说出来）②回发原 QQ 会话（在哪定的在哪收到）。
+  // 两条都失败时 deliverReminder 会明确告警，不再假装成功。
+  scheduledJobsService.setDesktopDeliverer((job) => {
     try {
+      // ── 归属校验（2026-11-20 身份排查 / A1 桌面侧）──────────────────
+      //
+      // 桌面界面只有一个：这台机器的使用者。别人的提醒注入进来，用户看到的就是
+      // 「她的任务怎么跑到我这儿来了」—— 报障原话。
+      //
+      // 判断依据不能是"猜"，只能是任务自带的归属：
+      //   · 有 ownerKey 且不是本机主人 → 这条不该出现在这个桌面（交给平台那条腿）
+      //   · 没有 ownerKey（老任务）→ 只有 sessionId 明确是本机会话时才当主人自己的
+      //   · 查不到主人是谁（全新装机）→ fail-closed，不注入
+      const ownerKey = String((job as any).ownerKey || "").trim();
+      if (ownerKey) {
+        const desktopOwner = getOwnerKeySync();
+        if (!desktopOwner || ownerKey !== desktopOwner) {
+          console.log(
+            `[sched] 提醒 job=${job.jobId} 归属 ${ownerKey} 不是本机主人，不注入桌面`,
+          );
+          return false;
+        }
+      }
+      // job.payload 就是提醒文本（ScheduledJob 里它本来就是文本）。返回值表示是否真送到。
       return ensureChatSessionService().injectProactiveMessage(job.payload, "happy");
     } catch (e) {
       console.warn("[sched] 注入主动提醒失败:", e instanceof Error ? e.message : e);
       return false;
     }
   });
+  scheduledJobsService.setPlatformDeliverer(({ text, sessionId }) =>
+    pushToPlatformSession(sessionId, text),
+  );
   // 阶段 E：简报任务到点 → 用本机当前模型配置生成当日简报（写 daily_memory）。
   // 未配置大脑时直接返回 false，由对话时的 ensureDailyBrief 惰性兜底。
   // 两端共库时由 briefSchedule 的档位锁保证同一档只跑一次。
@@ -2644,11 +2753,17 @@ app.whenReady().then(async () => {
   });
   workspaceTask.setResultPusher(({ speech }) => {
     try {
-      ensureChatSessionService().injectProactiveMessage(speech, "happy");
+      // ① 桌面这条腿：让桌宠说出来。返回值就是「真的送到界面了」——
+      //    fire() 会据此判断两条腿是否都失败（都失败才 warn，不再假装成功）。
+      return ensureChatSessionService().injectProactiveMessage(speech, "happy");
     } catch (e) {
       console.warn("[wsTask] 推送任务结果失败:", e instanceof Error ? e.message : e);
+      return false;
     }
   });
+  // ② 平台这条腿：用户多半是在 QQ 里建的任务，到点桌面可能没开。
+  //    和提醒那条路共用同一个回发实现。
+  workspaceTask.setPlatformSender(({ sessionId, text }) => pushToPlatformSession(sessionId, text));
   // 叶子判定 + 上行出口。
   // ⚠️ 不能只看 canStartNetworking()：它只说明「这台机器有密钥、能开网」，
   // 不代表真的开了 —— 一台刚装好、压根没开组网的机器也会是 true，那样所有定期

@@ -10,14 +10,32 @@
 // 标题随时会被改（「每日简报」→「每日科技简报」）。用标题当文件夹名，一改名
 // 历史产出就跟任务失联了。所以目录名 = 稳定 id，人看的标题存在 meta.json 里。
 //
+// ── 为什么按 owner 分一层（2026-11-20 用户原话）─────────────────────
+//   「我今天把机器人转发给了我一个朋友，她是私聊我的机器人，建立了几个每日任务，
+//     但是我怎么可以直接看到她的任务呢，就算是主人权限，也是优先说我有几个，
+//     然后再说可能还有别人的，我确认了才能看别人的啊！！机器人的回复就像是，
+//     完全没区分这是谁的任务」
+//   原先所有任务平铺在一个根下，listTasks() 无参扫描整个目录 —— 谁的都能看见。
+//   这跟记忆那套「每人一个独立池」是同一个原则，工作空间也必须按人隔离：
+//     <root>/<owner>/<taskId>/
+//   owner 用**对话者标识**（QQ 号等），跟记忆池的 person::{key} 完全一致：
+//   同一套身份解析，不另造一套，否则迟早两边对不上。
+//
+//   ⚠️ 主人不是特权通道：主人默认也只看到自己那层。要看别人的必须显式点名，
+//      由上层（capability）做二次确认，services 层不做「主人自动放开」的例外。
+//
 // ── 安全 ────────────────────────────────────────────────────────────
 // 她会拿到**完整**文件 CRUD（用户 2026-11-19 拍板「完整（含删除/新建目录）」）。
 // 所以这里的路径校验不是「体验问题」而是「她能不能把文件删到工作空间外面去」：
 // 每一段都校验，最后再用 path.relative 复核一遍真实落点，两道都过才允许动手。
+// 越权防护必须同时覆盖 **owner 与 taskId 两条**：owner 本身也是一段路径，
+// 一个带 `..` 的 senderId 就能越狱，所以它照样要过 safeSegment。
 
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+
+import * as memory from "./memory";
 
 export const ROOT_DIR_NAME = "KirariWorkspace";
 export const SPACE_META_FILE = ".kirari-workspace.json";
@@ -46,6 +64,11 @@ export const DEFAULT_RETENTION: Retention = {
 
 export interface TaskMeta {
     taskId: string;
+    /**
+     * 归属（对话者标识）。目录层级 `/<owner>/<taskId>/` 已经表达了归属，
+     * 这里再记一份是**冗余记录**：这个文件夹被单独拷走 / 备份还原时还能看出它是谁的。
+     */
+    owner: string;
     title: string;
     description: string;
     createdAt: number;
@@ -112,20 +135,81 @@ export function safeSegment(name: unknown, where = "path"): string {
     return raw;
 }
 
-export function taskDir(taskId: unknown): string {
+/**
+ * owner 目录名。owner 就是个平台账号标识（QQ 号），同样要过 safeSegment，
+ * 否则一个带 `..` 的 senderId 就能越狱。
+ *
+ * 空 owner 一律拒 —— 不做「退化成公共目录」的兜底，那等于把隔离又抹平了。
+ * 刻意不 trim：trim 会让「实际目录名」和「调用方以为的 owner」不一致
+ * （见 safeSegment 的注释）。调用方若拿到的身份可能带空白，应在解析身份时先 trim，
+ * 那是 resolveOwnerFromCtx 的职责。
+ */
+export function ownerDirName(owner: unknown): string {
+    const raw = String(owner == null ? "" : owner);
+    if (!raw.trim()) throw new Error("[workspace] 缺少 owner（不知道这是谁的工作空间）");
+    return safeSegment(raw, "owner");
+}
+
+/** 某个 owner 的工作空间根。 */
+export function ownerRoot(owner: unknown): string {
+    return path.join(resolveRoot(), ownerDirName(owner));
+}
+
+/** 本机 / 控制台这类没有对话者的会话，工作空间归属到这个名下。 */
+export const LOCAL_OWNER = "_local";
+
+/**
+ * 从「此刻在跟谁说话」的上下文里解析工作空间 owner。
+ *
+ * 这是全项目**唯一**的 owner 解析入口：能力、提示词注入块、建任务三处都调它。
+ * 各写一份的话，迟早有一处规则不同，隔离就在那个入口漏了。
+ *
+ * 规则（顺序不能反）：
+ *   1) 显式给了 counterpartId / senderId → 就是它。调用方比我们更清楚在跟谁说话。
+ *   2) 会话 id 是 `bot-...` 平台会话 → 从里面拆对话者（与记忆池同一套 memory 解析）。
+ *   3) 其余（uuid 本地会话、控制台、空）→ LOCAL_OWNER。
+ *
+ * ⚠️ 第 3 条不能用「推不出来就当 counterpartId 用」：本地会话 id 本身会被
+ * memory 当成对话者返回，那样每台桌宠都会建出一堆以会话 uuid 命名的 owner 目录。
+ */
+export function resolveOwnerFromCtx(ctx: Record<string, unknown> = {}): string {
+    const explicit = String(ctx.counterpartId || ctx.senderId || "").trim();
+    if (explicit) return ownerDirName(explicit);
+
+    const sid = String(ctx.sessionId || "");
+    if (sid.startsWith("bot-")) {
+        try {
+            // 只喂 sessionId：显式字段上面已经处理过，这里要的就是「从平台会话 id 拆」。
+            // 复用 memory.resolveIdentity 而不是另写一份正则，是为了让工作空间归属
+            // 与记忆池的 person::{key} 永远同一套判定。
+            const cp = String(memory.resolveIdentity({ sessionId: sid }).counterpartId || "").trim();
+            if (cp && cp !== "unknown") return ownerDirName(cp);
+        } catch {
+            /* 解析失败退到本机 */
+        }
+    }
+    return ownerDirName(LOCAL_OWNER);
+}
+
+export function taskDir(owner: unknown, taskId: unknown): string {
     const id = safeSegment(taskId, "taskId");
-    return path.join(resolveRoot(), id);
+    return path.join(ownerRoot(owner), id);
+}
+
+function spaceMetaPath(): string {
+    return path.join(resolveRoot(), SPACE_META_FILE);
 }
 
 /**
  * 把任务内的相对路径解析成绝对路径，顺带做越权校验。
  * 两道防线：逐段 safeSegment（挡住 .. 与非法字符），再用 path.relative 复核
  * 真实落点确实在任务目录里（挡住平台差异带来的意外）。
+ * 空相对路径 = 任务文件夹本身（读/写/删要用到 relPath 的地方各自拒空）。
  */
-export function resolveInTask(taskId: unknown, relPath: unknown): string {
-    const dir = taskDir(taskId);
+export function resolveInTask(owner: unknown, taskId: unknown, relPath: unknown = ""): string {
+    const dir = taskDir(owner, taskId);
     const raw = String(relPath == null ? "" : relPath).trim();
-    if (!raw) throw new Error("[path] 路径不能为空");
+    if (!raw) return dir;
     if (path.isAbsolute(raw)) throw new Error("[path] 不能用绝对路径");
     if (/^[a-zA-Z]:/.test(raw)) throw new Error("[path] 不能用盘符路径");
     if (/^\\\\/.test(raw)) throw new Error("[path] 不能用 UNC 路径");
@@ -136,13 +220,18 @@ export function resolveInTask(taskId: unknown, relPath: unknown): string {
         if (seg === "..") throw new Error("[path] 不允许用 .. 往上跳");
         parts.push(safeSegment(seg, "path"));
     }
-    if (!parts.length) throw new Error("[path] 路径里没有有效文件名");
+    if (!parts.length) return dir;
 
-    const abs = path.join(dir, ...parts);
+    const abs = path.resolve(dir, ...parts);
     // 复核：平台差异可能让 join 出来的落点跑到外面去
     const rel = path.relative(dir, abs);
     if (rel.startsWith("..") || path.isAbsolute(rel)) throw new Error("[path] 路径越出了任务文件夹");
     return abs;
+}
+
+/** 同一个路径的两种写法要能比出相等（大小写 / 分隔符 / 多余的点）。 */
+function samePath(a: string, b: string): boolean {
+    return path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
 }
 
 // ── 目录 / 元信息 ────────────────────────────────────────────────────
@@ -150,7 +239,7 @@ export function resolveInTask(taskId: unknown, relPath: unknown): string {
 export function ensureRoot(): string {
     const root = resolveRoot();
     fs.mkdirSync(root, { recursive: true });
-    const metaPath = path.join(root, SPACE_META_FILE);
+    const metaPath = spaceMetaPath();
     if (!fs.existsSync(metaPath)) {
         fs.writeFileSync(
             metaPath,
@@ -161,10 +250,15 @@ export function ensureRoot(): string {
     return root;
 }
 
-export function defaultMeta(taskId: string, patch: Partial<Omit<TaskMeta, "retention">> & { retention?: Partial<Retention> } = {}): TaskMeta {
+export function defaultMeta(
+    owner: string,
+    taskId: string,
+    patch: Partial<Omit<TaskMeta, "retention">> & { retention?: Partial<Retention> } = {},
+): TaskMeta {
     const now = Date.now();
     return {
         taskId,
+        owner: ownerDirName(owner),
         title: patch.title || taskId,
         description: patch.description || "",
         createdAt: now,
@@ -176,20 +270,27 @@ export function defaultMeta(taskId: string, patch: Partial<Omit<TaskMeta, "reten
 }
 
 export function ensureTask(
+    owner: unknown,
     taskId: unknown,
     patch: Partial<Omit<TaskMeta, "retention">> & { retention?: Partial<Retention> } = {},
 ): { taskId: string; dir: string; meta: TaskMeta } {
+    const ow = ownerDirName(owner);
     const id = safeSegment(taskId, "taskId");
     ensureRoot();
-    const dir = taskDir(id);
+    const dir = taskDir(ow, id);
     fs.mkdirSync(dir, { recursive: true });
 
     const metaPath = path.join(dir, TASK_META_FILE);
     let meta: TaskMeta;
     if (fs.existsSync(metaPath)) {
-        meta = readTaskMeta(id);
+        meta = readTaskMeta(ow, id);
         // 已有任务：只覆盖明确给了的字段（标题改了不必搬文件夹，这正是用 id 命名的好处）
         let touched = false;
+        if (meta.owner !== ow) {
+            // 老版本建的文件夹没有 owner 字段（或层级搬过），顺手补上
+            meta.owner = ow;
+            touched = true;
+        }
         if (patch.title && patch.title !== meta.title) {
             meta.title = patch.title;
             touched = true;
@@ -207,43 +308,50 @@ export function ensureTask(
             fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8");
         }
     } else {
-        meta = defaultMeta(id, patch);
+        meta = defaultMeta(ow, id, patch);
         fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8");
     }
     return { taskId: id, dir, meta };
 }
 
-export function readTaskMeta(taskId: unknown): TaskMeta {
+/** 读任务元信息。meta 坏了/不存在都按默认值返回——别让一个坏 json 让整个任务不可用。 */
+export function readTaskMeta(owner: unknown, taskId: unknown): TaskMeta {
+    const ow = ownerDirName(owner);
     const id = safeSegment(taskId, "taskId");
-    const metaPath = path.join(taskDir(id), TASK_META_FILE);
-    if (!fs.existsSync(metaPath)) return defaultMeta(id);
+    const metaPath = path.join(taskDir(ow, id), TASK_META_FILE);
+    if (!fs.existsSync(metaPath)) return defaultMeta(ow, id);
     try {
         const raw = JSON.parse(fs.readFileSync(metaPath, "utf8"));
         return {
-            ...defaultMeta(id),
+            ...defaultMeta(ow, id),
             ...raw,
             taskId: id,
+            // owner 以目录层级为准，不信 meta 里可能被改过的值
+            owner: ow,
             retention: { ...DEFAULT_RETENTION, ...(raw?.retention || {}) },
         };
     } catch {
         // meta 坏了不该让整个任务不可用——按默认值继续，下次写入时会被修好
-        return defaultMeta(id);
+        return defaultMeta(ow, id);
     }
 }
 
-export function patchTaskMeta(taskId: unknown, patch: Partial<TaskMeta>): TaskMeta {
+export function patchTaskMeta(owner: unknown, taskId: unknown, patch: Partial<TaskMeta>): TaskMeta {
+    const ow = ownerDirName(owner);
     const id = safeSegment(taskId, "taskId");
-    const meta = readTaskMeta(id);
-    const next: TaskMeta = { ...meta, ...patch, taskId: id, updatedAt: Date.now() };
-    fs.writeFileSync(path.join(taskDir(id), TASK_META_FILE), JSON.stringify(next, null, 2), "utf8");
+    const meta = readTaskMeta(ow, id);
+    // owner 不允许被 patch 改掉：归属由目录层级 + 参数决定，改它没有合法用途
+    const next: TaskMeta = { ...meta, ...patch, taskId: id, owner: ow, updatedAt: Date.now() };
+    fs.writeFileSync(path.join(taskDir(ow, id), TASK_META_FILE), JSON.stringify(next, null, 2), "utf8");
     return next;
 }
 
 /** 记一次运行。定时任务跑完调这个，用户的「最近运行」才有数。 */
-export function recordRun(taskId: unknown): TaskMeta {
+export function recordRun(owner: unknown, taskId: unknown): TaskMeta {
+    const ow = ownerDirName(owner);
     const id = safeSegment(taskId, "taskId");
-    const meta = readTaskMeta(id);
-    return patchTaskMeta(id, { lastRunAt: Date.now(), runCount: (meta.runCount || 0) + 1 });
+    const meta = readTaskMeta(ow, id);
+    return patchTaskMeta(ow, id, { lastRunAt: Date.now(), runCount: (meta.runCount || 0) + 1 });
 }
 
 // ── 文件操作 ────────────────────────────────────────────────────────
@@ -279,14 +387,15 @@ function dirStats(dir: string): { files: number; bytes: number } {
     return { files, bytes };
 }
 
-export function listFiles(taskId: unknown, relPath = ""): FileEntry[] {
+export function listFiles(owner: unknown, taskId: unknown, relPath = ""): FileEntry[] {
+    const ow = ownerDirName(owner);
     const id = safeSegment(taskId, "taskId");
-    const target = relPath ? resolveInTask(id, relPath) : taskDir(id);
+    const target = resolveInTask(ow, id, relPath);
     if (!fs.existsSync(target)) throw new Error(`路径不存在：${relPath || "(任务根目录)"}`);
     if (!fs.statSync(target).isDirectory()) throw new Error(`不是文件夹：${relPath}`);
     // 只在列**任务根目录**时藏掉 meta.json（框架文件，用户不用关心）；
     // 列子目录时它本来就不在那儿，不该误过滤同名的用户文件。
-    const atTaskRoot = !relPath;
+    const atTaskRoot = samePath(target, taskDir(ow, id));
     const entries = fs.readdirSync(target, { withFileTypes: true })
         .filter((e) => !(atTaskRoot && e.name === TASK_META_FILE))
         .sort((a, b) => {
@@ -311,15 +420,21 @@ export function listFiles(taskId: unknown, relPath = ""): FileEntry[] {
     return entries;
 }
 
-export function statPath(taskId: unknown, relPath: unknown): { dir: boolean; size: number; mtime: string } | null {
-    const abs = resolveInTask(taskId, relPath);
+export function statPath(
+    owner: unknown,
+    taskId: unknown,
+    relPath: unknown = "",
+): { dir: boolean; size: number; mtime: string } | null {
+    const abs = resolveInTask(owner, taskId, relPath);
     if (!fs.existsSync(abs)) return null;
     const st = fs.statSync(abs);
     return { dir: st.isDirectory(), size: st.size, mtime: new Date(st.mtimeMs).toLocaleString("zh-CN") };
 }
 
-export function readFile(taskId: unknown, relPath: unknown): string {
-    const abs = resolveInTask(taskId, relPath);
+export function readFile(owner: unknown, taskId: unknown, relPath: unknown): string {
+    const raw = String(relPath == null ? "" : relPath).trim();
+    if (!raw) throw new Error("[workspace] 读文件要给出相对路径");
+    const abs = resolveInTask(owner, taskId, raw);
     if (!fs.existsSync(abs)) throw new Error(`文件不存在：${relPath}`);
     const st = fs.statSync(abs);
     if (st.isDirectory()) throw new Error(`这是文件夹不是文件：${relPath}，用 ls 看里面`);
@@ -332,8 +447,9 @@ export function readFile(taskId: unknown, relPath: unknown): string {
     return fs.readFileSync(abs, "utf8");
 }
 
-export function writeFile(taskId: unknown, relPath: unknown, content: string): number {
-    const abs = resolveInTask(taskId, relPath);
+export function writeFile(owner: unknown, taskId: unknown, relPath: unknown, content: string): number {
+    const raw = String(relPath == null ? "" : relPath).trim();
+    if (!raw) throw new Error("[workspace] 写文件要给出相对路径");
     const text = String(content == null ? "" : content);
     const bytes = Buffer.byteLength(text, "utf8");
     if (bytes > LIMITS.writeBytes) {
@@ -342,29 +458,33 @@ export function writeFile(taskId: unknown, relPath: unknown, content: string): n
             + "分成几个文件写",
         );
     }
+    const abs = resolveInTask(owner, taskId, raw);
     fs.mkdirSync(path.dirname(abs), { recursive: true });
-    // 写之前确认父目录没被换成文件（mkdir 会抛，但报错信息不友好）
     fs.writeFileSync(abs, text, "utf8");
     return bytes;
 }
 
-export function mkdir(taskId: unknown, relPath: unknown): string {
-    const abs = resolveInTask(taskId, relPath);
+export function mkdir(owner: unknown, taskId: unknown, relPath: unknown): string {
+    const raw = String(relPath == null ? "" : relPath).trim();
+    if (!raw) throw new Error("[workspace] 建目录要给出相对路径");
+    const abs = resolveInTask(owner, taskId, raw);
     fs.mkdirSync(abs, { recursive: true });
     return abs;
 }
 
-/** 删单个文件或空目录。不给 relPath 就拒——删整个任务要走 removeTask，语义要清楚。 */
-export function remove(taskId: unknown, relPath: unknown): { removed: boolean; dir: boolean } {
+/**
+ * 删单个文件或空目录。不给 relPath 就拒——删整个任务要走 removeTask，语义要清楚。
+ * 刻意只删空目录（核心版是递归删）：非空目录要她一个个删，避免一条命令抹掉一堆产出。
+ */
+export function remove(owner: unknown, taskId: unknown, relPath: unknown): { removed: boolean; dir: boolean } {
     const raw = String(relPath == null ? "" : relPath).trim();
     if (!raw) throw new Error("不能删整个任务文件夹（要删整个任务用 rm_task）");
-    const abs = resolveInTask(taskId, raw);
-    const dir = taskDir(taskId);
-    if (path.resolve(abs) === path.resolve(dir)) throw new Error("不能删整个任务文件夹");
+    const abs = resolveInTask(owner, taskId, raw);
+    const dir = taskDir(owner, taskId);
+    if (samePath(abs, dir)) throw new Error("不能删整个任务文件夹");
     if (!fs.existsSync(abs)) return { removed: false, dir: false };
     const st = fs.statSync(abs);
     if (st.isDirectory()) {
-        // 只删空目录：非空目录要她一个个删，避免一条命令抹掉一堆产出
         const rest = fs.readdirSync(abs);
         if (rest.length) throw new Error(`文件夹不是空的（还有 ${rest.length} 项），先清空再删`);
         fs.rmdirSync(abs);
@@ -374,8 +494,9 @@ export function remove(taskId: unknown, relPath: unknown): { removed: boolean; d
     return { removed: true, dir: false };
 }
 
-export function removeTask(taskId: unknown): { removed: boolean } {
-    const dir = taskDir(taskId);
+/** 删整个任务文件夹（含 meta）。只动这一个 owner 的那一个任务。 */
+export function removeTask(owner: unknown, taskId: unknown): { removed: boolean } {
+    const dir = taskDir(owner, taskId);
     if (!fs.existsSync(dir)) return { removed: false };
     fs.rmSync(dir, { recursive: true, force: true });
     return { removed: true };
@@ -389,8 +510,8 @@ interface FileRec {
     size: number;
 }
 
-function collectFiles(taskId: string): FileRec[] {
-    const dir = taskDir(taskId);
+function collectFiles(owner: unknown, taskId: unknown): FileRec[] {
+    const dir = taskDir(owner, taskId);
     const out: FileRec[] = [];
     const walk = (d: string, depth: number) => {
         if (depth > 16) return;
@@ -424,12 +545,17 @@ function collectFiles(taskId: string): FileRec[] {
  * 按保留策略清理旧产出：先按天数，再按数量，最后按总字节。
  * 三轮都从最旧的开始删，meta.json 永不删。
  */
-export function pruneTask(taskId: unknown, policy: Partial<Retention> = {}): { deleted: number; freedBytes: number } {
+export function pruneTask(
+    owner: unknown,
+    taskId: unknown,
+    policy: Partial<Retention> = {},
+): { deleted: number; freedBytes: number } {
+    const ow = ownerDirName(owner);
     const id = safeSegment(taskId, "taskId");
-    const meta = readTaskMeta(id);
+    const meta = readTaskMeta(ow, id);
     const p: Retention = { ...DEFAULT_RETENTION, ...(meta.retention || {}), ...policy };
 
-    let files = collectFiles(id);
+    let files = collectFiles(ow, id);
     let deleted = 0;
     let freed = 0;
     const drop = (f: FileRec) => {
@@ -502,7 +628,7 @@ export function pruneTask(taskId: unknown, policy: Partial<Retention> = {}): { d
         }
     };
     try {
-        sweepEmpty(taskDir(id), 0);
+        sweepEmpty(taskDir(ow, id), 0);
     } catch {
         /* 忽略 */
     }
@@ -510,16 +636,26 @@ export function pruneTask(taskId: unknown, policy: Partial<Retention> = {}): { d
     return { deleted, freedBytes: freed };
 }
 
-export function pruneAll(): { deleted: number; freedBytes: number } {
+/**
+ * 对某人的所有任务跑一遍清理。
+ * owner 不传就清全部 owner（定时兜底清理用）；传了就**只清那一个**。
+ */
+export function pruneAll(
+    owner?: string | null,
+    policy: Partial<Retention> = {},
+): { deleted: number; freedBytes: number } {
+    const owners = owner ? [ownerDirName(owner)] : listOwners().map((o) => o.owner);
     let deleted = 0;
     let freed = 0;
-    for (const t of listTasks()) {
-        try {
-            const r = pruneTask(t.taskId);
-            deleted += r.deleted;
-            freed += r.freedBytes;
-        } catch (e) {
-            console.warn(`[workspace] 清理任务 ${t.taskId} 失败:`, (e as Error)?.message || e);
+    for (const ow of owners) {
+        for (const t of listTasks(ow)) {
+            try {
+                const r = pruneTask(ow, t.taskId, policy);
+                deleted += r.deleted;
+                freed += r.freedBytes;
+            } catch (e) {
+                console.warn(`[workspace] 清理任务 ${ow}/${t.taskId} 失败:`, (e as Error)?.message || e);
+            }
         }
     }
     return { deleted, freedBytes: freed };
@@ -527,8 +663,15 @@ export function pruneAll(): { deleted: number; freedBytes: number } {
 
 // ── 列表与概览 ──────────────────────────────────────────────────────
 
-export function listTasks(): TaskListItem[] {
-    const root = resolveRoot();
+/**
+ * 列**某个人**的任务文件夹。
+ *
+ * 2026-11-20 之前这个函数无参、直接扫整个根目录 —— 谁的都能看见，这正是用户报障
+ * 的根因。现在 owner 是必填的第一参数：隔离是默认行为，不是可选的过滤条件。
+ */
+export function listTasks(owner: unknown): TaskListItem[] {
+    const ow = ownerDirName(owner);
+    const root = ownerRoot(ow);
     if (!fs.existsSync(root)) return [];
     const out: TaskListItem[] = [];
     let list: fs.Dirent[];
@@ -541,7 +684,7 @@ export function listTasks(): TaskListItem[] {
         if (!e.isDirectory()) continue;
         if (e.name.startsWith(".")) continue; // 元信息文件之类
         try {
-            const meta = readTaskMeta(e.name);
+            const meta = readTaskMeta(ow, e.name);
             const stats = dirStats(path.join(root, e.name));
             out.push({
                 taskId: e.name,
@@ -565,19 +708,53 @@ export function listTasks(): TaskListItem[] {
     return out;
 }
 
-export function overview(): {
+/**
+ * 空间里有哪些 owner 目录（**只给管理/排查用**，不参与正常对话）。
+ *
+ * 刻意不摆进能力的 action 枚举：主人要看别人的任务必须走显式确认，
+ * 这个函数只是让上层有办法回答「还有别人吗、有几个」。
+ */
+export function listOwners(): Array<{ owner: string; tasks: number }> {
+    const root = resolveRoot();
+    let list: fs.Dirent[];
+    try {
+        list = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+        return [];
+    }
+    const out: Array<{ owner: string; tasks: number }> = [];
+    for (const e of list) {
+        if (!e.isDirectory()) continue;
+        if (e.name === ROOT_DIR_NAME) continue;
+        if (e.name.startsWith(".")) continue; // 元信息文件 / 隐藏目录不是 owner
+        try {
+            // 目录名不合法（历史遗留、手工建的怪名字）时 ownerDirName 会抛，跳过即可
+            const ow = ownerDirName(e.name);
+            out.push({ owner: ow, tasks: listTasks(ow).length });
+        } catch {
+            continue;
+        }
+    }
+    return out;
+}
+
+/** 给某人看的空间概览（只统计他自己那层，绝不汇总别人的）。 */
+export function overview(owner: unknown): {
     root: string;
+    owner: string;
     exists: boolean;
     tasks: number;
     files: number;
     bytes: number;
     list: TaskListItem[];
 } {
-    const root = resolveRoot();
+    const ow = ownerDirName(owner);
+    const root = ownerRoot(ow);
     const exists = fs.existsSync(root);
-    const list = exists ? listTasks() : [];
+    const list = exists ? listTasks(ow) : [];
     return {
         root,
+        owner: ow,
         exists,
         tasks: list.length,
         files: list.reduce((n, t) => n + t.files, 0),

@@ -71,6 +71,11 @@ function ctxOf(ctx: any = {}): memory.MemoryCtx {
         role: ctx.role || null,
         counterpartId: ctx.counterpartId || null,
         isGroup: typeof ctx.isGroup === "boolean" ? ctx.isGroup : memory.isGroupSession(ctx.sessionId),
+        // 大模型复核用：把本轮已配好的模型上下文透传给 remember()。
+        // 只在「涉及第三方 / 命中负面词」等拿不准的场景才会真的调用
+        // （见 memoryJudge.shouldConsult），日常一句话记忆不花这次钱。
+        // 没配模型时为 null，judgeMemory 会静默退化为启发式，绝不阻塞写入。
+        aiContext: ctx.openai ? { openai: ctx.openai, model: ctx.model } : null,
     };
 }
 

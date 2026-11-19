@@ -23,6 +23,9 @@ function rowToJob(row: storage.JobRow | undefined): ScheduledJob | undefined {
         updatedAt: row.updated_at,
     };
     if (row.last_fired_at != null) job.lastFiredAt = row.last_fired_at;
+    // 归属人跟着任务走。没有它，到点触发时只能在「没有会话上下文」的情况下
+    // 从 sessionId 猜归属，而 workspace:<taskId> 猜出来是「本机」= 主人的桌面。
+    (job as any).ownerKey = String(row.owner_key || "");
     return job;
 }
 
@@ -41,6 +44,9 @@ function jobToRow(job: ScheduledJob): storage.JobRow {
         created_at: job.createdAt,
         updated_at: job.updatedAt,
         last_fired_at: job.lastFiredAt ?? null,
+        // ⚠️ 以前这一层把 taskRuntime 写好的 ownerKey 静默丢掉了 ——
+        //    上游写、下游读，中间必须透传，否则修了上游也白修。
+        owner_key: String((job as any).ownerKey || ""),
     };
 }
 

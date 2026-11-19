@@ -425,8 +425,18 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
         // 不注入的话，她不知道自己能保存东西，每次被问「记下来」都只会说「我记在
         // 心里的记忆里」——而用户要的是能在文件管理器里翻到的产出。
         // 只报事实（在哪、有几个任务），不列举全部文件（那会挤爆上下文）。
+        //
+        // ⚠️ 必须带上「此刻在跟谁说话」的身份字段：工作空间按 owner 分目录，
+        // 不带身份就会注入成同一个人的任务，朋友能从提示词里看到主人的任务名
+        // （用户 2026-11-20 报的隐私问题）。
         try {
-            const wsBlock = buildWorkspaceBlock();
+            const wsBlock = buildWorkspaceBlock({
+                sessionId,
+                uid: aiContext.userid,
+                counterpartId: scene && scene.senderId ? String(scene.senderId) : undefined,
+                role: scene && scene.role ? String(scene.role) : null,
+                isGroup: scene ? String(scene.chatType || "") === "group" : undefined,
+            });
             if (wsBlock) systemPrompt += wsBlock;
         } catch (e: any) {
             console.warn("[conversationService] 工作空间摘要注入失败（已忽略）:", e?.message || e);
@@ -801,6 +811,12 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
                         counterpartId: scene?.senderId ? String(scene.senderId) : undefined,
                         // 管理权限角色（owner/admin/user）；self_* 工具按它判可读/可写范围
                         role: scene?.role ? String(scene.role) : null,
+                        // 本机可信入口（桌宠聊天框）。必须由入口显式表态，工具层不许猜
+                        // sessionId 形状 —— 老实现「不以 bot 开头就当 owner」正是
+                        // 「她以为自己是主人」的根源（见 selfOps.roleOf 的说明）。
+                        // 与核心侧 conversationService.js 同口径。
+                        trustedLocal: !!scene && String(scene.chatType || "") === "local",
+                        displayName: scene?.senderName ? String(scene.senderName) : undefined,
                         // 前端执行器兜底（兼容尚未按新接口注册的调用方），形态 (name, args)。
                         invokeFrontendTool: aiContext.invokeFrontendTool,
                     });

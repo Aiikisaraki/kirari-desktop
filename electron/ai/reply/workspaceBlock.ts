@@ -14,15 +14,47 @@
 // ── 注入段数不变 ──────────────────────────────────────────────────
 // 提示词注入器固定 4 段（system.base / daily_brief / knowledge / skills）。
 // 这个块是追加到 system.base 文本里的，不新增段。
+//
+// ── 按人隔离（2026-11-20）────────────────────────────────────────
+// 工作空间按 owner 分目录，这个注入块也必须只报**当前这个人的**任务。
+// 否则朋友会从提示词里看到主人的任务名——比她自己调工具看到还糟，
+// 因为那是「不问她就能知道」，连确认的机会都没有。
 import * as workspace from "../services/workspace";
 
 /** 最多列几个任务（再多就只说总数，让她用 tasks 动作自己看）。 */
 export const MAX_TASKS_IN_PROMPT = 8;
 
-export function buildWorkspaceBlock(): string {
+/** 「此刻在跟谁说话」的最小上下文 —— 与能力层的 ctx 同一个来源。 */
+export type WorkspaceBlockCtx = {
+    sessionId?: string;
+    uid?: number | string;
+    counterpartId?: string;
+    senderId?: string;
+    role?: string | null;
+    isGroup?: boolean;
+};
+
+/**
+ * 解析注入块该用谁的工作空间。
+ * 规则收敛在 services/workspace.resolveOwnerFromCtx，三处共用一份。
+ */
+export function resolveOwnerForBlock(ctx: WorkspaceBlockCtx = {}): string {
+    try {
+        return workspace.resolveOwnerFromCtx(ctx);
+    } catch {
+        return workspace.ownerDirName(workspace.LOCAL_OWNER);
+    }
+}
+
+/**
+ * 生成工作空间段。任何异常都返回 ""（注入失败不该影响正常回答）。
+ * @param ctx 可选，「此刻在跟谁说话」。不给则按本机/控制台处理。
+ */
+export function buildWorkspaceBlock(ctx: WorkspaceBlockCtx = {}): string {
     let o: ReturnType<typeof workspace.overview>;
     try {
-        o = workspace.overview();
+        const owner = resolveOwnerForBlock(ctx);
+        o = workspace.overview(owner);
     } catch {
         return "";
     }
@@ -55,12 +87,17 @@ export function buildWorkspaceBlock(): string {
         "- 想看/写/整理里面的东西就用 workspace 能力（ls / read / write / append / mkdir / rm）。",
     );
     lines.push(
-        "- 主人要你「定期做某件并留下结果」时，用 schedule_task 建定期任务；" +
+        "- ⚠️ 这个工作空间是**按人分开的**：这里列出的只是「此刻跟你说话的这个人的」任务。" +
+            "别人的任务你看不到，就算你是主人也一样。要看别人的必须先问、得到明确同意才行" +
+            "（workspace 的 others 动作）；没得到同意之前，连「有几个人的任务」都别主动说。",
+    );
+    lines.push(
+        "- 用户要你「定期做某件并留下结果」时，用 schedule_task 建定期任务；" +
             "只是「到点提醒一句」用 schedule_reminder。",
     );
     lines.push(
         "- 说到「记下来」时想清楚：进记忆池的是「你记得的事」，进工作空间的是「能翻到的文件」。" +
-            "主人要文件就写文件，别只说记住了。",
+            "用户要文件就写文件，别只说记住了。",
     );
     return lines.join("\n");
 }

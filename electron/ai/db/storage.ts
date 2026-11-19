@@ -81,6 +81,17 @@ function migrateMemoryColumns(): void {
     const cols = (db.prepare("PRAGMA table_info(memories)").all() as { name: string }[]).map((c) => c.name);
     if (!cols.length) return; // 表还不存在（由 SCHEMA 建，含该列）
     if (!cols.includes("about_person")) db.exec("ALTER TABLE memories ADD COLUMN about_person TEXT");
+    // ── 可信度轴（2026-11-20）──────────────────────────────────────
+    // 用户原话：「谁在说话也是一个很重要的考量，要是我随便说一个别人的信息
+    // 怎么办，这万一不是事实呢」。于是「谁在说话」不再决定"能不能存"，
+    // 而是决定"存成什么可信度"：当事人自述 → fact，听来的第三方信息 →
+    // hearsay，传闻/他人负面私事 → rumor。她回答时会据此带上「听说」。
+    // 默认 'fact' 只为兼容老数据，新写入一律由 epistemicFor() 显式判定。
+    if (!cols.includes("epistemic")) {
+        db.exec("ALTER TABLE memories ADD COLUMN epistemic TEXT NOT NULL DEFAULT 'fact'");
+    }
+    // 这条信息是谁提供的（平台账号）。用于回答"你听谁说的"。
+    if (!cols.includes("claimed_by")) db.exec("ALTER TABLE memories ADD COLUMN claimed_by TEXT");
     // 索引放在补列之后建，两种结构都能成功
     db.exec("CREATE INDEX IF NOT EXISTS idx_memories_about ON memories(about_person, deleted)");
 }
@@ -130,6 +141,16 @@ function ensureTaskSchemas(): void {
     for (const col of SCHEDULED_JOBS_COLUMNS) {
         if (!jobCols.includes(col.name)) db.exec(`ALTER TABLE scheduled_jobs ADD COLUMN ${col.ddl}`);
     }
+    // ── 2026-11-20 身份排查（A2）：定时任务的归属人 ──────────────────
+    // 到点触发时调度器手上只有这一行数据，没有会话上下文。没有 owner_key 就
+    // 只能从 session_id 猜归属，而 `workspace:<taskId>` 里不含用户标识（猜不出），
+    // 猜不出就会退化成「推给本机桌面」，也就是**主人的桌面** —— 用户报障的
+    // 「她的任务怎么跑到我这儿来了」正是这条路径。
+    // taskRuntime 一直有写 job.ownerKey，但 jobToRow 白名单把它丢了，白写。
+    if (!jobCols.includes("owner_key")) {
+        db.exec("ALTER TABLE scheduled_jobs ADD COLUMN owner_key TEXT NOT NULL DEFAULT ''");
+    }
+    db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_owner ON scheduled_jobs(owner_key, status)");
 }
 
 /** 取得数据库实例；未显式初始化时用兜底路径（会告警，但不阻塞）。 */
@@ -206,6 +227,11 @@ const SCHEMA = `
     origin_session TEXT,
     about_person TEXT,
     source TEXT NOT NULL DEFAULT 'owner',
+    -- 可信度轴（2026-11-20）：fact / observed / hearsay / rumor。
+    -- 与 visibility 正交：visibility 管"能不能说"，epistemic 管"说时该不该带听说"。
+    epistemic TEXT NOT NULL DEFAULT 'fact',
+    -- 这条信息是谁提供的（平台账号）。用于"你听谁说的"。
+    claimed_by TEXT,
     importance INTEGER NOT NULL DEFAULT 3,
     hits INTEGER NOT NULL DEFAULT 0,
     last_hit_at DATETIME,
@@ -736,6 +762,10 @@ export type MemoryRow = {
     originSession: string | null;
     aboutPerson: string | null;
     source: string;
+    /** 可信度轴：fact / observed / hearsay / rumor。与 visibility 正交。 */
+    epistemic?: string;
+    /** 这条信息是谁提供的（平台账号）。用于"你听谁说的"。 */
+    claimedBy?: string | null;
     importance: number;
     hits: number;
     lastHitAt: string | null;
@@ -752,6 +782,8 @@ type RawMemoryRow = {
     origin_session: string | null;
     about_person: string | null;
     source: string;
+    epistemic?: string | null;
+    claimed_by?: string | null;
     importance: number;
     hits: number;
     last_hit_at: string | null;
@@ -769,6 +801,9 @@ function mapMemoryRow(r: RawMemoryRow): MemoryRow {
         originSession: r.origin_session,
         aboutPerson: r.about_person || null,
         source: r.source,
+        // 可信度轴：老数据没有这列时按 fact 处理（保持既有行为）。
+        epistemic: r.epistemic || "fact",
+        claimedBy: r.claimed_by || null,
         importance: r.importance,
         hits: r.hits,
         lastHitAt: r.last_hit_at,
@@ -786,13 +821,20 @@ export async function addMemory(row: {
     aboutPerson?: string | null;
     source?: string;
     importance?: number;
+    /** 可信度：fact / observed / hearsay / rumor。不传按 fact（兼容老调用点）。 */
+    epistemic?: string;
+    /** 这条信息是谁提供的（平台账号）。 */
+    claimedBy?: string | null;
 }): Promise<number | null> {
     const content = String(row.content || "").trim();
     if (!content) return null;
+    const epistemic = ["fact", "observed", "hearsay", "rumor"].includes(String(row.epistemic))
+        ? String(row.epistemic)
+        : "fact";
     const info = getDb()
         .prepare(
-            `INSERT INTO memories (subject, kind, content, visibility, origin_session, about_person, source, importance)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO memories (subject, kind, content, visibility, origin_session, about_person, source, importance, epistemic, claimed_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
             String(row.subject || "global"),
@@ -803,6 +845,8 @@ export async function addMemory(row: {
             row.aboutPerson || null,
             String(row.source || "owner"),
             Math.min(5, Math.max(1, Number(row.importance) || 3)),
+            epistemic,
+            row.claimedBy || null,
         );
     return Number(info.lastInsertRowid);
 }
@@ -1000,6 +1044,24 @@ export async function getOwnerKey(): Promise<string | null> {
         .prepare("SELECT person_key FROM people WHERE role = 'owner' ORDER BY first_seen_at ASC LIMIT 1")
         .get() as { person_key: string } | undefined;
     return r ? r.person_key : null;
+}
+
+/**
+ * 同步版（推送路径专用）。
+ *
+ * 定时提醒的桌面投递是同步回调，它需要立刻判断「这条提醒是不是主人自己的」
+ * —— 别人的提醒注入这台桌面的聊天界面，就是「她的任务跑到我这儿来了」。
+ * 查不到 owner 记录（全新装机）返回 null，调用方按 fail-closed 处理。
+ */
+export function getOwnerKeySync(): string | null {
+    try {
+        const r = getDb()
+            .prepare("SELECT person_key FROM people WHERE role = 'owner' ORDER BY first_seen_at ASC LIMIT 1")
+            .get() as { person_key: string } | undefined;
+        return r ? String(r.person_key) : null;
+    } catch {
+        return null;
+    }
 }
 
 // ---------------------------------------------------------------- 记忆关联（memory_links）
@@ -1483,6 +1545,8 @@ export type JobRow = {
     job_id: string; session_id: string; origin: string; uid: number;
     kind: string; title: string; payload: string; due_at: number; recurrence: string;
     status: string; created_at: number; updated_at: number; last_fired_at: number | null;
+    /** 这条任务归谁（QQ 号/openid）。到点触发时唯一的归属来源，见 storage 建表注释。 */
+    owner_key: string;
 };
 
 export function getTaskRow(taskId: string): TaskRow | undefined {
@@ -1511,11 +1575,12 @@ export function getJobRow(jobId: string): JobRow | undefined {
 }
 export function saveJobRow(row: JobRow): void {
     getDb().prepare(`
-        INSERT INTO scheduled_jobs (job_id, session_id, origin, uid, kind, title, payload, due_at, recurrence, status, created_at, updated_at, last_fired_at)
-        VALUES (@job_id, @session_id, @origin, @uid, @kind, @title, @payload, @due_at, @recurrence, @status, @created_at, @updated_at, @last_fired_at)
+        INSERT INTO scheduled_jobs (job_id, session_id, origin, uid, kind, title, payload, due_at, recurrence, status, created_at, updated_at, last_fired_at, owner_key)
+        VALUES (@job_id, @session_id, @origin, @uid, @kind, @title, @payload, @due_at, @recurrence, @status, @created_at, @updated_at, @last_fired_at, @owner_key)
         ON CONFLICT(job_id) DO UPDATE SET
             title=excluded.title, payload=excluded.payload, due_at=excluded.due_at,
-            status=excluded.status, updated_at=excluded.updated_at, last_fired_at=excluded.last_fired_at
+            status=excluded.status, updated_at=excluded.updated_at, last_fired_at=excluded.last_fired_at,
+            owner_key=excluded.owner_key
     `).run(row);
 }
 export function dueJobRows(now: number, limit: number): JobRow[] {
