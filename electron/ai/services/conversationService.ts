@@ -21,6 +21,8 @@ import {
     stripNonConversational,
 } from "../reply/promptBuilder";
 import { preflightTools, detectCorrectionIntent } from "../reply/intent";
+import { buildTimeContext } from "../reply/timeContext";
+import * as locationSvc from "./locationService";
 import { streamChatCompletion, polishToolResult } from "../reply/streaming";
 import * as dailyBriefing from "./dailyBriefingService";
 import * as knowledgeRetrieval from "../knowledge/retrievalService";
@@ -346,6 +348,22 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
         let systemPrompt = preflight.injected
             ? sys.withTools.replace("{{TOOL_RESULTS}}", preflight.injected.join("\n"))
             : sys.normal;
+
+        // 时间基准：查主人已存时区，生成带标签、唯一可信的「当前时间」注入段。
+        // 与核心版对称；见 reply/timeContext.ts 的背景说明。
+        let timeContext = "";
+        try {
+            const locRec = await locationSvc.getUserLocation(aiContext.userid, locationScope || undefined);
+            timeContext = buildTimeContext({
+                timezone: locRec?.timezone,
+                locationLabel: locRec?.name || locRec?.location || undefined,
+            });
+        } catch (e) {
+            // 查库失败也要有时间基准，用默认时区兜底，绝不留空让模型猜。
+            timeContext = buildTimeContext({});
+        }
+        systemPrompt += timeContext;
+
         // 阶段 C：把该会话尚未完成的任务拼进 system.base，实现「新消息进来先恢复未完成任务」。
         const taskResume = taskRuntime.resumeBlock(sessionId);
         if (taskResume) systemPrompt += taskResume;

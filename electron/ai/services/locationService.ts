@@ -355,7 +355,15 @@ export async function resolveForQuery(
         // IP 定位也失败：不卡死、不反复追问，用本机时区临时兜底回答时间；
         // 天气需要坐标，这里无法兜底，返回 source=fallback 由调用方提示补充城市。
         console.warn("[location] IP 查询失败，回退本机时区（无坐标，无法查天气）");
-        const fallbackTz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+        // 绝不退回裸 UTC：进程多跑在 UTC，那会把 13:54 读成凌晨 05:54。
+        // 取不到 IANA 时区时退到东八区（主人大多在国内）。
+        let fallbackTz = "Asia/Shanghai";
+        try {
+            const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
+            if (detected && detected !== "UTC") fallbackTz = detected;
+        } catch {
+            /* ignore */
+        }
         return {
             location: "本地",
             latitude: null,
