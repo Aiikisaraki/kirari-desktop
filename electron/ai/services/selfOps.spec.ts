@@ -70,4 +70,27 @@ describe("selfOps（自我运维）", () => {
         expect(a).toContain("modelConfig.key");
         expect(a).toContain("thinking.mode");
     });
+
+    it("self_manage：创建提醒后可列出、改内容、取消", () => {
+        const ctx = { sessionId: "s1", uid: 1, origin: "self_ops" as const };
+        const created = selfOps.manage("create_reminder", { title: "测试提醒", text: "出门", delayMs: 60000 }, ctx);
+        expect(created).toContain("已补设提醒");
+        const list = selfOps.read("reminders", ctx);
+        expect(list).toContain("测试提醒");
+        const jobId = (list.match(/(job-[a-z0-9]+-[a-z0-9]+)/) || [])[1];
+        expect(jobId).toBeTruthy();
+        expect(selfOps.manage("update_reminder", { jobId, text: "改成上午" }, ctx)).toContain("已更新提醒");
+        expect(selfOps.manage("cancel_reminder", { jobId }, ctx)).toContain("已取消提醒");
+        expect(selfOps.read("reminders", ctx)).toContain("已取消");
+    });
+
+    it("self_manage：系统任务(daily_brief)不可被当作提醒取消", () => {
+        const ctx = { sessionId: "s1", uid: 1 };
+        const out = selfOps.manage("cancel_reminder", { jobId: "does-not-exist" }, ctx);
+        expect(out).toContain("找不到提醒");
+    });
+
+    it("self_manage：未知 action 报错", () => {
+        expect(selfOps.manage("drop_database", {}, {})).toContain("未知 action");
+    });
 });
