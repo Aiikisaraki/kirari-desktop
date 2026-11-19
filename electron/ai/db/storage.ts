@@ -1526,3 +1526,20 @@ export function dueJobRows(now: number, limit: number): JobRow[] {
 export function listJobRows(sessionId: string, limit: number): JobRow[] {
     return getDb().prepare("SELECT * FROM scheduled_jobs WHERE session_id = ? ORDER BY due_at DESC LIMIT ?").all(sessionId, limit) as JobRow[];
 }
+/** 某 uid 某 kind 的未结束任务数（用于「一个人最多挂几个定期任务」的配额判断）。 */
+export function countJobRowsByKind(kind: string, uid: number): number {
+    const row = getDb()
+        .prepare("SELECT COUNT(*) AS n FROM scheduled_jobs WHERE kind = ? AND uid = ? AND status = 'pending'")
+        .get(kind, uid) as { n: number } | undefined;
+    return row ? row.n : 0;
+}
+/** 某 uid 某 kind 的任务列表（含已结束，调用方自行过滤）。 */
+export function listJobRowsByKind(kind: string, uid: number, limit = 100): JobRow[] {
+    return getDb()
+        .prepare("SELECT * FROM scheduled_jobs WHERE kind = ? AND uid = ? ORDER BY due_at ASC LIMIT ?")
+        .all(kind, uid, limit) as JobRow[];
+}
+/** 取消即删除：定期任务没有「历史」价值，留着只会让配额越算越大。 */
+export function deleteJobRow(jobId: string): void {
+    getDb().prepare("DELETE FROM scheduled_jobs WHERE job_id = ?").run(jobId);
+}

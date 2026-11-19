@@ -9,6 +9,7 @@ import { isDue, fireJob } from "kirari-agent";
 import { jobStore } from "../events/jobStore";
 import { recorder } from "../events/recorder";
 import * as briefSchedule from "./briefSchedule";
+import * as workspaceTask from "./workspaceTask";
 
 type FireHandler = (job: { title: string; payload: string; sessionId: string; uid: number }) => boolean | void;
 
@@ -38,8 +39,33 @@ export async function scanOnce(): Promise<number> {
                     // 阶段 E：简报任务。生成失败也只 warn（briefSchedule 内部回滚档位锁），
                     // job 照常顺延，避免 15s 热循环；当天缺简报由对话时惰性兜底。
                     await briefSchedule.fireDailyBrief(job, now);
+                } else if (job.kind === "workspace_task" as never) {
+                    // 工作空间定期任务：到点让它自己去执行并把产出写进任务文件夹。
+                    // 叶子节点在这里会**转发给主机**执行（见 services/workspaceTask.ts），
+                    // 产出落在主机，叶子只拿结果——用户 2026-11-19 明确要求的行为。
+                    await workspaceTask.fire(job, now);
                 }
                 const next = fireJob(job, now);
+
+                // weekly / monthly 的间隔不是 24h，共享包的 computeNextRun 只会 +24h。
+                // 这里按 payload 里存的周期字段把 dueAt 覆盖成正确的下一次。
+                // once / daily 走共享包的原有语义，不碰。
+                if (job.kind === ("workspace_task" as never) && next.status === "pending") {
+                    try {
+                        const payload = workspaceTask.parsePayload(next.payload);
+                        const scheduleTask = await import("../capabilities/builtin/schedule_task");
+                        const overridden = payload
+                            ? scheduleTask.nextDueAtAfterFire(payload, next.dueAt)
+                            : null;
+                        if (overridden != null) next.dueAt = overridden;
+                    } catch (e) {
+                        console.warn(
+                            `[sched] 重算 job=${job.jobId} 下次时间失败（沿用共享包结果）:`,
+                            e instanceof Error ? e.message : e,
+                        );
+                    }
+                }
+
                 jobStore.save(next, "job_fired");
                 fired++;
             } catch (e) {

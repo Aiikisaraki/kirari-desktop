@@ -17,6 +17,7 @@ import { ChatSessionService, type ChatStateSnapshot } from "./chat-session-servi
 import * as scheduledJobsService from "./ai/services/scheduledJobsService";
 // 阶段 E：每日简报落库调度（每 uid × 08/16/22 三档）+ 简报生成。
 import * as briefSchedule from "./ai/services/briefSchedule";
+import * as workspaceTask from "./ai/services/workspaceTask";
 import * as dailyBriefingService from "./ai/services/dailyBriefingService";
 import { AdapterManager } from "./adapter/adapter-manager";
 import type { AdapterConfig, AdapterStatus } from "./adapter/types";
@@ -2370,6 +2371,38 @@ app.whenReady().then(async () => {
    * 所以每台设备有自己的对话脉络，且叶子重连后上下文还在。
    */
   const hostExecutor: HostExecutor = async ({ sessionId, content, images, kbContext, onDelta }) => {
+    // ── 工作空间定期任务：叶子到点后转发上来的 ──
+    // 叶子没有模型凭证，任务照旧由主机执行（用户 2026-11-19：「从机（叶子节点）的
+    // 任务依旧转发给主机完成」）。产出写在**主机**的 ~/KirariWorkspace 里，叶子只拿回结果。
+    //
+    // 走 runLocally 而不是普通 engineChat，是因为它还要记运行次数、按保留策略清旧文件；
+    // 当成闲聊处理的话，主机这边的 meta 永远停在「没跑过」，两端的账对不上。
+    if (workspaceTask.isWorkspaceSession(sessionId)) {
+      const payload = workspaceTask.parsePayload(content);
+      if (payload && payload.taskId) {
+        // payload 里没有 title：标题以主机自己 meta.json 为准（用户可能在主机上改过），
+        // 传空字符串让 runLocally 回落到 meta 里的值。
+        const r = await workspaceTask.runLocally({
+          taskId: payload.taskId,
+          title: "",
+          instruction: payload.instruction || "",
+          uid: LOCAL_UID,
+          // deliver=false：结果由 hostExecutor 的返回值带给叶子，叶子自己推送 —
+          // 主机这边再推一次会在主机界面上凭空冒出一条不属于它的消息。
+          deliver: false,
+          // 主机侧也带设备命名空间，避免主机自己跑同名任务时两边共用一份上下文。
+          sessionId,
+        });
+        if (!r.ok) {
+          const reason = r.error || "未知原因";
+          // 配置类错误必须显式抛出去（叶子要看到「去设置里配」而不是一句兜底闲聊）
+          if (/未配置|尚未配置|还没连接|还没填写|还没选择/.test(reason)) throw new Error(reason);
+          return { speech: `任务没跑成：${reason}`, emotion: null };
+        }
+        return { speech: r.speech || "", emotion: null };
+      }
+    }
+
     const cfg = readModelConfigFile();
     const result = await engineChat({
       settings: {
@@ -2571,6 +2604,70 @@ app.whenReady().then(async () => {
   void briefSchedule.ensureJobs().catch((e: unknown) => {
     console.warn("[brief] 初始化简报任务失败:", e instanceof Error ? e.message : e);
   });
+  // 阶段 F：工作空间定期任务。到点后由她带完整工具集自动执行，产出写进
+  // ~/KirariWorkspace/<taskId>/。三件事要注入：
+  //   runner  —— 怎么跑（读本机模型配置 + engine.chat）
+  //   pusher  —— 结果送到哪（注入当前聊天会话，跟提醒同一条路）
+  //   role/relay —— 叶子节点把任务转发给主机（用户 2026-11-19 明确要求）
+  workspaceTask.setTaskRunner(async ({ sessionId, instruction }) => {
+    const cfg = readModelConfigFile();
+    if (!cfg.key || !cfg.model || !cfg.endpoint) {
+      return { ok: false, error: "还没配置大脑：先去设置里填一套（服务地址 + 型号 + 钥匙）" };
+    }
+    try {
+      const reply = await engineChat({
+        settings: {
+          model: cfg.model,
+          endpoint: cfg.endpoint,
+          key: cfg.key,
+          searchProvider: cfg.searchProvider,
+          searchKey: cfg.searchKey,
+          searchEndpoint: cfg.searchEndpoint,
+          userid: LOCAL_UID,
+        },
+        sessionId,
+        text: instruction,
+        // 定期任务没有人在旁边看图：不带图、不带私有知识库、不带前端 skill，
+        // 但保留工具能力（她要用 workspace / web_search 才能产出东西）。
+        images: [],
+        persona: null,
+        skillPrompts: [],
+        kbContext: null,
+        scene: null,
+        // 组网/任务场景宁可给兜底语也不要让整条链路失败
+        allowFallback: true,
+      });
+      return { ok: true, speech: reply?.speech || "" };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+  workspaceTask.setResultPusher(({ speech }) => {
+    try {
+      ensureChatSessionService().injectProactiveMessage(speech, "happy");
+    } catch (e) {
+      console.warn("[wsTask] 推送任务结果失败:", e instanceof Error ? e.message : e);
+    }
+  });
+  // 叶子判定 + 上行出口。组网没开或没连上时 roleProbe 返回 null，
+  // 任务就按「本机执行」处理（单机用户不该因为没组网而跑不了定期任务）。
+  workspaceTask.setRoleProbe(() => {
+    if (!netManager || !netManager.canStartNetworking()) return null;
+    return netManager.role === "host" ? "host" : "leaf";
+  });
+  workspaceTask.setRelaySender(async ({ sessionId, content }) => {
+    if (!netManager || !netManager.canStartNetworking()) return null;
+    // 必须用 relayAndWait 拿**返回值**，不能像聊天那样 fire-and-forget（relay 只回
+    // requestId，结果走广播）——定期任务要靠这个结果推给用户。
+    // 角色无关：relayAndWait 在主机上走本地提交、在叶子上走上行，与聊天路径一致。
+    const res = await netManager.relayAndWait(content, sessionId, {
+      // 定期任务可能比闲聊慢（要调工具抓数据写文件），给足时间
+      timeoutMs: 180000,
+    });
+    if (!res || res.ok !== true) return null;
+    return { speech: res.frame?.speech || "" };
+  });
+
   scheduledJobsService.start();
   // 初始化机器人适配器管理器：连接已启用的适配器与后端 WS，使 QQ 等跨端消息可在启动时同步进桌宠。
   // 之前仅在 deploy:set-server（远程改服务端地址）里调用，启动时漏掉会导致 adapter:* 处理器

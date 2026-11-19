@@ -24,6 +24,7 @@ import { preflightTools, detectCorrectionIntent } from "../reply/intent";
 import { buildTimeContext } from "../reply/timeContext";
 import { buildSceneContext, type RawScene } from "../reply/sceneContext";
 import { buildCharter } from "../reply/charter";
+import { buildWorkspaceBlock } from "../reply/workspaceBlock";
 import * as memory from "./memory";
 import * as social from "./social";
 import * as selfOps from "./selfOps";
@@ -418,6 +419,17 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
         } catch (e: any) {
             // 环境摘要是增强项，读失败也不能让整轮回复挂掉
             console.warn("[conversationService] 社交环境摘要注入失败（已忽略）:", e?.message || e);
+        }
+
+        // 工作空间：她有一个真实的文件夹可以落盘，还有一个「定期任务」的机制。
+        // 不注入的话，她不知道自己能保存东西，每次被问「记下来」都只会说「我记在
+        // 心里的记忆里」——而用户要的是能在文件管理器里翻到的产出。
+        // 只报事实（在哪、有几个任务），不列举全部文件（那会挤爆上下文）。
+        try {
+            const wsBlock = buildWorkspaceBlock();
+            if (wsBlock) systemPrompt += wsBlock;
+        } catch (e: any) {
+            console.warn("[conversationService] 工作空间摘要注入失败（已忽略）:", e?.message || e);
         }
 
         // 长期记忆：按当前场合可见的记忆池做联想检索（跨对话存续的关键）。
