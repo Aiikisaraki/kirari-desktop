@@ -53,6 +53,8 @@ export interface ModelConfigFile {
     activeModelId?: number;
     /** 阶段 B：工具循环参数（maxRounds / 搜索上限 / max_tokens / 超时），与核心版同构 */
     agentProfile?: AgentProfile;
+    /** 思考模式（self_ops 可改）：off / on / auto */
+    thinking?: { mode?: string };
 }
 
 // ⚠️ 不用模块级常量：ESM import 早于 main.ts 的 setHomeRoot()，
@@ -260,6 +262,78 @@ export function getAgentProfile(): AgentProfile {
         return { ...DEFAULT_AGENT_PROFILE };
     }
     return parseAgentProfile(cfg.agentProfile, "config.json.agentProfile");
+}
+
+/** 设置页快照（密钥只给掩码）——与核心版 getProfileSnapshot 同形状。 */
+export function getProfileSnapshot(): {
+    model: string;
+    endpoint: string;
+    keyMasked: string;
+    hasKey: boolean;
+    searchProvider: string;
+    searchEndpoint: string;
+    searchKeyMasked: string;
+    hasSearchKey: boolean;
+    basePersona: string;
+} {
+    const c = readModelConfigFile();
+    return {
+        model: c.model || "",
+        endpoint: c.endpoint || "",
+        keyMasked: maskOf(c.key || ""),
+        hasKey: !!c.key,
+        searchProvider: c.searchProvider || "uapis",
+        searchEndpoint: c.searchEndpoint || "",
+        searchKeyMasked: maskOf(c.searchKey || ""),
+        hasSearchKey: !!c.searchKey,
+        basePersona: typeof c.basePersona === "string" ? c.basePersona : "",
+    };
+}
+
+/** 读自定义人格。空串 = 未自定义。 */
+export function getBasePersona(): string {
+    const v = readModelConfigFile().basePersona;
+    return typeof v === "string" ? v : "";
+}
+
+/** 写自定义人格（空串=恢复预设，4000 字上限）。 */
+export function setBasePersona(value: string): string {
+    const v = (typeof value === "string" ? value : "").slice(0, 4000);
+    const cfg = readModelConfigFile();
+    writeConfig({ ...cfg, basePersona: v });
+    return v;
+}
+
+/** 搜索配置明文。 */
+export function getSearch(): { searchProvider: string; searchEndpoint: string; searchKey: string } {
+    const c = readModelConfigFile();
+    return {
+        searchProvider: c.searchProvider || "uapis",
+        searchEndpoint: c.searchEndpoint || "",
+        searchKey: c.searchKey || "",
+    };
+}
+
+/** 思考模式：off=直接答 / on=先列思路 / auto=复杂问题才深入。缺省 off。 */
+export function getThinking(): "off" | "on" | "auto" {
+    const mode = readModelConfigFile().thinking?.mode;
+    return mode === "on" || mode === "auto" ? mode : "off";
+}
+
+/** 写思考模式。只碰 thinking 键，不动模型/密钥字段。 */
+export function setThinking(mode: string): "off" | "on" | "auto" {
+    const m = mode === "on" || mode === "auto" ? mode : "off";
+    const cfg = readModelConfigFile();
+    writeConfig({ ...cfg, thinking: { ...(cfg.thinking || {}), mode: m } });
+    return m;
+}
+
+/** 整体写 agentProfile（自我修补用），复用 parseAgentProfile 严格校验。 */
+export function setAgentProfilePatch(profile: AgentProfile): AgentProfile {
+    const parsed = parseAgentProfile(profile, "self_ops.agentProfile");
+    const cfg = readModelConfigFile();
+    writeConfig({ ...cfg, agentProfile: parsed });
+    return parsed;
 }
 
 export function addModelProfile(p: { name: string; endpoint: string; model: string; key: string }): number {

@@ -22,6 +22,7 @@ import {
 } from "../reply/promptBuilder";
 import { preflightTools, detectCorrectionIntent } from "../reply/intent";
 import { buildTimeContext } from "../reply/timeContext";
+import * as selfOps from "./selfOps";
 import * as locationSvc from "./locationService";
 import { streamChatCompletion, polishToolResult } from "../reply/streaming";
 import * as dailyBriefing from "./dailyBriefingService";
@@ -43,7 +44,7 @@ import {
     type AgentProfile,
 } from "kirari-agent";
 import { recorder, beginTurn, endTurn, newTurnId, refreshEnabled } from "../events/recorder";
-import { getAgentProfile } from "../../model-config";
+import { getAgentProfile, getThinking } from "../../model-config";
 // 阶段 C 任务编排：plan / schedule_reminder 工具分派 + 未完成任务跨轮恢复。
 import * as taskRuntime from "./taskRuntime";
 
@@ -363,6 +364,26 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
             timeContext = buildTimeContext({});
         }
         systemPrompt += timeContext;
+
+        // 自我认知清单：像 lead 上下文里自带的工具清单那样，每轮注入「我是谁 / 我有什么能力 /
+        // 当前模型 / 未完成任务与提醒 / 如何自我排查」。让模型天生就知道自己，不必先查一轮。
+        try {
+            systemPrompt += selfOps.buildManifest({ sessionId, capScope: capabilityScope || undefined, uid: aiContext.userid, origin: "desktop" });
+        } catch (e) {
+            console.warn("[aiReply] 自我认知清单注入失败（已忽略）：", (e as Error)?.message || e);
+        }
+
+        // 思考模式：on/auto 时在 system 里加「先想再答」指引（prompt 策略，对任何模型生效）。
+        try {
+            const thinking = getThinking();
+            if (thinking !== "off") {
+                systemPrompt += thinking === "on"
+                    ? "\n\n【思考模式：开启】回答前先在心里列 2-4 条简要思路（可一句话带过），再给出结论；思路不要冗长，最终仍只输出约定的 JSON。"
+                    : "\n\n【思考模式：自动】简单问题直接答；多步、有争议或需要权衡的问题，先列 2-4 条简要思路再深入。最终只输出约定的 JSON。";
+            }
+        } catch {
+            /* 思考模式读取失败不影响正常回答 */
+        }
 
         // 阶段 C：把该会话尚未完成的任务拼进 system.base，实现「新消息进来先恢复未完成任务」。
         const taskResume = taskRuntime.resumeBlock(sessionId);
