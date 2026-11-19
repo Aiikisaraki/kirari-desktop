@@ -2649,14 +2649,23 @@ app.whenReady().then(async () => {
       console.warn("[wsTask] 推送任务结果失败:", e instanceof Error ? e.message : e);
     }
   });
-  // 叶子判定 + 上行出口。组网没开或没连上时 roleProbe 返回 null，
-  // 任务就按「本机执行」处理（单机用户不该因为没组网而跑不了定期任务）。
+  // 叶子判定 + 上行出口。
+  // ⚠️ 不能只看 canStartNetworking()：它只说明「这台机器有密钥、能开网」，
+  // 不代表真的开了 —— 一台刚装好、压根没开组网的机器也会是 true，那样所有定期
+  // 任务都会被误判成叶子往上行，然后失败、顺延、永远不本地执行。
+  // 正确判据是 snapshot()：主机侧看 role==="host"，叶子侧看 leafStatus 是否真的连着。
   workspaceTask.setRoleProbe(() => {
-    if (!netManager || !netManager.canStartNetworking()) return null;
-    return netManager.role === "host" ? "host" : "leaf";
+    if (!netManager) return null;
+    const snap = netManager.snapshot();
+    if (!snap) return null;
+    if (snap.role === "host") return "host";
+    // LeafStatus 是字符串联合：idle / connecting / paired / connected / fallback。
+    // 只有 connected 才真的能上行；其余（含 fallback 掉线回退）都按「组网不可用」
+    // 处理 → 走本机执行。否则任务会静默空转到天荒地老，用户还以为在跑。
+    return snap.leafStatus === "connected" ? "leaf" : null;
   });
   workspaceTask.setRelaySender(async ({ sessionId, content }) => {
-    if (!netManager || !netManager.canStartNetworking()) return null;
+    if (!netManager) return null;
     // 必须用 relayAndWait 拿**返回值**，不能像聊天那样 fire-and-forget（relay 只回
     // requestId，结果走广播）——定期任务要靠这个结果推给用户。
     // 角色无关：relayAndWait 在主机上走本地提交、在叶子上走上行，与聊天路径一致。

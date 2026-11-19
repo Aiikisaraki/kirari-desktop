@@ -12,7 +12,7 @@
 //   2) 路径隔离：她拿到完整删除权限，越权就必须拒（这是最要紧的一节）
 //   3) 保留策略：留一定量的数据，但不能无限长
 //   4) 叶子转发：任务上行给主机，且叶子不本地跑（用户强调的那一点）
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -357,8 +357,7 @@ describe("叶子节点：任务转发给主机", () => {
         workspaceTask.setRelaySender(null);
     });
 
-    it("组网未启用（roleProbe 返回 null）时按本机执行", async () => {
-        let localRuns = 0;
+    it("组网未启用（roleProbe 返回 null）时按本机执行", async () => {        let localRuns = 0;
         workspaceTask.setRoleProbe(() => null);
         workspaceTask.setRelaySender(async () => {
             throw new Error("组网没开时不该走上行");
