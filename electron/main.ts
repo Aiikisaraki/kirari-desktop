@@ -18,6 +18,7 @@ import * as scheduledJobsService from "./ai/services/scheduledJobsService";
 // 阶段 E：每日简报落库调度（每 uid × 08/16/22 三档）+ 简报生成。
 import * as briefSchedule from "./ai/services/briefSchedule";
 import * as workspaceTask from "./ai/services/workspaceTask";
+import { getOwnerKey } from "./ai/services/ownerIdentity";
 import * as dailyBriefingService from "./ai/services/dailyBriefingService";
 import { AdapterManager, getAdapter } from "./adapter/adapter-manager";
 import type { AdapterConfig, AdapterStatus, BotIncoming } from "./adapter/types";
@@ -555,6 +556,35 @@ function pushToPlatformSession(sessionId: string, text: string): boolean {
       console.warn(`[adapter] 主动回发失败（${conversationKey}）:`, e?.message || e);
     });
   return true;
+}
+
+/**
+ * 主动回发到「主人」的 QQ 私聊窗口（按主人身份键，不按 sessionId）。
+ *
+ * 与核心版 botManager.pushToOwnerPrivate 同语义。桌宠对话框定的任务 sessionId 是
+ * 本机 UUID，pushToPlatformSession 只认 bot-* 会话 → 走不通；但这是主人建的，
+ * 到点必须回到她的 QQ 私聊（用户 2026-11-20 拍板）。按 people.role=owner 的
+ * 规范键找配置了这位主人的适配器直发私聊，客人任务绝不走这里。
+ */
+function pushToOwnerPrivate(ownerKey: string, text: string): boolean {
+  const key = String(ownerKey || "").trim();
+  const body = String(text || "").trim();
+  if (!key || !body || !adapterManager) return false;
+  for (const st of adapterManager.list()) {
+    if (String(st.ownerAccount || "").trim() !== key) continue;
+    const adapter = getAdapter(st.id);
+    if (!adapter) continue;
+    const target: BotIncoming = {
+      adapterId: st.id, isGroup: false, senderId: key,
+      conversationKey: `private:${key}`, text: "", images: [],
+    };
+    Promise.resolve()
+      .then(() => adapter!.sendMessage(target, { text: body, images: [] }))
+      .then(() => console.log(`[adapter] 已把主人任务回发到 ${st.id} 私聊 (${key})`))
+      .catch((e: any) => console.warn(`[adapter] 主人任务回发私聊失败 (${key}):`, e?.message || e));
+    return true;
+  }
+  return false;
 }
 
 // 创建并初始化机器人适配器管理器（各协议适配器 + 本进程 AI 引擎）。
@@ -2747,7 +2777,15 @@ app.whenReady().then(async () => {
   });
   // ② 平台这条腿：用户多半是在 QQ 里建的任务，到点桌面可能没开。
   //    和提醒那条路共用同一个回发实现。
-  workspaceTask.setPlatformSender(({ sessionId, text }) => pushToPlatformSession(sessionId, text));
+  workspaceTask.setPlatformSender(({ sessionId, text, owner }) => {
+    // 先试原会话平台（QQ 里建的 → bot-* 会话，回到原窗口）
+    if (pushToPlatformSession(sessionId, text)) return true;
+    // 网页/桌宠建的任务（本机 UUID 会话）→ 按主人身份键回到她的 QQ 私聊。
+    // 只对主人自己的任务做；客人任务不会匹配规范主人键，绝不误投。
+    const ownerKey = getOwnerKey();
+    if (owner && owner === ownerKey) return pushToOwnerPrivate(ownerKey, text);
+    return false;
+  });
   // 叶子判定 + 上行出口。
   // ⚠️ 不能只看 canStartNetworking()：它只说明「这台机器有密钥、能开网」，
   // 不代表真的开了 —— 一台刚装好、压根没开组网的机器也会是 true，那样所有定期

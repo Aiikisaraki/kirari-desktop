@@ -217,8 +217,11 @@ export type ResultPusher = (input: {
 /**
  * 平台回发（QQ 这条腿）。与核心版 botManager.pushToUserSession 同语义：
  * sessionId 不是 `bot-<adapterId>-<conversationKey>` 时直接返回 false。
+ *
+ * owner：这条任务归谁。sessionId 是本机 UUID（网页/桌宠建的任务）时，
+ * 调用方可用它按主人身份键把结果回发到主人 QQ 私聊（用户 2026-11-20 拍板）。
  */
-export type PlatformSender = (input: { sessionId: string; text: string }) => boolean | void;
+export type PlatformSender = (input: { sessionId: string; text: string; owner: string }) => boolean | void;
 
 let taskRunner: TaskRunner | null = null;
 let resultPusher: ResultPusher | null = null;
@@ -391,7 +394,7 @@ export function deliverResult(
     //    桌面本地会话（纯 uuid）没有平台通道，只能靠 ①。
     if (platformSender) {
         try {
-            if (platformSender({ sessionId, text: speech })) sentPlatform = 1;
+            if (platformSender({ sessionId, text: speech, owner })) sentPlatform = 1;
         } catch (e) {
             console.warn("[wsTask] 回发平台消息失败（已忽略）:", (e as Error)?.message || e);
         }
