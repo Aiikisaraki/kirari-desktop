@@ -158,6 +158,20 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, name: stri
 
 export type DispatchResult = { content: string; isError: boolean; capability: Capability | null };
 
+/**
+ * 摘掉「临时用作设备点名」的参数键。
+ *
+ * 只在自然语言回退真的改写了路由时才动：既然那次调用去了别的机器，
+ * 这个键就纯粹是路由指令，不该出现在工具的入参里。没改路由时原样返回，
+ * 免得误删某个工具本来就有的 `device` 参数。
+ */
+function dropRouteArgKeys(args: any, route: ReturnType<typeof toolRouting.decide> | null): any {
+    if (!route || !Array.isArray(route.dropArgKeys) || !route.dropArgKeys.length) return args;
+    const next = { ...args };
+    for (const k of route.dropArgKeys) delete next[k];
+    return next;
+}
+
 export async function dispatch(
     scopeId: string,
     name: string,
@@ -171,14 +185,19 @@ export async function dispatch(
     // 判定细节见 services/toolRouting.ts；普通单机安装下 decide 永远返回 local。
     let route: ReturnType<typeof toolRouting.decide> | null = null;
     try {
-        route = toolRouting.decide(ctx, name);
+        // 把 args 也传进去：模型常常不用 @device: 前缀，而是把设备塞在参数里
+        // （{"device": "书房"}）或直接挂在工具名前面（「书房 read_file」）。
+        route = toolRouting.decide(ctx, name, args);
     } catch (e) {
         console.warn("[capabilities] 工具路由判定失败（按本地执行）:", (e as Error)?.message || e);
         route = null;
     }
+    // 自然语言回退认出来的「设备字段」是给路由看的，转发出去前要摘掉：
+    // MCP 工具的参数按 schema 校验，多一个未知键会被直接拒绝。
+    const routeArgs = dropRouteArgKeys(args || {}, route);
     if (route && route.target === "remote") {
         try {
-            const remote = await toolRouting.runRemote(ctx, route, args || {});
+            const remote = await toolRouting.runRemote(ctx, route, routeArgs);
             if (remote) {
                 const prefix = route.note ? `[${route.note}]\n` : "";
                 return { content: prefix + remote.content, isError: remote.isError, capability: null };
@@ -219,7 +238,7 @@ export async function dispatch(
 
     const timeoutMs = cap.timeoutMs || DEFAULT_CAPABILITY_TIMEOUT_MS;
     try {
-        const raw = await withTimeout(Promise.resolve(executor(args || {}, ctx)), timeoutMs, realName);
+        const raw = await withTimeout(Promise.resolve(executor(routeArgs, ctx)), timeoutMs, realName);
         return {
             content: routeNote + truncateResult(String(raw), cap.truncateChars),
             isError: false,

@@ -23,13 +23,47 @@ export type RouteDecision = {
     /** 剥掉 @device: 前缀之后的真实工具名 */
     name: string;
     /** 判定依据，便于日志与排障 */
-    source: "explicit" | "from-leaf" | "host-default";
+    source: "explicit" | "natural" | "from-leaf" | "host-default";
     deviceId?: string;
     deviceName?: string;
     /** 点名却没找到时的说明，会附在结果前面回给模型 */
     note?: string;
     explicitMiss?: boolean;
+    /** 自然语言回退认出来的「设备参数键」，转发前要摘掉 */
+    dropArgKeys?: string[];
 };
+
+/**
+ * args 里可能用来点名设备的字段名。
+ *
+ * 模型有时不会用 @device: 前缀，而是把设备塞进参数里（{"device": "书房"}），
+ * 这是它更自然的写法。这里认这几个名字，命中且**能解析出真实设备**才生效。
+ */
+const DEVICE_ARG_KEYS = [
+    "device",
+    "deviceid",
+    "device_id",
+    "devicename",
+    "device_name",
+    "machine",
+    "machine_name",
+    "node",
+    "node_name",
+    "target",
+    "target_device",
+    "设备",
+    "设备名",
+    "机器",
+    "节点",
+];
+
+/**
+ * 工具名前面挂了设备名、但漏了 @device: 标记的形态：
+ *   「书房 read_file」「书房:read_file」「书房的电脑/read_file」
+ * 只按「空白 / 冒号 / 斜杠 / 竖线 / @」切一刀，真实工具名里不会出现这些字符
+ * （MCP 是 <server>__<tool>，技能是 skill__<id>__<tool>，都只用下划线）。
+ */
+const LOOSE_DEVICE_RE = /^\s*([^\s:：/／|@]{1,40})\s*[:：/／|@\s]\s*(\S[\s\S]*)$/u;
 
 export type ToolCaps = {
     deviceId: string;
@@ -99,12 +133,64 @@ export function resolveDevice(hint: string): { deviceId: string; name: string } 
 }
 
 /**
+ * 自然语言回退：模型没用 @device: 前缀，但用别的方式点明了设备。
+ *
+ * ⚠️ 与结构化前缀的关键差别：**只认命中的，不报失配**。
+ * 这里拿到的东西未必真是设备名（比如某个工具自己的 `host` 参数），
+ * 误判会把本该在本机跑的调用劫持到别的机器上 —— 那是与「静默跨机」
+ * 同样严重、方向相反的错误。所以解析不出来就安静地返回 null。
+ */
+export function detectNaturalDevice(
+    rawName: string,
+    args?: unknown,
+): { deviceId: string; deviceName: string; name: string; dropArgKeys: string[] } | null {
+    if (!(netAccess?.members() || []).length) return null;
+
+    // (a) 参数里点名：{"device": "书房"} / {"设备": "书房的电脑"}
+    if (args && typeof args === "object" && !Array.isArray(args)) {
+        const rec = args as Record<string, unknown>;
+        for (const key of Object.keys(rec)) {
+            if (!DEVICE_ARG_KEYS.includes(String(key).toLowerCase())) continue;
+            const raw = rec[key];
+            if (typeof raw !== "string" || !raw.trim()) continue;
+            const hit = resolveDevice(raw);
+            if (hit) {
+                return {
+                    deviceId: hit.deviceId,
+                    deviceName: hit.name,
+                    name: String(rawName || ""),
+                    // 这个字段是给路由看的，转发给叶子的工具时要去掉：
+                    // MCP 工具的参数按 schema 校验，多一个未知键会直接报错。
+                    dropArgKeys: [key],
+                };
+            }
+        }
+    }
+
+    // (b) 工具名前面挂了设备名但漏了标记：「书房 read_file」
+    const m = LOOSE_DEVICE_RE.exec(String(rawName || ""));
+    if (m) {
+        const hit = resolveDevice(m[1]);
+        if (hit) {
+            return {
+                deviceId: hit.deviceId,
+                deviceName: hit.name,
+                name: m[2].trim(),
+                dropArgKeys: [],
+            };
+        }
+    }
+    return null;
+}
+
+/**
  * 本次调用最终在哪台设备上执行。
  *
  * @param ctx dispatch 传下来的上下文（含 sourceDeviceId）
  * @param rawName 模型给的原始工具名，可能带 @device: 前缀
+ * @param args 模型给的参数（自然语言回退要查里面有没有点名）
  */
-export function decide(ctx: any, rawName: string): RouteDecision {
+export function decide(ctx: any, rawName: string, args?: unknown): RouteDecision {
     const sourceDeviceId = ctx && ctx.sourceDeviceId ? String(ctx.sourceDeviceId) : "";
     const out: RouteDecision = {
         target: "local",
@@ -130,6 +216,21 @@ export function decide(ctx: any, rawName: string): RouteDecision {
                 .join("、") || "无";
         out.note = `没找到设备「${parsed.deviceHint}」。可用设备：${list}`;
         out.explicitMiss = true;
+    }
+
+    // 规则 1b：自然语言回退（没写 @device:，但用别的写法点明了设备）
+    // 只在确实解析到一台真设备时才改路由；解析不出来就当作没点名。
+    if (!parsed) {
+        const nat = detectNaturalDevice(rawName, args);
+        if (nat) {
+            out.target = "remote";
+            out.deviceId = nat.deviceId;
+            out.deviceName = nat.deviceName;
+            out.name = nat.name;
+            out.source = "natural";
+            if (nat.dropArgKeys.length) out.dropArgKeys = nat.dropArgKeys;
+            return out;
+        }
     }
 
     // 规则 2：请求来自叶子 → 那台叶子自己

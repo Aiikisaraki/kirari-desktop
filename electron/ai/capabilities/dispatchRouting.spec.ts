@@ -87,3 +87,33 @@ describe("阶段 5 · dispatch 集成（点名设备失败必须让模型知道�
         expect(r.content).toContain("那台设备掉线了");
     });
 });
+
+// 模型更常见的写法不是 @device:，而是把设备塞进参数（{"device":"书房"}）。
+// 这条链路多一步：路由用的键必须摘掉，否则 MCP 工具按 schema 校验会直接拒绝。
+describe("阶段 5 · dispatch 集成（自然语言点名的入参清理）", () => {
+    it("★ 参数里点名 → 走远程，且转发给叶子的参数里没有路由专用的 device 键", async () => {
+        const deviceId = "ffffffff-0000-0000-0000-000000000000";
+        const calls: any[] = [];
+        toolRouting.setToolRoutingNet({
+            members: () => [{ deviceId, name: "书房的电脑", online: true }],
+            callToolOnDevice: async (id, name, args) => {
+                calls.push({ id, name, args });
+                return { ok: true, result: "远程结果", deviceId: id };
+            },
+        });
+        const r = await caps.dispatch("net::remote", "read_file", { device: "书房", path: "/a.txt" });
+        expect(r.isError).toBe(false);
+        expect(calls.length).toBe(1);
+        expect(calls[0].id).toBe(deviceId);
+        // 路由指令不能混进工具入参
+        expect("device" in calls[0].args).toBe(false);
+        // 业务参数原样保留
+        expect(calls[0].args.path).toBe("/a.txt");
+    });
+
+    it("没改路由时不动参数（别误删工具本来就有的 device 参数）", async () => {
+        toolRouting.setToolRoutingNet({ members: () => [] });
+        const r = await caps.dispatch("local::route-test", "get_current_time", { device: "随便" });
+        expect(r.isError).toBe(false);
+    });
+});

@@ -163,3 +163,76 @@ describe("阶段 5 · 设备列表（主机能列出所有叶子）", () => {   
         expect(toolRouting.decide({}, "x").target).toBe("local");
     });
 });
+
+// 模型不是每次都规规矩矩写 @device: —— 更常见的是把设备塞进参数，
+// 或者干脆挂在工具名前面。这一组钉死「认得出来」与「认不准就不动手」。
+describe("阶段 5 · 自然语言点名回退", () => {
+    it("参数里点名 → 路由到那台设备，并标出 natural 来源", () => {
+        mockNet();
+        const r = toolRouting.decide({}, "read_file", { device: "书房", path: "/a.txt" });
+        expect(r.target).toBe("remote");
+        expect(r.deviceId).toBe(DEVICE_A.deviceId);
+        expect(r.name).toBe("read_file");
+        expect(r.source).toBe("natural");
+    });
+
+    it("★ 要摘掉路由专用的参数键，否则 MCP 参数校验会拒掉这次调用", () => {
+        mockNet();
+        const r = toolRouting.decide({}, "read_file", { device: "书房" });
+        expect(r.dropArgKeys).toEqual(["device"]);
+    });
+
+    it("中文参数键「设备」也认", () => {
+        mockNet();
+        const r = toolRouting.decide({}, "run_skill", { 设备: "卧室笔记本" });
+        expect(r.deviceId).toBe(DEVICE_B.deviceId);
+    });
+
+    it("设备名挂在工具名前面但漏了 @device: 标记 → 认出并剥离", () => {
+        mockNet();
+        const r = toolRouting.decide({}, "书房 read_file");
+        expect(r.target).toBe("remote");
+        expect(r.deviceId).toBe(DEVICE_A.deviceId);
+        expect(r.name).toBe("read_file");
+    });
+
+    it("斜杠分隔的写法也认（「书房的电脑/read_file」）", () => {
+        mockNet();
+        const r = toolRouting.decide({}, "书房的电脑/read_file");
+        expect(r.target).toBe("remote");
+        expect(r.name).toBe("read_file");
+    });
+
+    // 以下三条是反向保护：误判会把本该在本机跑的调用劫持到别的机器，
+    // 那是与「静默跨机」同样严重、方向相反的错误。
+    it("★ 参数里填了不存在的设备 → 不劫持，按默认走本地", () => {
+        mockNet();
+        const r = toolRouting.decide({}, "read_file", { device: "随便什么" });
+        expect(r.target).toBe("local");
+        expect(r.note).toBeUndefined();
+    });
+
+    it("★ 工具自己的 host 参数不会被当成设备名", () => {
+        mockNet();
+        expect(toolRouting.decide({}, "http_get", { host: "example.com" }).target).toBe("local");
+    });
+
+    it("没有组网成员时完全不生效（单机安装零影响）", () => {
+        mockNet([]);
+        expect(toolRouting.decide({}, "read_file", { device: "书房" }).target).toBe("local");
+        expect(toolRouting.detectNaturalDevice("read_file", { device: "书房" })).toBeNull();
+    });
+
+    it("结构化前缀与参数冲突时以前缀为准", () => {
+        mockNet();
+        const r = toolRouting.decide({}, "@device:卧室 read_file", { device: "书房" });
+        expect(r.deviceId).toBe(DEVICE_B.deviceId);
+        expect(r.source).toBe("explicit");
+    });
+
+    it("叶子来源 + 没点名 → 仍默认操作自己", () => {
+        mockNet();
+        const r = toolRouting.decide({ sourceDeviceId: DEVICE_B.deviceId }, "read_file", {});
+        expect(r.deviceId).toBe(DEVICE_B.deviceId);
+    });
+});
