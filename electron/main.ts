@@ -18,7 +18,7 @@ import * as scheduledJobsService from "./ai/services/scheduledJobsService";
 // 阶段 E：每日简报落库调度（每 uid × 08/16/22 三档）+ 简报生成。
 import * as briefSchedule from "./ai/services/briefSchedule";
 import * as workspaceTask from "./ai/services/workspaceTask";
-import { getOwnerKey } from "./ai/services/ownerIdentity";
+import { getOwnerKey, sceneFromSessionId } from "./ai/services/ownerIdentity";
 import * as dailyBriefingService from "./ai/services/dailyBriefingService";
 import { AdapterManager, getAdapter } from "./adapter/adapter-manager";
 import type { AdapterConfig, AdapterStatus, BotIncoming } from "./adapter/types";
@@ -2529,6 +2529,11 @@ app.whenReady().then(async () => {
       // 并在组网链路上也带上技能行为模板（此前 hostExecutor 漏传，远端拿不到技能设定）。
       capabilityScope: "net::host",
       skillPrompts: frontendTools.collectSkillPrompts(),
+      // 组网身份：按真实发信人从 sessionId 服务端派生（不读帧里自报字段）。
+      // 叶子都是主人设备（配对凭据已鉴权），本机会话 → 主人 owner，主机侧能读到
+      // 主人自己的记忆/任务；平台会话按账号对比规范主人键定 owner/user。
+      // 以前不传 scene → relayed 消息在主机被当成 user。
+      scene: sceneFromSessionId(sessionId),
       // 叶子自带的私人知识库检索结果：它存在叶子本地，主机没有别的途径拿到，
       // 必须当最高优先级参考注入（否则叶子的知识库在组网下等于白配）。
       kbContext: kbContext && kbContext.length > 0 ? kbContext : null,

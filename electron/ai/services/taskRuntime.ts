@@ -18,6 +18,7 @@ import {
 import type { EventType } from "kirari-agent";
 import { taskStore } from "../events/taskStore";
 import { jobStore } from "../events/jobStore";
+import { resolveOwnerFromCtx } from "./workspace";
 
 export type TaskToolCtx = {
     sessionId: string;
@@ -110,13 +111,13 @@ export function handleScheduleReminder(args: unknown, ctx: TaskToolCtx): string 
             now,
         });
         // 归属人必须落库：到点时只有这条 job，没有会话上下文可推。
-        // 解析不出来就拒绝，绝不退化成 '_local'（退化就等于推到主人桌面）。
+        // 2026-11-20 三入口统一身份：归属判定收敛到 workspace.resolveOwnerFromCtx，
+        // 与工作空间目录 / 记忆池 / core 侧 taskRuntime 共用同一套，绝不在此另写一份
+        // （原来这里内联 `counterpartId || senderId || _local`，会随 scene 补法漂移）。
+        // 解析不出来就拒绝，绝不退化成公共目录。
         let ownerKey = "";
         try {
-            ownerKey = String(
-                String(ctx.counterpartId || ctx.senderId || "").trim() ||
-                (String(ctx.sessionId || "").startsWith("bot-") ? "" : "_local"),
-            ).trim();
+            ownerKey = String(resolveOwnerFromCtx(ctx as any) || "").trim();
         } catch { ownerKey = ""; }
         if (!ownerKey) {
             return "我现在还分不清这条提醒该归谁，怕设完推错人。你私聊我再说一次？";

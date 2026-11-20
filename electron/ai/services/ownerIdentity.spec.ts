@@ -60,4 +60,28 @@ describe("ownerIdentity · 三入口同一个身份", () => {
             expect(workspace.resolveOwnerFromCtx(scene as any)).toBe(OWNER_QQ);
         }
     });
+
+    it("★ 组网 relayed 消息：主人设备本机会话 → owner，客人平台会话 → user", async () => {
+        const oi = await import("./ownerIdentity");
+        // 叶子=主人设备（配对凭据已鉴权）；本机会话派生成主人
+        for (const sid of ["9284e4f6-7123-4577-bb69-d788bd1cadce", "session_1732000000000"]) {
+            const sc = oi.sceneFromSessionId(sid) as any;
+            expect(sc.role).toBe("owner");
+            expect(sc.isOwner).toBe(true);
+            expect(sc.senderId).toBe(OWNER_QQ);
+        }
+        // 主人 QQ 私聊平台会话 → owner
+        const ownerSc = oi.sceneFromSessionId(`bot-onebot-private:xxx:user:${OWNER_QQ}`) as any;
+        expect(ownerSc.role).toBe("owner");
+        expect(ownerSc.senderId).toBe(OWNER_QQ);
+        // 客人 QQ 平台会话 → user（隔离，不提权）
+        const guestSc = oi.sceneFromSessionId(`bot-onebot-private:xxx:user:${FRIEND_QQ}`) as any;
+        expect(guestSc.role).toBe("user");
+        expect(guestSc.senderId).toBe(FRIEND_QQ);
+        expect(guestSc.isOwner).toBe(false);
+        // 群聊 → isGroup，不授 owner
+        const groupSc = oi.sceneFromSessionId(`bot-onebot-group:${OWNER_QQ}`) as any;
+        expect(groupSc.isGroup).toBe(true);
+        expect(groupSc.role).toBe("user");
+    });
 });

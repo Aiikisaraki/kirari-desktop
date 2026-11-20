@@ -51,3 +51,41 @@ export function ownerScene(opts: { platform?: string; chatType?: string; senderN
         platform: opts.platform || "desktop",
     };
 }
+
+/**
+ * 从会话 id 在服务端派生场合身份（用于组网 relayed 消息）。
+ * 与核心版 src/services/ownerIdentity.js 的 sceneFromSessionId 逐字对应。
+ *
+ * 信任模型：能 uplin 到主机的消息已通过配对码/长期凭据握手（未鉴权连接的
+ * relay 帧被 hostServer 丢弃）= 主人授权的设备；叶子不单独配协议端，所以
+ * 叶子上行就是主人在那台设备前打字。但仍只从可验证事实派生，绝不读帧里
+ * 自报的 role/isOwner。
+ *   · 本机会话（UUID / session_*）→ 主人 ownerScene
+ *   · bot- 平台会话 → 从 sessionId 里的账号对比规范主人键：主人私聊=owner，其余=user
+ */
+export function sceneFromSessionId(sessionId: string, platform = "net"): Record<string, unknown> {
+    const sid = String(sessionId || "").trim();
+    const ownerKey = getOwnerKey();
+
+    if (sid.startsWith("bot-")) {
+        let counterpart = "";
+        const userM = /(?:^|:)user:([^:]+)/.exec(sid);
+        if (userM) counterpart = userM[1];
+        else counterpart = sid.split(":").pop() || "";
+        counterpart = String(counterpart || "").trim();
+        const isOwnerPerson = !!counterpart && counterpart === ownerKey;
+        const isGroup = /(?:^|[:-])(?:group|channel):/.test(sid);
+        return {
+            chatType: isGroup ? "group" : "private",
+            isGroup,
+            senderId: isOwnerPerson ? ownerKey : counterpart,
+            senderName: "",
+            isOwner: isOwnerPerson && !isGroup,
+            role: isOwnerPerson && !isGroup ? "owner" : "user",
+            trustedLocal: false,
+            platform,
+        };
+    }
+
+    return ownerScene({ platform, chatType: "local" });
+}
