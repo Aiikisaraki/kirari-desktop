@@ -23,6 +23,8 @@ import {
 import { preflightTools, detectCorrectionIntent } from "../reply/intent";
 import { buildTimeContext } from "../reply/timeContext";
 import { buildSceneContext, type RawScene } from "../reply/sceneContext";
+import { buildDeviceBlock } from "../reply/deviceBlock";
+import * as toolRouting from "./toolRouting";
 import { buildCharter } from "../reply/charter";
 import { buildWorkspaceBlock } from "../reply/workspaceBlock";
 import * as memory from "./memory";
@@ -88,6 +90,13 @@ export type GetReplyOptions = {
      * 回调抛出的异常一律吞掉：流式展示是锦上添花，绝不能因为它打断生成。
      */
     onDelta?: ((text: string | null) => void) | null;
+    /**
+     * 请求来源设备（阶段 5，仅组网主机侧会传）。
+     *
+     * 主机替叶子跑模型时带上它，工具路由才知道「没点名设备时该在谁身上跑」：
+     * 来自叶子 → 那台叶子自己的 MCP/skill；主机/QQ/网页端 → 主机自己的。
+     */
+    sourceDeviceId?: string | null;
 };
 
 export type ReplyResult = {
@@ -168,6 +177,8 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
         scene = null,
         onDelta = null,
         signal,
+        // 阶段 5：请求来源设备（组网主机侧才有），供工具路由判定默认执行位置
+        sourceDeviceId = null,
     } = options;
 
     // 阶段 D：能力作用域，缺省按「本地 UI」处理。三类调用方各持一份 frontend 工具，
@@ -404,6 +415,25 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
         // 场合感知：告诉模型此刻在群聊还是私聊、对谁说话、该收着还是放松，
         // 并给出群聊隐私红线与「别像模板」的语气要求。
         systemPrompt += buildSceneContext(scene);
+
+        // 设备与工具执行位置：让她知道「组网里还有哪些机器、怎么点名换机器」。
+        // 默认在哪台执行由 services/toolRouting 在服务端判定（不靠模型自觉），
+        // 这段只是让「点名某个叶子」对模型可见可用。单机安装不注入。
+        try {
+            const devices = toolRouting.listDevices();
+            const fromLeaf = sourceDeviceId ? String(sourceDeviceId) : "";
+            const selfDeviceName = fromLeaf
+                ? devices.find((d) => d.deviceId === fromLeaf)?.name || ""
+                : "";
+            const deviceBlock = buildDeviceBlock({
+                devices,
+                selfDeviceId: fromLeaf,
+                selfDeviceName,
+            });
+            if (deviceBlock) systemPrompt += deviceBlock;
+        } catch (e) {
+            console.warn("[aiReply] 设备段注入失败（已忽略）:", (e as Error)?.message || e);
+        }
 
         // 元指令（根本准则）：比人格更高一层，约束底线行为。永远追加、不可被覆盖。
         systemPrompt += buildCharter();
@@ -819,6 +849,11 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
                         displayName: scene?.senderName ? String(scene.senderName) : undefined,
                         // 前端执行器兜底（兼容尚未按新接口注册的调用方），形态 (name, args)。
                         invokeFrontendTool: aiContext.invokeFrontendTool,
+                        // ── 工具在哪台设备上跑（阶段 5）──
+                        // 请求来自某台叶子 → 默认在那台叶子自己的 MCP/skill 上跑；
+                        // 主机本机 / QQ / 网页端 → 默认主机自己的；模型点名 → 那台的。
+                        // 具体选择在 capabilities/registry 里由 services/toolRouting 判定。
+                        sourceDeviceId: sourceDeviceId ? String(sourceDeviceId) : undefined,
                     });
                     result = dispatched.content;
                 } catch (e) {

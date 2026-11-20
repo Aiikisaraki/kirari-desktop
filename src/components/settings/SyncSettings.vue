@@ -295,11 +295,56 @@ const memberRows = computed(() => {
     return rows;
 });
 
+/**
+ * 各叶子节点自报的工具能力（阶段 5）。
+ *
+ * 用户 2026-11-20：「在主机上可以列出所有叶子节点」——光有设备名不够，
+ * 还得能在界面上看见「那台机器上到底装了哪些 MCP / skill」，否则点名让
+ * 它干活时心里没底。数据来自叶子连上主机时上报的 tool_caps_report。
+ */
+type DeviceCaps = {
+    deviceId: string;
+    name: string;
+    mcpServers: string[];
+    skills: string[];
+    toolNames: { name: string; source: "mcp" | "skill"; owner: string }[];
+};
+const deviceCaps = ref<Record<string, DeviceCaps>>({});
+
+async function loadDeviceCaps() {
+    try {
+        const r = await netApi?.devices?.();
+        const next: Record<string, DeviceCaps> = {};
+        for (const d of (r?.devices || []) as DeviceCaps[]) next[d.deviceId] = d;
+        deviceCaps.value = next;
+    } catch {
+        // 能力清单是锦上添花：拿不到就不显示，不影响组网本身
+        deviceCaps.value = {};
+    }
+}
+
+/** 某台设备的工具摘要（一行说清装了什么） */
+function capsSummary(deviceId: string): string {
+    const c = deviceCaps.value[deviceId];
+    if (!c) return "";
+    const parts: string[] = [];
+    if (c.mcpServers?.length) parts.push(`MCP ${c.mcpServers.length} 个`);
+    if (c.skills?.length) parts.push(`技能 ${c.skills.length} 个`);
+    if (!parts.length) return "";
+    return `可以远程调用：${parts.join("、")}`;
+}
+
 let offState: ((s: NetSnapshot) => void) | null = null;
 
 onMounted(() => {
     void load();
-    offState = (s: NetSnapshot) => apply(s);
+    void loadDeviceCaps();
+    offState = (s: NetSnapshot) => {
+        apply(s);
+        // 成员变动（有设备连上/掉线）时刷一次能力清单：
+        // 叶子刚连上时会稍后上报，所以这里不追求即时，靠用户再进设置页也能看到。
+        void loadDeviceCaps();
+    };
     netApi?.onState?.(offState);
 });
 
@@ -537,6 +582,11 @@ onUnmounted(() => {
                                     {{ m.online ? "在线" : "离线" }}
                                 </span>
                             </h4>
+                            <!-- 那台机器上装了哪些 MCP / skill（阶段 5）：
+                                 点名让它干活之前，先能看见它有什么可用的。 -->
+                            <p v-if="capsSummary(m.deviceId)" class="settings-row__desc">
+                                {{ capsSummary(m.deviceId) }}
+                            </p>
                         </div>
                     </div>
                     <div class="settings-row__control">

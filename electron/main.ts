@@ -18,6 +18,8 @@ import * as scheduledJobsService from "./ai/services/scheduledJobsService";
 // 阶段 E：每日简报落库调度（每 uid × 08/16/22 三档）+ 简报生成。
 import * as briefSchedule from "./ai/services/briefSchedule";
 import * as workspaceTask from "./ai/services/workspaceTask";
+import * as aiToolRouting from "./ai/services/toolRouting";
+import * as aiCapabilities from "./ai/capabilities/registry";
 import { getOwnerKey, sceneFromSessionId } from "./ai/services/ownerIdentity";
 import * as dailyBriefingService from "./ai/services/dailyBriefingService";
 import { AdapterManager, getAdapter } from "./adapter/adapter-manager";
@@ -928,6 +930,12 @@ let chatSessionService: ChatSessionService | null = null;
 let localKnowledge: LocalKnowledge | null = null;
 /** 组网管理器（阶段 2-4）：主机/叶子两种角色，随时可换 */
 let netManager: NetManager | null = null;
+
+/**
+ * 阶段 5：本机是否已把「可远程调用的工具清单」报给主机。
+ * 叶子每次连上主机报一次；掉线重置，重连后再报（期间可能装了新 MCP / 删了 skill）。
+ */
+let capsReportedToHost = false;
 
 /**
  * 叶子节点「机器人（协议端）设置」只读守卫（2026-11-20 用户拍板）。
@@ -2458,6 +2466,21 @@ app.whenReady().then(async () => {
       for (const win of [petWindow, chatWindow, settingsWindow]) {
         if (win && !win.isDestroyed()) win.webContents.send("net:state", snap);
       }
+      // 阶段 5：叶子接上主机后把「本机有哪些工具」报一次；掉线重置，重连会再报。
+      // 主机据此知道模型点名的设备上到底能跑什么，而不是盲目转发等超时。
+      if (!snap || snap.leafStatus !== "connected") {
+        capsReportedToHost = false;
+        return;
+      }
+      if (capsReportedToHost) return;
+      capsReportedToHost = true;
+      setTimeout(() => {
+        try {
+          reportLocalToolCaps();
+        } catch (e) {
+          console.warn("[net] 上报工具能力失败:", (e as Error)?.message || e);
+        }
+      }, 500);
     },
     onRelayPrompt: (frame) => {
       // 全网广播的用户输入：所有节点（含主机自己）都显示同一条。
@@ -2486,6 +2509,12 @@ app.whenReady().then(async () => {
         console.warn("[net] 写入主机下发配置失败:", (e as Error)?.message || e);
       }
     },
+    // 叶子侧：主机点名要本机跑一次工具（阶段 5）。
+    // MCP server / skill 都装在本机，主机上没有它们的配置（也刻意不同步），
+    // 所以必须在本机执行再把结果回传。
+    onToolCall: (frame) => {
+      void runLocalToolCall(frame);
+    },
     onRelayBusy: (frame) => {
       const svc = chatSessionService;
       if (svc) svc.notifyRelayBusy(frame.reason);
@@ -2502,13 +2531,121 @@ app.whenReady().then(async () => {
   });
 
   /**
+   * 阶段 5：把组网能力注入工具路由判定层。
+   *
+   * 传函数而不是快照 —— netManager 是稍后才在别处被重新赋值的，
+   * 取用时才读才能拿到最新实例（与 toolRouting 的惰性取值约定一致）。
+   */
+  aiToolRouting.setToolRoutingNet({
+    members: () => {
+      try {
+        const snap = netManager?.snapshot();
+        if (!snap || snap.role !== "host") return [];
+        const list = Array.isArray((snap as any).members) ? (snap as any).members : [];
+        return list.map((m: any) => ({
+          deviceId: String(m.deviceId || ""),
+          name: String(m.name || m.deviceId || ""),
+          online: !!m.online,
+        }));
+      } catch {
+        return [];
+      }
+    },
+    callToolOnDevice: (deviceId, name, args, opts) => {
+      if (!netManager) {
+        return Promise.resolve({ ok: false, error: "组网还没就绪", deviceId });
+      }
+      return netManager.callToolOnDevice(deviceId, name, args, opts);
+    },
+  });
+
+  /**
+   * 叶子侧：执行主机指派过来的一次工具调用（阶段 5）。
+   *
+   * 为什么必须在本机跑：MCP server 与 skill 都装在各节点本地，主机上没有
+   * （也刻意不同步 —— SYNC_FIELDS 不含 mcp/skill）。所以「点明书房的电脑、
+   * 用它自己的技能」只能是：主机决策 → 叶子执行 → 结果回传。
+   *
+   * 约定：**无论成功失败都要回 tool_result**。不回主机只能等到超时，
+   * 而超时无法区分「工具报错」和「设备掉线」。
+   */
+  async function runLocalToolCall(frame: {
+    callId: string;
+    name: string;
+    args?: unknown;
+    sessionId?: string;
+  }): Promise<void> {
+    const started = Date.now();
+    const callId = String(frame?.callId || "");
+    const name = String(frame?.name || "");
+    const reply = (out: { ok: boolean; result?: string; error?: string }) => {
+      try {
+        netManager?.replyToolResult({ callId, elapsedMs: Date.now() - started, ...out });
+      } catch (e) {
+        console.warn("[net] 回传工具结果失败:", (e as Error)?.message || e);
+      }
+    };
+    if (!callId || !name) {
+      reply({ ok: false, error: "主机发来的工具调用缺少 callId 或工具名" });
+      return;
+    }
+    try {
+      // 走本地路径：刻意不带 sourceDeviceId / @device: 前缀，
+      // 否则 dispatch 里的路由又会想把它转发出去（无限接力）。
+      const dispatched = await aiCapabilities.dispatch("net:remote", name, frame.args || {}, {
+        origin: "net-remote",
+        sessionId: frame.sessionId,
+      });
+      if (dispatched.isError) {
+        reply({ ok: false, error: String(dispatched.content || "执行失败") });
+      } else {
+        reply({ ok: true, result: String(dispatched.content || "") });
+      }
+    } catch (e) {
+      reply({ ok: false, error: (e as Error)?.message || String(e) });
+    }
+  }
+
+  /**
+   * 叶子侧：把本机可远程调用的工具清单报给主机（阶段 5）。
+   *
+   * 主机据此回答「这台设备能跑什么」，模型点名设备时才有依据 ——
+   * 否则只能盲目转发然后等超时。
+   */
+  function reportLocalToolCaps(): boolean {
+    if (!netManager) return false;
+    try {
+      const servers = frontendTools.getMcpServers() || [];
+      const skills = loadJsonFile<frontendTools.SkillConfig[]>(skillsConfigPath(), DEFAULT_SKILLS);
+      // 本机注册表里已有的工具名（含 MCP 与 skill__ 前缀），最准
+      const toolNames = aiCapabilities
+        .listTools("local::net-caps")
+        .map((t: any) => (t && t.function && typeof t.function.name === "string" ? t.function.name : ""))
+        .filter(Boolean)
+        .map((nm: string) => ({
+          name: nm,
+          source: (nm.startsWith("skill__") ? "skill" : "mcp") as "mcp" | "skill",
+          owner: nm.split("__")[0],
+        }));
+      return netManager.reportToolCaps({
+        mcpServers: servers.map((s) => String(s.id || "")).filter(Boolean),
+        skills: (Array.isArray(skills) ? skills : []).map((s) => String(s.id || "")).filter(Boolean),
+        toolNames,
+      });
+    } catch (e) {
+      console.warn("[net] 上报工具能力失败:", (e as Error)?.message || e);
+      return false;
+    }
+  }
+
+  /**
    * 装上主机侧的模型执行器。
    *
    * 关键：组网内所有模型调用都由**主机自己的**凭证支付，叶子无需配置。
    * 这里把本机 AI 引擎包装成执行器；引擎的会话历史按叶子传来的 sessionId 存放，
    * 所以每台设备有自己的对话脉络，且叶子重连后上下文还在。
    */
-  const hostExecutor: HostExecutor = async ({ sessionId, content, images, kbContext, onDelta }) => {
+  const hostExecutor: HostExecutor = async ({ sessionId, content, images, kbContext, onDelta, deviceId }) => {
     // ── 工作空间定期任务：叶子到点后转发上来的 ──
     // 叶子没有模型凭证，任务照旧由主机执行（用户 2026-11-19：「从机（叶子节点）的
     // 任务依旧转发给主机完成」）。产出写在**主机**的 ~/KirariWorkspace 里，叶子只拿回结果。
@@ -2578,6 +2715,10 @@ app.whenReady().then(async () => {
       // 流式：叶子请求了 stream 时，组网层会传 onDelta 进来 —— 转给内核逐字回调，
       // 增量由组网层单播回叶子。没请求流式时是 undefined，行为不变。
       onDelta: typeof onDelta === "function" ? onDelta : null,
+      // 请求来源（阶段 5）：这条对话来自哪台设备。
+      // 主机据此让「模型没点名时，工具默认在请求方自己那台跑」——
+      // 叶子请求自己，主机/QQ/网页端请求主机自己。
+      sourceDeviceId: deviceId ? String(deviceId) : undefined,
       // 组网场景下宁可给兜底语也不要让整条链路失败
       allowFallback: true,
     });

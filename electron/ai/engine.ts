@@ -176,6 +176,14 @@ export type ChatOptions = {
     signal?: AbortSignal;
     /** 失败时是否回退到预设兜底语。桌宠默认 true，保证永远有反应 */
     allowFallback?: boolean;
+    /**
+     * 请求来源设备（阶段 5，仅组网主机侧用）。
+     *
+     * 主机替叶子执行模型调用时带上它，于是「模型没点名设备时，工具默认在
+     * 请求方自己那台跑」——叶子请求就落回叶子，主机/QQ/网页端就是主机自己。
+     * 不透传的话，叶子请求会默认跑主机的 MCP/skill，正是用户要避免的。
+     */
+    sourceDeviceId?: string | null;
 };
 
 /**
@@ -199,6 +207,7 @@ export async function chat(options: ChatOptions): Promise<ReplyResult> {
         onDelta = null,
         signal,
         allowFallback = true,
+        sourceDeviceId = null,
     } = options;
 
     const context = ensureContext(settings);
@@ -232,6 +241,8 @@ export async function chat(options: ChatOptions): Promise<ReplyResult> {
             skillPrompts,
             persona,
             signal,
+            // 阶段 5：透传请求来源，供工具路由判定「默认在哪台设备上执行」
+            sourceDeviceId: sourceDeviceId ? String(sourceDeviceId) : undefined,
         });
         // 助手回复入库，保证下一轮上下文连贯。emotion 一并落库 ——
         // 界面重放历史时要按当时的情绪播动画，见 ChatSessionService.loadFromDb。

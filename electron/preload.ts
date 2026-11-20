@@ -80,6 +80,9 @@ contextBridge.exposeInMainWorld("netApi", {
         ipcRenderer.invoke("net:set-sync-whitelist", fields),
     codeQr: (code: string): Promise<{ ok: boolean; dataUrl?: string; error?: string }> =>
         ipcRenderer.invoke("net:code-qr", code),
+    /** 主机侧：列出所有叶子节点 + 各自能跑的工具（阶段 5） */
+    devices: (): Promise<{ ok: boolean; role: string; devices: unknown[] }> =>
+        ipcRenderer.invoke("net:devices"),
     onState: (cb: (s: NetSnapshot) => void): void => {
         ipcRenderer.on("net:state", (_e, s: NetSnapshot) => cb(s));
     },

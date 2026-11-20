@@ -206,4 +206,33 @@ export function setupNetIpc(getManager: () => NetManager | null): void {
 
     /** 出口忙不忙（主机侧显示排队情况） */
     ipcMain.handle("net:relay-stats", withManager((m) => m.relayStats()));
+
+    /**
+     * 主机侧：列出所有叶子节点 + 各自能跑哪些工具（阶段 5）。
+     *
+     * 用户 2026-11-20：「在主机上可以列出所有叶子节点，而且也可以区分哪个请求
+     * 是来自哪个叶子节点。」工具清单来自叶子连上主机时自报的 tool_caps_report。
+     *
+     * 非主机角色返回空列表而不是抛错 —— 界面上「没有其它设备」和「查询失败」
+     * 是两件事，不该混成同一个错误提示。
+     */
+    ipcMain.handle(
+        "net:devices",
+        withManager((m) => {
+            const snap = m.snapshot();
+            if (!snap || snap.role !== "host") return { ok: true, role: snap?.role || "off", devices: [] };
+            const devices = (snap.members || []).map((mem: any) => {
+                const caps = m.toolCapsOf(String(mem.deviceId || "")) || null;
+                return {
+                    deviceId: String(mem.deviceId || ""),
+                    name: String(mem.name || mem.deviceId || ""),
+                    online: !!mem.online,
+                    mcpServers: caps ? caps.mcpServers || [] : [],
+                    skills: caps ? caps.skills || [] : [],
+                    toolNames: caps && Array.isArray(caps.toolNames) ? caps.toolNames : [],
+                };
+            });
+            return { ok: true, role: snap.role, devices };
+        }),
+    );
 }

@@ -14,6 +14,7 @@ import {
     type Capability,
     type CapabilityInput,
 } from "kirari-agent";
+import * as toolRouting from "../services/toolRouting";
 
 const registry = new CapabilityRegistry();
 const executorById = new Map<string, (args: any, ctx: any) => Promise<any> | any>();
@@ -164,31 +165,70 @@ export async function dispatch(
     ctx: any = {},
 ): Promise<DispatchResult> {
     loadBuiltin();
+
+    // 阶段 5：先决定这次调用在哪台设备上执行。
+    // 叶子请求 → 叶子自己；主机/QQ/网页端 → 主机自己；模型点名 → 那台设备。
+    // 判定细节见 services/toolRouting.ts；普通单机安装下 decide 永远返回 local。
+    let route: ReturnType<typeof toolRouting.decide> | null = null;
+    try {
+        route = toolRouting.decide(ctx, name);
+    } catch (e) {
+        console.warn("[capabilities] 工具路由判定失败（按本地执行）:", (e as Error)?.message || e);
+        route = null;
+    }
+    if (route && route.target === "remote") {
+        try {
+            const remote = await toolRouting.runRemote(ctx, route, args || {});
+            if (remote) {
+                const prefix = route.note ? `[${route.note}]\n` : "";
+                return { content: prefix + remote.content, isError: remote.isError, capability: null };
+            }
+            // 没有远程通道（未开组网 / 老版本）：落回本地执行
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            return { content: `error: 远程执行工具失败：${msg}`, isError: true, capability: null };
+        }
+    }
+    // 前缀已剥掉设备名，本地执行要用真实工具名
+    const realName = route && route.name ? route.name : name;
+
     const key = String(scopeId || "anonymous");
-    const cap = registry.resolve(key, name);
-    if (!cap) return { content: `未知工具：${name}`, isError: true, capability: null };
+    const cap = registry.resolve(key, realName);
+    if (!cap) {
+        const miss = route && route.note ? `[${route.note}]\n` : "";
+        return { content: `${miss}未知工具：${realName}`, isError: true, capability: null };
+    }
 
     let executor: ((args: any, ctx?: any) => Promise<any> | any) | undefined;
     if (cap.scope === "connection") {
         executor =
-            connectionExecutors.get(key)?.get(name) ||
+            connectionExecutors.get(key)?.get(realName) ||
             (typeof ctx.invokeFrontendTool === "function"
-                ? (a) => ctx.invokeFrontendTool(name, a)
+                ? (a) => ctx.invokeFrontendTool(realName, a)
                 : undefined);
     } else {
         executor = executorById.get(cap.id);
     }
     if (typeof executor !== "function")
-        return { content: `error: 能力 ${name} 无可用执行器`, isError: true, capability: cap };
+        return { content: `error: 能力 ${realName} 无可用执行器`, isError: true, capability: cap };
+
+    // 点名了却没找到设备时，即使这次在本地执行成功，也必须把
+    // 「没找到那台设备」一起回给模型。否则模型会以为跑的是那台机器，
+    // 实际跑的是主机 —— 这类串线是最难排查的一种错。
+    const routeNote = route && route.note ? `[${route.note}]\n` : '';
 
     const timeoutMs = cap.timeoutMs || DEFAULT_CAPABILITY_TIMEOUT_MS;
     try {
-        const raw = await withTimeout(Promise.resolve(executor(args || {}, ctx)), timeoutMs, name);
-        return { content: truncateResult(String(raw), cap.truncateChars), isError: false, capability: cap };
+        const raw = await withTimeout(Promise.resolve(executor(args || {}, ctx)), timeoutMs, realName);
+        return {
+            content: routeNote + truncateResult(String(raw), cap.truncateChars),
+            isError: false,
+            capability: cap,
+        };
     } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         return {
-            content: truncateResult(`error: ${msg}`, cap.truncateChars),
+            content: routeNote + truncateResult(`error: ${msg}`, cap.truncateChars),
             isError: true,
             capability: cap,
         };
