@@ -2,6 +2,7 @@ import { nativeImage } from "electron";
 import * as frontendTools from "./frontend-tools";
 import * as engine from "./ai/engine";
 import * as db from "./ai/db/storage";
+import { ownerScene } from "./ai/services/ownerIdentity";
 import type { AiModelSettings } from "./ai/aiContext";
 import { readModelConfigFile } from "./model-config";
 import type { LocalKnowledge, RetrievedPassage } from "../src/knowledge/localKnowledge";
@@ -372,6 +373,11 @@ export class ChatSessionService {
                 persona: frontendTools.collectBasePersona() || null,
                 skillPrompts: frontendTools.collectSkillPrompts(),
                 kbContext: kbContext.length > 0 ? kbContext : null,
+                // 桌宠对话框就是主人本人（与网页控制台 / 主人 QQ 私聊同一身份）。
+                // 之前没传 scene → 内核把 counterpartId 推成本机会话 UUID、
+                // roleOf 兜底成 user：主人在自己的桌宠里查不了任务、记忆池也裂开。
+                // 身份键统一由 ownerIdentity 提供，绝不写死 '_local' 或用 UUID。
+                scene: ownerScene({ platform: 'desktop' }),
                 signal: controller.signal,
             });
             if (this.disposed) return true;
