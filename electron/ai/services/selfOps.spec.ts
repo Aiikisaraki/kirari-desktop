@@ -129,4 +129,85 @@ describe("selfOps（自我运维）", () => {
         expect(selfOps.read("diagnose", selfOps.trustedLocalCtx({ sessionId: "session_1" })))
             .toContain("模型配置");
     });
+
+    // ── 「提醒算不算任务」口径（2026-11-20 用户诘问）──────────────────
+    // 用户原话：「难道提醒不是一个任务吗，定时提醒不就是一个自动化任务吗」
+    // 生产上出现过「她说 5 个、self_read(tasks) 说 0 个」的矛盾：5 条提醒确实
+    // 在，只是躺在 scheduled_jobs 表里而 tasks 只查 tasks 表。下面钉死两件事：
+    // ① 提醒计入任务总数；② 两个 topic 的数字必须自洽。
+    describe("任务与提醒的合并口径", () => {
+        const SID = "work-report-spec";
+
+        async function seed() {
+            const { taskStore } = await import("../events/taskStore");
+            const { jobStore } = await import("../events/jobStore");
+            const { createTask } = await import("kirari-agent");
+            const now = Date.now();
+
+            // 一个多步任务（会结束的那种）
+            taskStore.save(
+                createTask({
+                    taskId: "task-spec-1",
+                    sessionId: SID,
+                    turnId: "t1",
+                    origin: "core",
+                    uid: 1,
+                    title: "整理资料",
+                    steps: [{ kind: "text", label: "看一遍", status: "pending" }],
+                    now,
+                }),
+                "task_created",
+            );
+            // 两条提醒：一条待触发、一条已触发
+            jobStore.save({
+                jobId: "job-spec-1", sessionId: SID, origin: "core", uid: 1, kind: "reminder",
+                title: "喝水", payload: "喝水", dueAt: now + 60_000,
+                recurrence: "once", status: "pending", createdAt: now, updatedAt: now,
+            });
+            jobStore.save({
+                jobId: "job-spec-2", sessionId: SID, origin: "core", uid: 1, kind: "reminder",
+                title: "带伞", payload: "带伞", dueAt: now - 60_000,
+                recurrence: "once", status: "fired", createdAt: now, updatedAt: now,
+            });
+        }
+
+        it("★ 问 tasks 时提醒被算进去（不再是「没有任务记录」）", async () => {
+            await seed();
+            const out = selfOps.read("tasks", { sessionId: SID, ...OWNER });
+            expect(out).not.toContain("没有任务记录");
+            expect(out).toContain("3 件"); // 1 任务 + 2 提醒
+            expect(out).toContain("提醒 2 条");
+            expect(out).toContain("多步任务 1 条");
+            expect(out).toContain("也算任务");
+        });
+
+        it("★ 两个 topic 的数字自洽，且区分未结束/已结束", async () => {
+            const out = selfOps.read("tasks", { sessionId: SID, ...OWNER });
+            const rem = selfOps.read("reminders", { sessionId: SID, ...OWNER });
+            expect(rem).toContain("2 条");
+            expect(rem).toContain("也算任务");
+            // 未结束：任务 1（pending）+ 提醒 1（pending）= 2
+            expect(out).toContain("【还在等着的】2 件");
+            expect(out).toContain("【已结束】1 件");
+        });
+
+        it("不再用「本会话」这种内部术语", () => {
+            const out = selfOps.read("tasks", { sessionId: SID, ...OWNER });
+            expect(out).not.toContain("本会话");
+            expect(out).toContain("这条对话");
+        });
+
+        it("注入清单与 self_read 数字一致，并要求先查再答", () => {
+            const manifest = selfOps.buildManifest({ sessionId: SID, capScope: "local::anon", ...OWNER });
+            expect(manifest).toContain("3 件");
+            expect(manifest).toContain("还没结束的 2 件");
+            expect(manifest).toContain("不要凭印象报数字");
+        });
+
+        it("★ 别的会话看不到这些（任务归属不串）", () => {
+            const other = selfOps.read("tasks", { sessionId: "another-session", ...OWNER });
+            expect(other).toContain("0 件");
+            expect(other).not.toContain("整理资料");
+        });
+    });
 });

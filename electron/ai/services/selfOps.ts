@@ -59,6 +59,88 @@ function statusZh(s: unknown): string {
     return map[String(s)] || String(s ?? "");
 }
 
+// ── 任务与提醒：对外一个口径 ────────────────────────────────────────────
+//
+// 用户 2026-11-20 的诘问：「难道提醒不是一个任务吗，定时提醒不就是一个自动化
+// 任务吗」。对，就是。所以对外不该有两个互不相干的答案。
+//
+// 内部两张表是实现细节，分开存合理（用途不同）：
+//   · tasks —— plan 建的多步任务，进程内推着往下走，**没有**触发时间
+//   · jobs  —— 到点才说话的一次性或重复提醒，核心就是 dueAt
+// 但**读**的时候必须合并计数，否则会出现「她说 5 个、接口说 0 个」这种
+// 两边都没撒谎、用户却拿不到真实答案的局面。
+const WORK_ACTIVE = new Set(["pending", "running"]);
+
+type TaskRow = any;
+type JobRow = any;
+
+/** 取这条会话名下的全部「事件」：多步任务 + 提醒。 */
+function collectWork(sid: string): { tasks: TaskRow[]; jobs: JobRow[] } {
+    const tasks: TaskRow[] = [];
+    const jobs: JobRow[] = [];
+    if (sid) {
+        try {
+            tasks.push(...taskStore.list(sid, 50));
+        } catch (e) {
+            console.warn("[self] 读任务失败（按空处理）:", (e as Error)?.message || e);
+        }
+        try {
+            jobs.push(...jobStore.list(sid, 100));
+        } catch (e) {
+            console.warn("[self] 读提醒失败（按空处理）:", (e as Error)?.message || e);
+        }
+    }
+    return { tasks, jobs };
+}
+
+function stepSummary(t: TaskRow): string {
+    const steps = Array.isArray(t.steps) ? t.steps : [];
+    if (!steps.length) return "无";
+    return steps.map((s: any) => `${s.label}[${statusZh(s.status) || s.status || "?"}]`).join("→");
+}
+
+/**
+ * 把任务与提醒渲染成一段**统一**的说明。
+ * 不管用户问「几个任务」「几个提醒」「有什么待办」，都以同一份事实为准。
+ */
+function describeWork(
+    { tasks, jobs }: { tasks: TaskRow[]; jobs: JobRow[] },
+    opts: { withSteps?: boolean } = {},
+): string {
+    const withSteps = opts.withSteps !== false;
+    const total = tasks.length + jobs.length;
+    const head =
+        `这条对话里共有 ${total} 件（提醒 ${jobs.length} 条、多步任务 ${tasks.length} 条）。` +
+        "提醒到点会自动触发，也算任务的一种。";
+
+    if (!total) return `${head}\n我在这条对话里没给你记过待办，也没设过提醒。`;
+
+    const activeTasks = tasks.filter((t) => WORK_ACTIVE.has(t.status));
+    const activeJobs = jobs.filter((j) => WORK_ACTIVE.has(j.status));
+    const doneTasks = tasks.filter((t) => !WORK_ACTIVE.has(t.status));
+    const doneJobs = jobs.filter((j) => !WORK_ACTIVE.has(j.status));
+
+    const lines: string[] = [head];
+    lines.push(`\n【还在等着的】${activeTasks.length + activeJobs.length} 件`);
+    if (!activeTasks.length && !activeJobs.length) lines.push("（没有，全部已结束）");
+    for (const t of activeTasks) {
+        lines.push(
+            `- 任务 ${t.taskId}「${t.title}」${statusZh(t.status)}` +
+                (withSteps ? `，步骤：${stepSummary(t)}` : ""),
+        );
+    }
+    for (const j of activeJobs) {
+        lines.push(`- 提醒 ${j.jobId}「${j.title}」${friendlyTime(j.dueAt)} 触发（${statusZh(j.recurrence)}）`);
+    }
+
+    if (doneTasks.length || doneJobs.length) {
+        lines.push(`\n【已结束】${doneTasks.length + doneJobs.length} 件`);
+        for (const t of doneTasks) lines.push(`- 任务 ${t.taskId}「${t.title}」${statusZh(t.status)}`);
+        for (const j of doneJobs) lines.push(`- 提醒 ${j.jobId}「${j.title}」${statusZh(j.status)}`);
+    }
+    return lines.join("\n");
+}
+
 /** 生成注入 system.base 的自我清单段。 */
 export function buildManifest(ctx: SelfCtx = {}): string {
     const lines: string[] = [];
@@ -75,14 +157,34 @@ export function buildManifest(ctx: SelfCtx = {}): string {
     lines.push("- 需要改自己的可改设置时调用 self_update；它只接受安全白名单内的字段，凭证类一律不可读写明文，每次修改都会记审计。");
 
     try {
-        if (ctx.sessionId) {
-            const tasks = taskStore.active(ctx.sessionId).slice(0, 10);
-            if (tasks.length) lines.push(`- 未完成任务（${tasks.length}）：` + tasks.map((t) => `「${t.title}」`).join("；"));
-            const jobs = jobStore.list(ctx.sessionId, 100)
-                .filter((j) => j.status === "pending")
-                .sort((a, b) => a.dueAt - b.dueAt)
-                .slice(0, 10);
-            if (jobs.length) lines.push("- 待触发提醒：" + jobs.map((j) => `${friendlyTime(j.dueAt)}「${j.title}」`).join("；"));
+        // 2026-11-20：这里原来分开列「未完成任务」「待触发提醒」两行，且都只列
+        // active/pending 的。结果用户问「有几个任务」时，模型手里只有这两行的
+        // 部分信息，答出来的数对不上库里的实际条数。现在一次读全量、按同一口径
+        // 说话，数字与 self_read(tasks) 一致。
+        const work = collectWork(ctx.sessionId ? String(ctx.sessionId) : "");
+        const activeTasks = work.tasks.filter((t) => WORK_ACTIVE.has(t.status)).slice(0, 10);
+        const activeJobs = work.jobs
+            .filter((j) => WORK_ACTIVE.has(j.status))
+            .sort((a, b) => (a.dueAt || 0) - (b.dueAt || 0))
+            .slice(0, 10);
+        const totalActive = activeTasks.length + activeJobs.length;
+        const totalAll = work.tasks.length + work.jobs.length;
+
+        if (totalAll) {
+            lines.push(
+                `- 这条对话里的待办/提醒：共 ${totalAll} 件，其中还没结束的 ${totalActive} 件（提醒也计入任务）。`,
+            );
+        }
+        if (activeTasks.length) {
+            lines.push("- 未完成任务：" + activeTasks.map((t) => `「${t.title}」`).join("；"));
+        }
+        if (activeJobs.length) {
+            lines.push("- 待触发提醒：" + activeJobs.map((j) => `${friendlyTime(j.dueAt)}「${j.title}」`).join("；"));
+        }
+        if (totalAll) {
+            lines.push(
+                "- 别人问「有几个任务」时，用上面的合计数回答，并且**先调 self_read(tasks) 核实**，不要凭印象报数字。已经结束的也要说清楚是结束了。",
+            );
         }
     } catch {
         lines.push("（任务/提醒摘要暂不可用）");
@@ -219,17 +321,26 @@ export function read(topic: unknown, ctx: SelfCtx = {}): string {
         }
 
         case "tasks": {
-            const ts = sid ? taskStore.list(sid, 50) : [];
-            if (!ts.length) return "（本会话没有任务记录）";
-            return ts.map((t) => `- ${t.taskId}「${t.title}」状态=${statusZh(t.status)} 步骤=${(t.steps || []).map((s: any) => `${s.label}[${statusZh(s.status) || s.status}]`).join("→") || "无"} 更新于${friendlyTime(t.updatedAt)}`).join("\n");
+            // 合并口径：提醒也算任务。理由见 collectWork / describeWork 的注释。
+            // 用户问「几个任务」时得到的总数，必须和他问「几个提醒」时一致。
+            return describeWork(collectWork(sid || ""));
         }
 
         case "reminders": {
-            const jobs = sid ? jobStore.list(sid, 100) : [];
-            if (!jobs.length) return "（本会话没有提醒/定时任务）";
-            return jobs.slice().sort((a, b) => a.dueAt - b.dueAt).map((j) =>
-                `- ${j.jobId}「${j.title}」${friendlyTime(j.dueAt)} 状态=${statusZh(j.status)} 重复=${statusZh(j.recurrence)} 内容=${j.payload}`
-            ).join("\n");
+            const { jobs } = collectWork(sid || "");
+            if (!jobs.length) {
+                return "这条对话里没设过提醒。（提醒也算任务，问「几个任务」会一起算进去。）";
+            }
+            const lines = [
+                `提醒共 ${jobs.length} 条（提醒也算任务的一种，说「任务」时我会一并数上）：`,
+            ];
+            for (const j of jobs.slice().sort((a, b) => (a.dueAt || 0) - (b.dueAt || 0))) {
+                lines.push(
+                    `- ${j.jobId}「${j.title}」${friendlyTime(j.dueAt)} 状态=${statusZh(j.status)}` +
+                        ` 重复=${statusZh(j.recurrence)} 内容=${j.payload}`,
+                );
+            }
+            return lines.join("\n");
         }
 
         case "thinking": {

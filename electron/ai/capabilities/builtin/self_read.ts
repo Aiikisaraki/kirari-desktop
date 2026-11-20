@@ -13,14 +13,19 @@ const capability: Capability = defineCapability({
     kind: "tool",
     scope: "builtin",
     description:
-        "查询 Kirari 自己的信息。想知道自己的设置、可用能力、当前模型、工具循环参数、未完成的任务、已设置的提醒、思考模式，或做一次自我体检时调用。topic 取值：readme/capabilities/settings/models/tasks/reminders/thinking/diagnose/logs/audit。遇到「你有什么功能」「你记得我要做什么吗」「检查一下你自己」这类问题优先用它，别凭空回答。",
+        "查询 Kirari 自己的信息。想知道自己的设置、可用能力、当前模型、工具循环参数、任务与提醒、思考模式，或做一次自我体检时调用。topic 取值：readme/capabilities/settings/models/tasks/reminders/thinking/diagnose/logs/audit。" +
+        "注意：tasks 是**合并口径**——多步任务和定时提醒都算任务，一起计数；reminders 只看提醒。" +
+        "别人问「有几个任务」「还有什么事没做」时**必须**调 self_read(tasks) 拿准确数字，不要凭印象回答。" +
+        "遇到「你有什么功能」「你记得我要做什么吗」「检查一下你自己」这类问题优先用它，别凭空回答。",
     parameters: {
         type: "object",
         properties: {
             topic: {
                 type: "string",
                 enum: TOPIC_ENUM,
-                description: "要查询的方面。不确定的话先 readme；自我排查用 diagnose。",
+                description:
+                    "要查询的方面。不确定的话先 readme；自我排查用 diagnose。" +
+                    "问「有几个任务/有什么事要做」用 tasks（含提醒）；只问提醒用 reminders。",
             },
         },
         required: ["topic"],
