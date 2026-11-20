@@ -85,3 +85,115 @@ describe("ownerIdentity · 三入口同一个身份", () => {
         expect(groupSc.role).toBe("user");
     });
 });
+
+// ── 2026-11-20 规范化：同一个主人的多种写法必须认成同一个人 ──────────────
+//
+// 用户原话：
+//   「既然三个入口是一个身份，那我不管哪个入口都可以应该看得到啊，
+//     你这bug也太多了」
+//   「还是打补丁，你要考虑一下还有没有其他是主人但是没被存为 _local 的情况，
+//     也一并处理掉，我们要规范化编码了」
+//
+// 这个 describe 把「归一化」本身钉成回归：以前每次故障都是因为某一行比较
+// 没认出 '_local' / 本机会话 UUID，然后在那一行补个 ||，下条语句又漏。
+describe("ownerIdentity · 身份归一化（canonical identity）", () => {
+    const LOCAL_SID = "9284e4f6-7123-4577-bb69-d788bd1cadce";
+
+    it("★ 所有「其实就是主人」的写法归一成同一个键", async () => {
+        const oi = await import("./ownerIdentity");
+        const forms = [
+            OWNER_QQ,
+            "_local",
+            "local",
+            "uid=1",
+            "1",
+            "__builtin__",
+            LOCAL_SID,
+            `net:device-a:${LOCAL_SID}`,
+            "session_1795089710522",
+            "console-abc123",
+            `  ${OWNER_QQ}  `,
+        ];
+        for (const raw of forms) {
+            expect(oi.canonicalIdentity(raw), `canonicalIdentity(${JSON.stringify(raw)})`)
+                .toBe(OWNER_QQ);
+        }
+    });
+
+    it("★ samePerson：任意两种主人写法都是同一个人", async () => {
+        const oi = await import("./ownerIdentity");
+        const forms = [OWNER_QQ, "_local", LOCAL_SID, "session_1", "1"];
+        for (const a of forms) {
+            for (const b of forms) {
+                expect(oi.samePerson(a, b), `samePerson(${a}, ${b})`).toBe(true);
+            }
+        }
+    });
+
+    it("★ 客人隔离红线：客人绝不能被归一到主人", async () => {
+        const oi = await import("./ownerIdentity");
+        expect(oi.canonicalIdentity(FRIEND_QQ)).toBe(FRIEND_QQ);
+        expect(oi.samePerson(FRIEND_QQ, OWNER_QQ)).toBe(false);
+        expect(oi.samePerson(FRIEND_QQ, "_local")).toBe(false);
+        expect(oi.samePerson(FRIEND_QQ, LOCAL_SID)).toBe(false);
+        // 客人的平台/工作空间会话也不得归一成主人
+        for (const sid of [
+            `bot-onebot-private:xxx:user:${FRIEND_QQ}`,
+            `workspace:${FRIEND_QQ}:每日提醒`,
+            `sub::${FRIEND_QQ}::task-1`,
+        ]) {
+            expect(oi.canonicalIdentity(sid), sid).not.toBe(OWNER_QQ);
+        }
+    });
+
+    it("★ 空值 fail-closed：绝不默认成主人", async () => {
+        const oi = await import("./ownerIdentity");
+        for (const v of ["", "   ", null, undefined]) {
+            expect(oi.canonicalIdentity(v as any)).toBe("");
+            expect(oi.samePerson(v as any, OWNER_QQ)).toBe(false);
+        }
+    });
+
+    it("★ 报障复现：本机会话建的提醒，落库 ownerKey 必须是规范键", async () => {
+        const oi = await import("./ownerIdentity");
+        const tr = await import("./taskRuntime");
+        const { jobStore } = await import("../events/jobStore");
+        const sid = LOCAL_SID;
+
+        const res = await tr.handleScheduleReminder(
+            { title: "测试提醒", text: "一分钟后到", delayMs: 60_000 },
+            { sessionId: sid, uid: 1, origin: "core", role: "owner", displayName: "主人" } as any,
+        );
+        expect(String(res)).toContain("已设好提醒");
+
+        const jobs = jobStore.list(sid, 50) || [];
+        const job = jobs.find((j: any) => String(j.title) === "测试提醒");
+        expect(job).toBeTruthy();
+        // 关键断言：不是 '_local'，而是规范身份键
+        expect(String((job as any).ownerKey)).toBe(OWNER_QQ);
+        expect(oi.samePerson((job as any).ownerKey, oi.getOwnerKey())).toBe(true);
+    });
+
+    it("★ 桌面投递闸门：_local / UUID / 规范键都收，客人不收", async () => {
+        const svc = await import("./scheduledJobsService");
+        const mk = (ownerKey: string) => ({
+            jobId: `probe-${ownerKey}`,
+            sessionId: LOCAL_SID,
+            ownerKey,
+            kind: "reminder",
+            title: "t",
+            payload: "p",
+            status: "pending",
+        }) as any;
+
+        for (const k of ["_local", LOCAL_SID, OWNER_QQ]) {
+            expect(svc.shouldSpeakOnDesktop(mk(k), OWNER_QQ), `want=${k}`).toBe(true);
+        }
+        expect(svc.shouldSpeakOnDesktop(mk(FRIEND_QQ), OWNER_QQ)).toBe(false);
+        // 查不到主人是谁 → 明确归属到某人的一律 fail-closed
+        expect(svc.shouldSpeakOnDesktop(mk(OWNER_QQ), null)).toBe(false);
+        expect(svc.shouldSpeakOnDesktop(mk(FRIEND_QQ), null)).toBe(false);
+        // '_local' 是「本机自建」的来源标记，与主人是谁无关，仍放行
+        expect(svc.shouldSpeakOnDesktop(mk("_local"), null)).toBe(true);
+    });
+});

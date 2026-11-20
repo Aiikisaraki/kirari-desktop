@@ -10,6 +10,9 @@ import type { ScheduledJob } from "kirari-agent";
 import { jobStore } from "../events/jobStore";
 import { recorder } from "../events/recorder";
 import { getOwnerKeySync } from "../db/storage";
+// 2026-11-20 规范化：身份比较一律走 samePerson（两侧先归一），
+// 不再在各处手写 ownerKey === "_local" / !== desktopOwner。
+import { FALLBACK, samePerson } from "./ownerIdentity";
 import * as briefSchedule from "./briefSchedule";
 import * as workspaceTask from "./workspaceTask";
 
@@ -78,7 +81,7 @@ export function shouldSpeakOnDesktop(
 ): boolean {
     const ownerKey = String((job as any).ownerKey || "").trim();
     // 没有归属信息（老任务）或本机自建 → 不拦。
-    if (!ownerKey || ownerKey === "_local") return true;
+    if (!ownerKey) return true;
 
     let desktopOwner = ownerOfSystem;
     if (desktopOwner === undefined) {
@@ -88,13 +91,29 @@ export function shouldSpeakOnDesktop(
             desktopOwner = null;
         }
     }
+
+    // ── 2026-11-20 规范化：归属判断一律走 samePerson ──────────────────
+    // 原来这里有两处手写比较：
+    //     if (!ownerKey || ownerKey === "_local") return true;
+    //     if (ownerKey !== desktopOwner) return false;
+    // 两者叠加的后果是：存成 '_local' 的老提醒**无条件注入桌面**（不管
+    // 它是谁的），而存成本机会话 UUID 的提醒反而因为 !== '1980308740'
+    // 被拒。一个过宽、一个过窄，方向还相反 —— "打补丁"留下的典型形状。
+    //
+    // 归一后的语义分三层：
+    //   ① '_local' 是「本机自建」这个**来源标记**，与"主人是谁"无关，
+    //      所以直接放行（它只可能是本机建的，不可能是别人远程塞进来的）。
+    //      其余「其实就是本机主人」的写法（本机会话 UUID）交给 ③ 的
+    //      samePerson 认，不放宽成"只要不像客人就收"。
+    if (ownerKey === FALLBACK) return true;
+
     if (!desktopOwner) {
         console.warn(
             `[sched] 提醒 job=${job.jobId} 有归属 ${ownerKey} 但查不到本机主人，不注入桌面`,
         );
         return false;
     }
-    if (ownerKey !== desktopOwner) {
+    if (!samePerson(ownerKey, desktopOwner, desktopOwner)) {
         console.log(
             `[sched] 提醒 job=${job.jobId} 归属 ${ownerKey} 不是本机主人，不注入桌面`,
         );

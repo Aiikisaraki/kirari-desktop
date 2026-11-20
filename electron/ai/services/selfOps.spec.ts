@@ -153,7 +153,7 @@ describe("selfOps（自我运维）", () => {
                     origin: "core",
                     uid: 1,
                     title: "整理资料",
-                    steps: [{ kind: "text", label: "看一遍", status: "pending" }],
+                    steps: [{ kind: "text", label: "看一遍" }],
                     now,
                 }),
                 "task_created",

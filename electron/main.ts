@@ -20,7 +20,7 @@ import * as briefSchedule from "./ai/services/briefSchedule";
 import * as workspaceTask from "./ai/services/workspaceTask";
 import * as aiToolRouting from "./ai/services/toolRouting";
 import * as aiCapabilities from "./ai/capabilities/registry";
-import { getOwnerKey, sceneFromSessionId } from "./ai/services/ownerIdentity";
+import { getOwnerKey, samePerson, sceneFromSessionId } from "./ai/services/ownerIdentity";
 import * as dailyBriefingService from "./ai/services/dailyBriefingService";
 import { AdapterManager, getAdapter } from "./adapter/adapter-manager";
 import type { AdapterConfig, AdapterStatus, BotIncoming } from "./adapter/types";
@@ -2966,8 +2966,12 @@ app.whenReady().then(async () => {
     if (pushToPlatformSession(sessionId, text)) return true;
     // 网页/桌宠建的任务（本机 UUID 会话）→ 按主人身份键回到她的 QQ 私聊。
     // 只对主人自己的任务做；客人任务不会匹配规范主人键，绝不误投。
+    //
+    // 2026-11-20 规范化：原来这里是 `owner === ownerKey`，owner 若以历史别名
+    // '_local' / 本机会话 UUID 形式存下来，就永远匹配不上 → 任务产出发不出去
+    // 且没有任何告警。现在两侧归一再比（samePerson），写法不同也认成同一个人。
     const ownerKey = getOwnerKey();
-    if (owner && owner === ownerKey) return pushToOwnerPrivate(ownerKey, text);
+    if (samePerson(owner, ownerKey, ownerKey)) return pushToOwnerPrivate(ownerKey, text);
     return false;
   });
   // 叶子判定 + 上行出口。

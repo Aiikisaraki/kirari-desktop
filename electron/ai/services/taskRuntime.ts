@@ -19,6 +19,9 @@ import type { EventType } from "kirari-agent";
 import { taskStore } from "../events/taskStore";
 import { jobStore } from "../events/jobStore";
 import { resolveOwnerFromCtx } from "./workspace";
+// 2026-11-20 规范化：resolveOwnerFromCtx 对「本机会话」返回目录名 '_local'，
+// 必须再归一成规范身份键才能落库，否则到点投递认不出主人（提醒静默消失）。
+import { canonicalIdentity } from "./ownerIdentity";
 
 export type TaskToolCtx = {
     sessionId: string;
@@ -115,9 +118,14 @@ export function handleScheduleReminder(args: unknown, ctx: TaskToolCtx): string 
         // 与工作空间目录 / 记忆池 / core 侧 taskRuntime 共用同一套，绝不在此另写一份
         // （原来这里内联 `counterpartId || senderId || _local`，会随 scene 补法漂移）。
         // 解析不出来就拒绝，绝不退化成公共目录。
+        //
+        // 2026-11-20 规范化：解析完再过 canonicalIdentity 归一。
+        // resolveOwnerFromCtx 对「本机会话」返回的是 '_local'（那是目录名），
+        // 直接存进 owner_key 就会让到点投递与 getOwnerKey()='QQ号' 对不上，
+        // 提醒静默消失。存进库的永远是规范身份键。
         let ownerKey = "";
         try {
-            ownerKey = String(resolveOwnerFromCtx(ctx as any) || "").trim();
+            ownerKey = canonicalIdentity(resolveOwnerFromCtx(ctx as any));
         } catch { ownerKey = ""; }
         if (!ownerKey) {
             return "我现在还分不清这条提醒该归谁，怕设完推错人。你私聊我再说一次？";
