@@ -1,6 +1,11 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { inject, ref, computed } from "vue";
 import { useAdapters, type AdapterConfigInput } from "../../composables/useAdapters";
+import { SETTINGS_CONTEXT, type SettingsContext } from "./settingsContext";
+
+// 叶子节点：协议端跟随主机（主机才是 QQ 连接出口），只读
+const ctx = inject<SettingsContext | null>(SETTINGS_CONTEXT, null);
+const botReadonly = ctx?.botReadonly;
 
 const {
   adapters,
@@ -25,6 +30,7 @@ const formError = ref("");
 const isOneBot = computed(() => formType.value === "onebot");
 
 async function handleAdd() {
+  if (botReadonly?.value) return;
   formError.value = "";
   const name = formName.value.trim();
   if (!name) {
@@ -72,28 +78,34 @@ async function handleAdd() {
 }
 
 async function handleToggle(ad: any) {
+  if (botReadonly?.value) return;
   if (ad.connected) await disconnect(ad.id);
   else await connect(ad.id);
 }
 
 async function handleRemove(ad: any) {
+  if (botReadonly?.value) return;
   await remove(ad.id);
 }
 
 async function handleSetOwner(ad: any) {
+  if (botReadonly?.value) return;
   const key = (ad as any)._ownerKey || "";
   await setOwner(ad.id, key);
 }
 
 async function handleGroupMode(ad: any, val: string) {
+  if (botReadonly?.value) return;
   await update(ad.id, { config: { groupReplyMode: val } });
 }
 
 async function handleGroupFilter(ad: any, val: string) {
+  if (botReadonly?.value) return;
   await update(ad.id, { config: { groupFilter: val } });
 }
 
 async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklist", val: string) {
+  if (botReadonly?.value) return;
   const arr = val
     .split(/[,\s]+/)
     .map((s) => s.trim())
@@ -112,8 +124,12 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
       默认使用 QQ 官方机器人（官方 WebSocket 反向连接，合规稳定）。OneBot 作为通用协议端保留，用于非 QQ 的自有机器人框架。可同时挂多个适配器。
       把某个账号设为主人后，该账号与桌宠共享同一份聊天记录与记忆。
     </p>
+    <p v-if="botReadonly" class="leaf-lock">
+      当前节点是组网叶子，QQ 连接由主机统一驱动，协议端跟随主机、这里只读。请到主机上操作，或先退出组网。
+    </p>
 
-    <!-- 已配置适配器列表 -->
+    <!-- 已配置适配器列表（fieldset 原生禁用其下所有控件，样式由 CSS 抹平） -->
+    <fieldset class="leaf-fieldset" :disabled="!!botReadonly">
     <div v-if="adapters.length" class="adapter-list">
       <div v-for="ad in adapters" :key="ad.id" class="adapter-card">
         <div class="adapter-head">
@@ -274,6 +290,7 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
     <button v-else type="button" class="btn btn--import btn--block adapter-add" @click="showForm = true">
       + 添加机器人适配器
     </button>
+    </fieldset>
   </section>
 </template>
 

@@ -342,6 +342,31 @@
   flex: 0 0 auto;
   box-shadow: 0 4px 10px var(--pet-primary-shadow);
 }
+/* 叶子节点只读提示：这些设置跟随主机，本机改了不生效 */
+.leaf-lock {
+  margin: 0 0 14px;
+  padding: 9px 13px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--pet-ink);
+  background: rgba(255, 170, 40, 0.12);
+  border-left: 3px solid #f0a030;
+  border-radius: 8px;
+}
+/* 把 fieldset 的边框/内距抹平，只用它的原生 disabled 能力禁用其下所有控件 */
+.leaf-fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.leaf-fieldset:disabled input,
+.leaf-fieldset:disabled select,
+.leaf-fieldset:disabled textarea,
+.leaf-fieldset:disabled button {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 .settings-card__desc {
   margin: 0;
   color: var(--pet-muted);

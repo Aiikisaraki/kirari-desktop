@@ -100,8 +100,26 @@ async function loadPetName() {
     }
 }
 
-// 桌宠本机运行、不设账户：设置上下文不再携带模式与鉴权状态。
-const ctx: SettingsContext = {};
+// 叶子节点「机器人设置」只读态：统一在这里订阅 net:state，各设置页注入即可。
+// 判 role==='leaf'（不看 leafStatus）：掉线回退期间角色仍是叶子、协议端仍由主机驱动，
+// 必须继续锁，否则重连后本地改动会被主机覆盖。
+// ⚠️ 只给机器人（协议端）那块用。模型/人格/搜索不锁——叶子改了要同步回主机。
+const botReadonly = ref(false);
+const netApiAny = (window as any).netApi;
+if (netApiAny) {
+    netApiAny
+        .getState()
+        .then((snap: any) => {
+            botReadonly.value = snap?.role === "leaf";
+        })
+        .catch(() => {
+            /* 读不到组网状态就默认可编辑（与后端 fail-open 一致） */
+        });
+    netApiAny.onState?.((s: any) => {
+        botReadonly.value = s?.role === "leaf";
+    });
+}
+const ctx: SettingsContext = { botReadonly };
 provide(SETTINGS_CONTEXT, ctx);
 
 // 导航项。每个分区可附带 hint（侧栏下方副标题展示）、count（侧栏右侧小徽标）。

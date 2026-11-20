@@ -929,6 +929,38 @@ let localKnowledge: LocalKnowledge | null = null;
 /** 组网管理器（阶段 2-4）：主机/叶子两种角色，随时可换 */
 let netManager: NetManager | null = null;
 
+/**
+ * 叶子节点「机器人（协议端）设置」只读守卫（2026-11-20 用户拍板）。
+ * 「一旦成为叶子，这个机器人都统一从主节点走，叶子节点时这个设置就灰掉，锁定不可设置。」
+ *
+ * 只管协议端：QQ/OneBot 连接跑在主机上，叶子上配了也不生效（还会误导用户）。
+ * 模型/人格/搜索**不在此守卫范围**——叶子上改了要走 notifyLocalConfigChanged
+ * 上报主机、由主机按白名单裁决，这样「其他设置修改后依然可以同步到主机」。
+ *
+ * 判据用 snapshot().role==='leaf'（真实组网角色），不用 canStartNetworking()——
+ * 后者只说明「有密钥能开网」，刚装好没开网的机器也会是 true，用它会误锁本机。
+ * 也不看 leafStatus：即使临时掉线（fallback），角色配置仍是叶子，协议端依然不生效、
+ * 仍由主机驱动，所以必须继续锁，否则掉线期间改的配置会在重连时被覆盖。
+ *
+ * 只用于本地用户改设置/IPC 入口；host→leaf 同步下发走独立回调，不经过这里。
+ */
+function isLeafSettingsReadonly(): boolean {
+    try {
+        const snap = netManager?.snapshot();
+        return !!(snap && snap.role === "leaf");
+    } catch {
+        return false;
+    }
+}
+
+const LEAF_READONLY_MSG =
+    "当前节点是组网叶子，机器人由主机统一驱动：协议端（QQ/OneBot）设置跟随主机，不能在本机修改。请到主机上操作，或先把本机切换为主机/关闭组网。";
+
+/** 叶子节点拒绝本地改机器人设置：直接抛错，IPC handler 的调用方（渲染进程）能收到错误提示。 */
+function assertNotLeaf(): void {
+    if (isLeafSettingsReadonly()) throw new Error(LEAF_READONLY_MSG);
+}
+
 
 // 统一「带超时」的 HTTP 请求封装（避免后端无响应时无限挂起）。实现见 ./http。
 import { fetchWithTimeout } from "./http";
@@ -2201,26 +2233,32 @@ ipcMain.handle("chat:get-state", () => {
 // ---- 机器人适配器管理（OneBot / QQ 官方机器人）----
 ipcMain.handle("adapter:list", () => (adapterManager ? adapterManager.list() : []));
 ipcMain.handle("adapter:add", (_event, cfg) => {
+  assertNotLeaf();
   if (!adapterManager) throw new Error("适配器管理器未初始化");
   return adapterManager.add(cfg);
 });
 ipcMain.handle("adapter:update", (_event, id: string, patch) => {
+  assertNotLeaf();
   if (!adapterManager) throw new Error("适配器管理器未初始化");
   return adapterManager.update(id, patch);
 });
 ipcMain.handle("adapter:remove", (_event, id: string) => {
+  assertNotLeaf();
   if (!adapterManager) throw new Error("适配器管理器未初始化");
   return adapterManager.remove(id);
 });
 ipcMain.handle("adapter:connect", (_event, id: string) => {
+  assertNotLeaf();
   if (!adapterManager) throw new Error("适配器管理器未初始化");
   return adapterManager.connect(id);
 });
 ipcMain.handle("adapter:disconnect", (_event, id: string) => {
+  assertNotLeaf();
   if (!adapterManager) throw new Error("适配器管理器未初始化");
   return adapterManager.disconnect(id);
 });
 ipcMain.handle("adapter:set-owner", (_event, adapterId: string, accountKey: string) => {
+  assertNotLeaf();
   if (!adapterManager) throw new Error("适配器管理器未初始化");
   return adapterManager.setOwner(adapterId, accountKey);
 });
