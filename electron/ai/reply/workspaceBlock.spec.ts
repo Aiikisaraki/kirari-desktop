@@ -23,8 +23,25 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 const tmpWs = fs.mkdtempSync(path.join(os.tmpdir(), "kirari-wsblock-spec-"));
 process.env.KIRARI_WORKSPACE = tmpWs;
 
+/**
+ * ⚠️ 数据库也必须指到临时目录。
+ *
+ * 2026-11-22 排查「桌宠反复发喝水提醒」时发现：本文件下面的
+ * jobStore.save(job, "job_created") 写的是用户**真实**的
+ * ~/.kirari/database/pet_sessions.db —— electron/ai/db/storage.ts 的
+ * fallbackPath() 不读任何 env，直接拼家目录。于是测试 fixture
+ * `job-ownerkey-probe`（标题「归属回归」，payload「朋友的提醒」）被种进
+ * 生产库，用户每次开桌宠调度器扫到它就补发一次。
+ *
+ * KIRARI_WORKSPACE 只管工作空间目录，管不到 better-sqlite3 的连接，
+ * 所以这里必须显式 initDatabase（参见 events/tasks.spec.ts 的写法）。
+ */
+const tmpDbDir = fs.mkdtempSync(path.join(os.tmpdir(), "kirari-wsblock-db-"));
+const tmpDbPath = path.join(tmpDbDir, "pet_sessions.db");
+
 import * as workspace from "../services/workspace";
 import * as workspaceTask from "../services/workspaceTask";
+import * as storage from "../db/storage";
 import { buildWorkspaceBlock, resolveOwnerForBlock, MAX_TASKS_IN_PROMPT } from "./workspaceBlock";
 import * as workspaceCap from "../capabilities/builtin/workspace";
 import * as scheduledJobsService from "../services/scheduledJobsService";
@@ -36,6 +53,8 @@ const OWNER = "1658359753";
 const FRIEND = "1980308740";
 
 beforeAll(() => {
+    // 库先指到临时目录，再让 store 落库（懒连接，但越早越没歧义）。
+    storage.initDatabase(tmpDbPath);
     // 主人一个任务、朋友一个任务，且**两个任务的标题都很有辨识度**，
     // 这样断言「块里出现谁的标题」才有意义。
     workspace.ensureTask(OWNER, "owner-daily", { title: "主人的每日简报" });
@@ -45,6 +64,11 @@ beforeAll(() => {
 });
 
 afterAll(() => {
+    try {
+        fs.rmSync(tmpDbDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch {
+        /* Windows 上偶尔删不掉，不影响测试结论 */
+    }
     try {
         fs.rmSync(tmpWs, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     } catch {

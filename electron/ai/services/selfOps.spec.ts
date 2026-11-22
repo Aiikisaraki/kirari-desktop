@@ -1,3 +1,4 @@
+// @vitest-environment node
 // electron/ai/services/selfOps.spec.ts
 // 自我运维的策略边界测试：白名单拒绝凭证、思考模式读写、未知 topic、审计可查。
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -8,6 +9,23 @@ import path from "node:path";
 // 用隔离的 HOME 根，避免测试改到用户真实 ~/.kirari/config.json
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "kirari-selfops-spec-"));
 process.env.KIRARI_HOME = tmpHome;
+
+/**
+ * ⚠️ 光设 KIRARI_HOME 不够 —— 数据库必须显式 initDatabase 到临时目录。
+ *
+ * 2026-11-22 用户报「桌宠又发来喝水提醒」时查出来的真凶就在这里：
+ * `electron/ai/db/storage.ts` 的 fallbackPath() **不读 KIRARI_HOME**，
+ * 它硬拼 `~/.kirari/database/pet_sessions.db`。所以下面 seed() 里
+ * jobStore.save() 写的是用户**真实**的库，`job-spec-1`(喝水) /
+ * `job-spec-2`(带伞) / `task-spec-1` 就这么躺进了生产库；
+ * 用户每次启动桌宠，调度器扫到这几条过期任务就补发一次提醒。
+ *
+ * KIRARI_HOME 只管配置/技能那套文件，管不到 better-sqlite3 的连接。
+ * 凡是直接调 jobStore/taskStore 落库的 spec，都必须在 beforeAll 里
+ * 显式 initDatabase 到临时路径（参见 events/tasks.spec.ts 的写法）。
+ */
+const tmpDbDir = fs.mkdtempSync(path.join(os.tmpdir(), "kirari-selfops-db-"));
+const tmpDbPath = path.join(tmpDbDir, "pet_sessions.db");
 
 /**
  * 显式的拥有者身份。
@@ -28,6 +46,10 @@ describe("selfOps（自我运维）", () => {
     let config: typeof import("../../model-config");
 
     beforeAll(async () => {
+        // 数据库先指到临时目录，再 import 任何会落库的模块。
+        // 顺序不能反：store 是懒连接，但越早 init 越没歧义。
+        const storage = await import("../db/storage");
+        storage.initDatabase(tmpDbPath);
         // 动态 import，确保上面设置的环境变量先生效
         selfOps = await import("./selfOps");
         config = await import("../../model-config");
@@ -35,6 +57,7 @@ describe("selfOps（自我运维）", () => {
 
     afterAll(() => {
         try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
+        try { fs.rmSync(tmpDbDir, { recursive: true, force: true }); } catch { /* ignore */ }
     });
 
     it("TOPICS 覆盖各领域，readme 说明自我", () => {
