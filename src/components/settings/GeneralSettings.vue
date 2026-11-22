@@ -1,12 +1,16 @@
 <script setup lang="ts">
+/**
+ * 通用：桌宠备注名 + 开机自启。
+ * 「桌宠自带大脑」，所以这里没有本地/远程部署切换。
+ */
 import { onMounted, ref } from "vue";
+
+const emit = defineEmits<{ saved: [msg?: string] }>();
 
 const autoLaunch = ref(false);
 const autoLaunchBusy = ref(false);
 const petName = ref("Kirari");
 const petNameSaving = ref(false);
-
-// 桌宠自带大脑，不再有「本地部署 ⇄ 连接远程服务端」的切换入口。
 
 type WindowApi = {
     getAutoLaunch?: () => Promise<boolean>;
@@ -49,6 +53,7 @@ async function handlePetNameChange() {
     petNameSaving.value = true;
     try {
         await a.setPetName(name);
+        emit("saved", "备注名已保存");
     } catch {
         /* 保存失败时界面已回写 */
     } finally {
@@ -60,6 +65,7 @@ async function handleAutoLaunchChange() {
     autoLaunchBusy.value = true;
     try {
         await api()?.setAutoLaunch?.(autoLaunch.value);
+        emit("saved", autoLaunch.value ? "已设为开机自动启动" : "已取消开机自动启动");
     } catch {
         /* 忽略 */
     } finally {
@@ -74,60 +80,56 @@ onMounted(() => {
 </script>
 
 <template>
-    <section id="general" class="settings-card">
-        <h3 class="settings-card__title">
-            <span class="title-emoji">✨</span>
-            <span>通用</span>
-        </h3>
-        <p class="settings-card__desc">
-            桌宠姓名与启动行为。桌宠自带大脑，不需要额外的服务端。
-        </p>
-
-        <!-- 桌宠备注名：行状，右侧是输入框 -->
-        <div class="settings-row">
-            <div class="settings-row__body">
-                <span class="settings-row__icon" aria-hidden="true">🐾</span>
-                <div class="settings-row__text">
-                    <h4 class="settings-row__title">桌宠备注名</h4>
-                    <p class="settings-row__desc">聊天窗口顶部会显示这个名字；默认 Kirari。</p>
+    <section class="sk-page">
+        <div class="sk-card">
+            <div class="sk-row">
+                <div class="sk-row__main">
+                    <div>
+                        <h3 class="sk-row__title">桌宠备注名</h3>
+                        <p class="sk-row__desc">
+                            聊天窗口和设置窗口都会显示这个名字，与核心版控制台共用同一份；默认 Kirari。
+                        </p>
+                    </div>
                 </div>
-            </div>
-            <div class="settings-row__control">
-                <input
-                    id="petName"
-                    v-model="petName"
-                    class="text-input"
-                    type="text"
-                    autocomplete="off"
-                    placeholder="例如：绮莉、Kirari、小K…"
-                    maxlength="16"
-                    :disabled="petNameSaving"
-                    @change="handlePetNameChange"
-                    @keyup.enter="handlePetNameChange"
-                />
-            </div>
-        </div>
-
-        <!-- 开机自启动：行状，右侧是开关 -->
-        <div class="settings-row">
-            <div class="settings-row__body">
-                <span class="settings-row__icon" aria-hidden="true">⚡</span>
-                <div class="settings-row__text">
-                    <h4 class="settings-row__title">开机自动启动</h4>
-                    <p class="settings-row__desc">系统登录时自动启动 Kirari，开关切换即时生效。</p>
-                </div>
-            </div>
-            <div class="settings-row__control">
-                <label class="switch" aria-label="开机自动启动">
+                <div class="sk-row__control">
                     <input
-                        type="checkbox"
-                        v-model="autoLaunch"
-                        :disabled="autoLaunchBusy"
-                        @change="handleAutoLaunchChange"
+                        id="petName"
+                        v-model="petName"
+                        class="sk-input"
+                        type="text"
+                        autocomplete="off"
+                        placeholder="例如：绮莉、Kirari、小K…"
+                        maxlength="16"
+                        :disabled="petNameSaving"
+                        @change="handlePetNameChange"
+                        @keyup.enter="handlePetNameChange"
                     />
-                    <span class="switch__slider"></span>
-                </label>
+                </div>
+            </div>
+
+            <div class="sk-row">
+                <div class="sk-row__main">
+                    <div>
+                        <h3 class="sk-row__title">开机自动启动</h3>
+                        <p class="sk-row__desc">系统登录时自动把桌宠叫起来。开关切换即时生效。</p>
+                    </div>
+                </div>
+                <div class="sk-row__control">
+                    <label class="sk-switch" aria-label="开机自动启动">
+                        <input
+                            type="checkbox"
+                            v-model="autoLaunch"
+                            :disabled="autoLaunchBusy"
+                            @change="handleAutoLaunchChange"
+                        />
+                        <span class="sk-switch__track" />
+                    </label>
+                </div>
             </div>
         </div>
+
+        <p class="sk-note">
+            这台机器上的桌宠自带大脑，不需要再连服务端。想让几台设备共用一个大脑，去「连接 → 组网」。
+        </p>
     </section>
 </template>

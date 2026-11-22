@@ -1,6 +1,13 @@
 <script setup lang="ts">
+/**
+ * 形象（仅桌宠端）：换一只桌宠 + 导入 / 打开形象文件夹。
+ * 页头与标题由壳渲染，这里只输出卡片。
+ */
 import { onMounted, ref } from "vue";
 import { useAvatarStore } from "../../stores/avatar";
+import SettingsIcon from "./SettingsIcon.vue";
+
+const emit = defineEmits<{ saved: [msg?: string] }>();
 
 const avatarStore = useAvatarStore();
 const isZipping = ref(false);
@@ -13,6 +20,7 @@ async function handleImportZip() {
     try {
         const r = await avatarStore.importAvatarZip();
         if (!r.ok) zipError.value = r.message || "上传失败";
+        else emit("saved", "形象已导入，已经换过去了");
     } finally {
         isZipping.value = false;
     }
@@ -35,6 +43,7 @@ async function handleSelectAvatar(id: string) {
     }
     try {
         await avatarStore.setAvatar(found);
+        emit("saved", `已换成「${found.name}」`);
     } catch (e) {
         avatarError.value = e instanceof Error ? e.message : "切换形象失败";
     }
@@ -48,134 +57,92 @@ onMounted(async () => {
 </script>
 
 <template>
-    <section id="avatar" class="settings-card">
-        <h3 class="settings-card__title">
-            <span class="title-emoji">🐾</span>
-            <span>桌宠形象</span>
-        </h3>
-        <p class="settings-card__desc">
-            切换桌宠形象，切换后即时生效。
-        </p>
-
-        <!-- 当前形象：行状 -->
-        <div class="settings-row">
-            <div class="settings-row__body">
-                <span class="settings-row__icon" aria-hidden="true">🎭</span>
-                <div class="settings-row__text">
-                    <h4 class="settings-row__title">当前形象</h4>
-                    <p class="settings-row__desc">{{ avatarStore.list.length }} 个形象可选，切换即时生效。</p>
+    <section class="sk-page">
+        <div class="sk-card">
+            <div class="sk-card__head">
+                <div>
+                    <h2 class="sk-card__title">当前形象</h2>
+                    <p class="sk-card__desc">
+                        每个形象自带立绘与动作，换完立刻出现在桌面上，不用重启。
+                    </p>
                 </div>
             </div>
-            <div class="settings-row__control">
-                <div class="select-wrap">
-                    <select
-                        class="settings-select"
-                        :value="avatarStore.current.id"
-                        @change="
-                            handleSelectAvatar(
-                                ($event.target as HTMLSelectElement).value,
-                            )
-                        "
-                    >
-                        <option
-                            v-for="a in avatarStore.list"
-                            :key="a.id"
-                            :value="a.id"
+
+            <div class="sk-card__body">
+                <div class="sk-row">
+                    <div class="sk-row__main">
+                        <span class="sk-row__icon"><SettingsIcon name="paw" /></span>
+                        <div>
+                            <h3 class="sk-row__title">{{ avatarStore.current.name }}</h3>
+                            <p class="sk-row__desc">
+                                {{ avatarStore.list.length }} 个形象可选，切换即时生效。
+                            </p>
+                        </div>
+                    </div>
+                    <div class="sk-row__control">
+                        <select
+                            class="sk-select"
+                            aria-label="选择桌宠形象"
+                            :value="avatarStore.current.id"
+                            @change="
+                                handleSelectAvatar(
+                                    ($event.target as HTMLSelectElement).value,
+                                )
+                            "
                         >
-                            {{ a.name }}
-                        </option>
-                    </select>
-                    <svg
-                        class="select-caret"
-                        viewBox="0 0 24 24"
-                        width="16"
-                        height="16"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2.4"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                    >
-                        <path d="M6 9l6 6 6-6" />
-                    </svg>
+                            <option
+                                v-for="a in avatarStore.list"
+                                :key="a.id"
+                                :value="a.id"
+                            >
+                                {{ a.name }}
+                            </option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <div v-if="zipError || avatarError" class="sk-card__body">
+                <div class="sk-alert sk-alert--error">
+                    <SettingsIcon name="alert" />
+                    <span>{{ zipError || avatarError }}</span>
                 </div>
             </div>
         </div>
 
-        <!-- 操作：导入 / 打开文件夹 -->
-        <div class="settings-card__group">
-            <h5 class="settings-card__group-title">
-                <span class="group-mark" />
-                管理形象
-            </h5>
-            <div class="avatar-actions">
-                <button
-                    type="button"
-                    class="btn btn--import"
-                    :disabled="isZipping"
-                    @click="handleImportZip"
-                >
-                    <svg
-                        viewBox="0 0 24 24"
-                        width="17"
-                        height="17"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                    >
-                        <path d="M12 15V8m0 0L8.5 11.5M12 8l3.5 3.5" />
-                        <path d="M20 16.5A4.5 4.5 0 0 0 17.5 8h-1.3A6 6 0 1 0 6 14.6" />
-                    </svg>
-                    <span>{{ isZipping ? "解压中…" : "上传压缩包" }}</span>
-                </button>
-                <button
-                    type="button"
-                    class="btn btn--ghost"
-                    @click="handleOpenFolder"
-                >
-                    <svg
-                        viewBox="0 0 24 24"
-                        width="17"
-                        height="17"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                    >
-                        <path
-                            d="M3 7a2 2 0 0 1 2-2h3.6a1 1 0 0 1 .8.4L10.5 7H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"
-                        />
-                    </svg>
-                    <span>打开形象文件夹</span>
-                </button>
+        <div class="sk-card">
+            <div class="sk-card__head">
+                <div>
+                    <h2 class="sk-card__title">管理形象</h2>
+                    <p class="sk-card__desc">
+                        上传压缩包自动解压并注册；也可以直接把形象文件夹丢进形象目录。
+                    </p>
+                </div>
             </div>
 
-            <div v-if="zipError || avatarError" class="settings-error">
-                {{ zipError || avatarError }}
+            <div class="sk-card__body">
+                <div class="sk-btn-row">
+                    <button
+                        type="button"
+                        class="sk-btn sk-btn--primary"
+                        :disabled="isZipping"
+                        @click="handleImportZip"
+                    >
+                        <SettingsIcon name="upload" />
+                        {{ isZipping ? "解压中…" : "上传压缩包" }}
+                    </button>
+                    <button type="button" class="sk-btn" @click="handleOpenFolder">
+                        <SettingsIcon name="folder" />
+                        打开形象文件夹
+                    </button>
+                </div>
             </div>
 
-            <p class="avatar-tip">
-                <svg
-                    viewBox="0 0 24 24"
-                    width="15"
-                    height="15"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                >
-                    <circle cx="12" cy="12" r="9" />
-                    <path d="M12 11v5" />
-                    <path d="M12 7.5h.01" />
-                </svg>
-                <span>
+            <div class="sk-card__body">
+                <p class="sk-hint">
                     自定义形象请放入「形象文件夹」，或点「上传压缩包」自动解压。每个形象需包含配置文件与对应的图片素材；打开设置页时会自动刷新列表。
-                </span>
-            </p>
+                </p>
+            </div>
         </div>
     </section>
 </template>

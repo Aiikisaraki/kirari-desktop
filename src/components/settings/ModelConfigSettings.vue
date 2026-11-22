@@ -1,6 +1,13 @@
 <script setup lang="ts">
+/**
+ * 模型：可以存好几套（服务地址 / 型号 / 钥匙），随时切换聊天用哪套；
+ * 以及所有套共用的联网搜索渠道。
+ */
 import { computed, onMounted, ref } from "vue";
 import { useApiToken } from "../../composables/useApiToken";
+import SettingsIcon from "./SettingsIcon.vue";
+
+const emit = defineEmits<{ saved: [msg?: string] }>();
 
 const {
     isLoading,
@@ -31,16 +38,8 @@ interface ModelItem {
 const models = ref<ModelItem[]>([]);
 const activeId = ref<number | null>(null);
 const modelsError = ref("");
-const modelsNotice = ref("");
 // null = 没在编辑；"new" = 新增；数字 = 编辑那一套
 const editing = ref<{ id: "new" | number; name: string; endpoint: string; model: string; key: string } | null>(null);
-let noticeTimer: ReturnType<typeof setTimeout> | undefined;
-
-function flashNotice(msg: string) {
-    modelsNotice.value = msg;
-    if (noticeTimer) clearTimeout(noticeTimer);
-    noticeTimer = setTimeout(() => (modelsNotice.value = ""), 2500);
-}
 
 async function loadModels() {
     try {
@@ -82,7 +81,7 @@ async function saveEdit() {
     try {
         if (f.id === "new") {
             await addModel({ name: f.name, endpoint: f.endpoint, model: f.model, key: f.key });
-            flashNotice("已添加");
+            emit("saved", "已添加一套模型");
         } else {
             await updateModel(f.id, {
                 name: f.name,
@@ -90,7 +89,7 @@ async function saveEdit() {
                 model: f.model,
                 key: f.key.trim() ? f.key.trim() : undefined,
             });
-            flashNotice("已保存，立即生效");
+            emit("saved", "已保存，立即生效");
         }
         editing.value = null;
         await loadModels();
@@ -103,7 +102,7 @@ async function setActive(m: ModelItem) {
     modelsError.value = "";
     try {
         await activateModel(m.id);
-        flashNotice(`已切换到「${m.name}」`);
+        emit("saved", `已切换到「${m.name}」`);
         await loadModels();
     } catch {
         /* error 已由 composable 写入 */
@@ -115,14 +114,14 @@ async function removeModel(m: ModelItem) {
     modelsError.value = "";
     try {
         await deleteModel(m.id);
-        flashNotice("已删除");
+        emit("saved", "已删除");
         await loadModels();
     } catch {
         /* error 已由 composable 写入 */
     }
 }
 
-// ── 联网搜索（渠道配置，所有大脑共用）──
+// ── 联网搜索（渠道配置，所有模型共用）──
 const searchProvider = ref<"uapis" | "tavily" | "searxng">("uapis");
 function normalizeProvider(v: string | undefined): "uapis" | "tavily" | "searxng" {
     return v === "tavily" || v === "searxng" ? v : "uapis";
@@ -143,9 +142,7 @@ const credentialPlaceholder = computed(() => {
     return "选填：uapis.cn 登录令牌（留空则用匿名免费额度）";
 });
 const credentialType = computed(() => (searchProvider.value === "searxng" ? "text" : "password"));
-const saveSuccess = ref(false);
 const baseSearchProvider = ref("uapis");
-let clearTimer: ReturnType<typeof setTimeout> | undefined;
 
 function applySearch(p: {
     searchKeyMasked?: string;
@@ -168,14 +165,6 @@ async function loadSearch() {
     }
 }
 
-function flashSuccess() {
-    saveSuccess.value = true;
-    if (clearTimer) clearTimeout(clearTimer);
-    clearTimer = setTimeout(() => {
-        saveSuccess.value = false;
-    }, 2000);
-}
-
 function openExternal(url: string) {
     const w = window as unknown as {
         windowApi?: { openExternal?: (u: string) => Promise<void> };
@@ -191,7 +180,7 @@ async function handleSave() {
         else patch.searchKey = newCredentialInput.value.trim();
     }
     if (Object.keys(patch).length === 0) {
-        flashSuccess();
+        emit("saved", "没有改动，搜索设置还是原来那套");
         return;
     }
     try {
@@ -199,7 +188,7 @@ async function handleSave() {
         applySearch(updated);
         baseSearchProvider.value = updated.searchProvider || "uapis";
         newCredentialInput.value = "";
-        flashSuccess();
+        emit("saved", "搜索设置已保存");
     } catch {
         // error 已由 composable 写入
     }
@@ -214,259 +203,225 @@ onMounted(() => {
 </script>
 
 <template>
-    <section id="model" class="settings-card">
-        <h3 class="settings-card__title">
-            <span class="title-emoji">🧠</span>
-            <span>大脑（可配多套）</span>
-        </h3>
-        <p class="settings-card__desc">
-            可以保存好几套大脑（不同的服务地址、型号、钥匙），随时切换聊天用哪套。标着「使用中」的就是当前生效的。
-        </p>
-
-        <!-- 列表 -->
-        <div v-if="models.length === 0 && !editing" class="models-empty">
-            还没配过大脑。点下面的「添加一套」填上服务地址和钥匙就能聊。
-        </div>
-        <div
-            v-for="m in models"
-            :key="m.id"
-            class="model-item"
-            :class="{ 'model-item--active': m.id === activeId }"
-        >
-            <div class="model-item__main">
-                <div class="model-item__name">
-                    {{ m.name }}
-                    <span v-if="m.id === activeId" class="model-item__badge">使用中</span>
-                    <span v-if="!m.hasKey" class="model-item__warn">还没填钥匙</span>
+    <section class="sk-page">
+        <div class="sk-card">
+            <div class="sk-card__head">
+                <div>
+                    <h2 class="sk-card__title">模型</h2>
+                    <p class="sk-card__desc">
+                        可以保存好几套模型（不同的服务地址、型号、钥匙），随时切换聊天用哪套。标着「使用中」的就是当前生效的。
+                    </p>
                 </div>
-                <div class="model-item__meta">{{ m.model }}</div>
-                <div class="model-item__meta model-item__meta--dim">{{ m.endpoint }}</div>
-                <div v-if="m.hasKey" class="model-item__meta model-item__meta--dim">钥匙 {{ m.keyMasked }}</div>
             </div>
-            <div class="model-item__ops">
-                <button
-                    v-if="m.id !== activeId"
-                    type="button"
-                    class="btn btn--small btn--primary"
-                    :disabled="isLoading"
-                    @click="setActive(m)"
-                >
-                    设为当前
-                </button>
-                <button type="button" class="btn btn--small" :disabled="isLoading" @click="startEdit(m)">
-                    编辑
-                </button>
-                <button type="button" class="btn btn--small btn--danger" :disabled="isLoading" @click="removeModel(m)">
-                    删除
-                </button>
-            </div>
-        </div>
 
-        <p v-if="modelsNotice" class="settings-success">{{ modelsNotice }}</p>
-        <p v-if="modelsError" class="settings-error">{{ modelsError }}</p>
-
-        <!-- 添加 / 编辑 -->
-        <div v-if="editing" class="model-edit">
-            <h4 class="model-edit__title">{{ editing.id === "new" ? "添加一套大脑" : "编辑这套大脑" }}</h4>
-            <div class="field">
-                <label class="field-label" for="mp-name">名字</label>
-                <input
-                    id="mp-name"
-                    v-model="editing.name"
-                    class="text-input"
-                    type="text"
-                    maxlength="40"
-                    placeholder="自己起个好认的，例如「便宜快档」"
-                />
-            </div>
-            <div class="field">
-                <label class="field-label" for="mp-endpoint">服务地址</label>
-                <input
-                    id="mp-endpoint"
-                    v-model="editing.endpoint"
-                    class="text-input"
-                    type="url"
-                    placeholder="https://api.chatanywhere.tech/v1"
-                />
-                <p class="settings-hint">
-                    没有 API Key？可前往
-                    <a href="#" class="inline-link" @click.prevent="openExternal(freeKeyUrl)">chatanywhere</a>
-                    免费领取（国内直连、每日有免费额度）。
+            <div class="sk-card__body">
+                <p v-if="models.length === 0 && !editing" class="sk-empty">
+                    还没配过模型。点下面的「添加一套」填上服务地址和钥匙就能聊。
                 </p>
+
+                <div v-else class="sk-items">
+                    <div
+                        v-for="m in models"
+                        :key="m.id"
+                        class="sk-item model-item"
+                        :class="{ 'model-item--active': m.id === activeId, 'is-active': m.id === activeId }"
+                    >
+                        <div class="sk-item__main">
+                            <div class="sk-item__title">
+                                {{ m.name }}
+                                <span v-if="m.id === activeId" class="sk-badge sk-badge--brand">使用中</span>
+                                <span v-if="!m.hasKey" class="sk-badge sk-badge--warn">还没填钥匙</span>
+                            </div>
+                            <p class="sk-item__meta">型号 {{ m.model }}</p>
+                            <p class="sk-item__meta">地址 {{ m.endpoint }}</p>
+                            <p v-if="m.hasKey" class="sk-item__meta sk-item__meta--mono">
+                                钥匙 {{ m.keyMasked }}
+                            </p>
+                        </div>
+                        <div class="sk-item__ops">
+                            <button
+                                v-if="m.id !== activeId"
+                                type="button"
+                                class="sk-btn sk-btn--ghost sk-btn--sm"
+                                :disabled="isLoading"
+                                @click="setActive(m)"
+                            >
+                                设为当前
+                            </button>
+                            <button
+                                type="button"
+                                class="sk-btn sk-btn--ghost sk-btn--sm"
+                                :disabled="isLoading"
+                                @click="startEdit(m)"
+                            >
+                                编辑
+                            </button>
+                            <button
+                                type="button"
+                                class="sk-btn sk-btn--ghost sk-btn--sm sk-btn--danger"
+                                :disabled="isLoading"
+                                @click="removeModel(m)"
+                            >
+                                删除
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div v-if="modelsError || error" class="sk-card__body">
+                    <div class="sk-alert sk-alert--error">
+                        <SettingsIcon name="alert" />
+                        <span>{{ modelsError || error }}</span>
+                    </div>
+                </div>
             </div>
-            <div class="field">
-                <label class="field-label" for="mp-model">型号</label>
-                <input
-                    id="mp-model"
-                    v-model="editing.model"
-                    class="text-input"
-                    type="text"
-                    placeholder="例如 gpt-5.4-mini"
-                />
+
+            <!-- 添加 / 编辑：内联展开，不再用弹层 -->
+            <div v-if="editing" class="sk-editor">
+                <h3 class="sk-editor__title">
+                    {{ editing.id === "new" ? "添加一套模型" : "编辑这套模型" }}
+                </h3>
+
+                <div>
+                    <div class="sk-field">
+                        <label class="sk-field__label" for="mp-name">名字</label>
+                        <input
+                            id="mp-name"
+                            v-model="editing.name"
+                            class="sk-input"
+                            type="text"
+                            maxlength="40"
+                            placeholder="自己起个好认的，例如「便宜快档」"
+                        />
+                    </div>
+                    <div class="sk-field">
+                        <label class="sk-field__label" for="mp-endpoint">服务地址</label>
+                        <input
+                            id="mp-endpoint"
+                            v-model="editing.endpoint"
+                            class="sk-input sk-input--mono"
+                            type="url"
+                            placeholder="https://api.chatanywhere.tech/v1"
+                        />
+                        <p class="sk-field__hint">
+                            没有 API Key？可前往
+                            <a href="#" @click.prevent="openExternal(freeKeyUrl)">chatanywhere</a>
+                            免费领取（国内直连、每日有免费额度）。
+                        </p>
+                    </div>
+                    <div class="sk-field">
+                        <label class="sk-field__label" for="mp-model">型号</label>
+                        <input
+                            id="mp-model"
+                            v-model="editing.model"
+                            class="sk-input"
+                            type="text"
+                            placeholder="例如 gpt-5.4-mini"
+                        />
+                    </div>
+                    <div class="sk-field">
+                        <label class="sk-field__label" for="mp-key">钥匙</label>
+                        <input
+                            id="mp-key"
+                            v-model="editing.key"
+                            class="sk-input"
+                            type="password"
+                            autocomplete="new-password"
+                            :placeholder="editing.id === 'new' ? '这家服务给你的钥匙' : '留空表示不改'"
+                        />
+                    </div>
+                </div>
+
+                <div class="sk-editor__foot">
+                    <button type="button" class="sk-btn sk-btn--primary" :disabled="isLoading" @click="saveEdit">
+                        {{ isLoading ? "保存中…" : "保存" }}
+                    </button>
+                    <button type="button" class="sk-btn sk-btn--ghost" @click="cancelEdit">取消</button>
+                </div>
             </div>
-            <div class="field">
-                <label class="field-label" for="mp-key">钥匙</label>
-                <input
-                    id="mp-key"
-                    v-model="editing.key"
-                    class="text-input"
-                    type="password"
-                    autocomplete="new-password"
-                    :placeholder="editing.id === 'new' ? '这家服务给你的钥匙' : '留空表示不改'"
-                />
-            </div>
-            <div class="model-edit__ops">
-                <button type="button" class="btn btn--primary" :disabled="isLoading" @click="saveEdit">
-                    {{ isLoading ? "保存中..." : "保存" }}
+
+            <div v-else class="sk-card__foot">
+                <button type="button" class="sk-btn sk-btn--block" :disabled="isLoading" @click="startAdd">
+                    <SettingsIcon name="plus" />
+                    添加一套
                 </button>
-                <button type="button" class="btn" @click="cancelEdit">取消</button>
-            </div>
-        </div>
-        <button v-else type="button" class="btn btn--block models-add" :disabled="isLoading" @click="startAdd">
-            ＋ 添加一套
-        </button>
-
-        <!-- 联网搜索（所有大脑共用） -->
-        <div class="field models-divider">
-            <span class="field-label">联网搜索提供商</span>
-            <p class="settings-hint">回答实时问题（天气、新闻之类）时用的查证渠道，所有大脑共用这一套。</p>
-            <div class="provider-row">
-                <label class="provider-option">
-                    <input type="radio" value="uapis" v-model="searchProvider" />
-                    <span>UAPI（内置免费）</span>
-                </label>
-                <label class="provider-option">
-                    <input type="radio" value="tavily" v-model="searchProvider" />
-                    <span>Tavily</span>
-                </label>
-                <label class="provider-option">
-                    <input type="radio" value="searxng" v-model="searchProvider" />
-                    <span>SearXNG（自建）</span>
-                </label>
             </div>
         </div>
 
-        <div class="field">
-            <label class="field-label" for="searchCredential">{{ credentialLabel }}</label>
-            <input
-                id="searchCredential"
-                v-model="newCredentialInput"
-                class="text-input"
-                :type="credentialType"
-                autocomplete="new-password"
-                :placeholder="credentialPlaceholder"
-                :disabled="isLoading"
-            />
-            <p v-if="!isSearxng && hasSearchKey" class="settings-hint">
-                当前 Key：{{ searchKeyMasked }}（已加密保存，无需查看明文）
-            </p>
-            <p v-if="isSearxng && searchEndpoint" class="settings-hint">当前地址：{{ searchEndpoint }}</p>
-            <p v-if="searchProvider === 'searxng'" class="settings-hint">
-                填后改用你自建的 SearXNG 实例（隐私可控、零成本）。需开启 JSON
-                API：<code>settings.yml</code> 中
-                <code>search.formats: [json]</code> 且
-                <code>limiter: false</code>。
-            </p>
-        </div>
+        <!-- 联网搜索（所有模型共用） -->
+        <div class="sk-card">
+            <div class="sk-card__head">
+                <div>
+                    <h2 class="sk-card__title">联网搜索</h2>
+                    <p class="sk-card__desc">
+                        回答实时问题（天气、新闻之类）时用的查证渠道，所有模型共用这一套。
+                    </p>
+                </div>
+            </div>
 
-        <button
-            type="button"
-            class="btn btn--primary btn--block"
-            :disabled="isLoading"
-            @click="handleSave"
-        >
-            {{ isLoading ? "保存中..." : "保存搜索设置" }}
-        </button>
-        <div v-if="saveSuccess" class="settings-success">保存成功</div>
-        <div v-if="error" class="settings-error">{{ error }}</div>
+            <div class="sk-card__body">
+                <div class="sk-choices" role="radiogroup" aria-label="联网搜索提供商">
+                    <label class="sk-choice">
+                        <input type="radio" value="uapis" v-model="searchProvider" />
+                        <span class="sk-choice__text">
+                            <span class="sk-choice__label">UAPI（内置免费）</span>
+                            <span class="sk-choice__sub">匿名免费额度，日常够用</span>
+                        </span>
+                    </label>
+                    <label class="sk-choice">
+                        <input type="radio" value="tavily" v-model="searchProvider" />
+                        <span class="sk-choice__text">
+                            <span class="sk-choice__label">Tavily</span>
+                            <span class="sk-choice__sub">填自己的 Key，结果更稳</span>
+                        </span>
+                    </label>
+                    <label class="sk-choice">
+                        <input type="radio" value="searxng" v-model="searchProvider" />
+                        <span class="sk-choice__text">
+                            <span class="sk-choice__label">SearXNG（自建）</span>
+                            <span class="sk-choice__sub">隐私可控、零成本</span>
+                        </span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="sk-card__body">
+                <div class="sk-field">
+                    <label class="sk-field__label" for="searchCredential">{{ credentialLabel }}</label>
+                    <input
+                        id="searchCredential"
+                        v-model="newCredentialInput"
+                        class="sk-input"
+                        :type="credentialType"
+                        autocomplete="new-password"
+                        :placeholder="credentialPlaceholder"
+                        :disabled="isLoading"
+                    />
+                    <p v-if="!isSearxng && hasSearchKey" class="sk-field__hint">
+                        当前 Key：{{ searchKeyMasked }}（已加密保存，无需查看明文）
+                    </p>
+                    <p v-if="isSearxng && searchEndpoint" class="sk-field__hint">
+                        当前地址：{{ searchEndpoint }}
+                    </p>
+                    <p v-if="searchProvider === 'searxng'" class="sk-field__hint">
+                        填后改用你自建的 SearXNG 实例（隐私可控、零成本）。需开启 JSON
+                        API：<code>settings.yml</code> 中
+                        <code>search.formats: [json]</code> 且
+                        <code>limiter: false</code>。
+                    </p>
+                </div>
+            </div>
+
+            <div class="sk-card__foot">
+                <button
+                    type="button"
+                    class="sk-btn sk-btn--primary"
+                    :disabled="isLoading"
+                    @click="handleSave"
+                >
+                    {{ isLoading ? "保存中…" : "保存" }}
+                </button>
+            </div>
+        </div>
     </section>
 </template>
-
-<style scoped>
-.models-empty {
-    color: var(--text-secondary, #888);
-    font-size: 13px;
-    padding: 12px 0;
-}
-.model-item {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    border: 1px solid var(--border-color, #e0e0e0);
-    border-radius: 10px;
-    padding: 12px 14px;
-    margin: 10px 0;
-}
-.model-item--active {
-    border-color: var(--primary-color, #5b6cff);
-    background: color-mix(in srgb, var(--primary-color, #5b6cff) 6%, transparent);
-}
-.model-item__main {
-    flex: 1;
-    min-width: 0;
-}
-.model-item__name {
-    font-weight: 600;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-}
-.model-item__badge {
-    font-size: 11px;
-    font-weight: 400;
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--primary-color, #5b6cff) 14%, transparent);
-    color: var(--primary-color, #5b6cff);
-}
-.model-item__warn {
-    font-size: 11px;
-    color: #d64545;
-}
-.model-item__meta {
-    font-size: 12.5px;
-    margin-top: 3px;
-    word-break: break-all;
-}
-.model-item__meta--dim {
-    opacity: 0.65;
-}
-.model-item__ops {
-    display: flex;
-    gap: 6px;
-    flex: none;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-}
-.btn--small {
-    padding: 5px 10px;
-    font-size: 12.5px;
-}
-.btn--danger {
-    color: #d64545;
-}
-.model-edit {
-    border: 1px dashed var(--primary-color, #5b6cff);
-    border-radius: 10px;
-    padding: 14px 16px;
-    margin: 12px 0;
-}
-.model-edit__title {
-    margin: 0 0 6px;
-    font-size: 14px;
-}
-.model-edit__ops {
-    display: flex;
-    gap: 8px;
-    margin-top: 8px;
-}
-.models-add {
-    margin-top: 10px;
-}
-.models-divider {
-    margin-top: 22px;
-    padding-top: 16px;
-    border-top: 1px solid var(--border-color, #e0e0e0);
-}
-</style>

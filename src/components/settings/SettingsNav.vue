@@ -1,115 +1,60 @@
 <script setup lang="ts">
-/**
- * 设置页分区导航（受控组件）。
- *
- * 之前实现了 IntersectionObserver 滚动联动 + scrollTo 跳转，
- * 但当 SettingsPage 改为"标签页式"（一次只渲染一张卡）后，
- * 滚动联动失去意义——这里只负责点击切换，激活态完全由父组件控制。
- *
- * 视觉上桌面端走左侧垂直侧栏，移动端走顶部水平胶囊，
- * 两种模式共用同一份 props / emit 契约。
- */
-interface Section {
-    id: string;
-    label: string;
-    emoji: string;
-    hint?: string;
-    count?: number | (() => number);
-}
+/** 设置分区导航（受控组件）：只管渲染和 emit，激活态由 shell 决定。 */
+import SettingsIcon from "./SettingsIcon.vue";
+import type { SettingsGroup } from "./sections";
 
-const props = defineProps<{
-    mode: "sidebar" | "pills";
-    sections: Section[];
-    activeId?: string;
-    /** 侧栏顶部问候语，如 "Hi Kirari · 🎨 外观"。不传则不显示问候行。 */
-    greeting?: string;
+defineProps<{
+    groups: SettingsGroup[];
+    active: string;
+    showChat?: boolean;
+    chatActive?: boolean;
+    brand?: { mark: string; name: string; sub: string };
+    foot?: string;
 }>();
-const emit = defineEmits<{
-    "update:activeId": [id: string];
-}>();
-
-// 构建期从 package.json 注入（见 vite.config.ts 顶层 define），改版本号只改 package.json。
-const versionTag = __APP_VERSION__;
-
-function resolveCount(c: Section["count"]): number | undefined {
-    if (typeof c === "function") return c();
-    return c;
-}
-
-function go(id: string) {
-    // 受控组件：本地不维护激活态，点击只 emit 让父级切换。
-    if (id !== props.activeId) emit("update:activeId", id);
-}
+const emit = defineEmits<{ select: [id: string]; chat: [] }>();
 </script>
 
 <template>
-    <!-- 桌面端：左侧垂直侧栏 -->
-    <nav
-        v-if="mode === 'sidebar'"
-        class="settings-sidebar"
-        aria-label="设置分区导航"
-    >
-        <div class="settings-sidebar__header">
-            <p
-                v-if="greeting"
-                class="settings-sidebar__title settings-sidebar__title--greeting"
-            >
-                {{ greeting }}
-            </p>
-            <p v-else class="settings-sidebar__title">⚙️ 设置</p>
+    <aside class="sk-side">
+        <div v-if="brand" class="sk-side__brand">
+            <span class="sk-side__avatar" aria-hidden="true">{{ brand.mark }}</span>
+            <div class="sk-side__brand-text">
+                <strong>{{ brand.name }}</strong>
+                <span>{{ brand.sub }}</span>
+            </div>
         </div>
-        <div
-            class="settings-sidebar__list"
-            role="tablist"
-            aria-orientation="vertical"
-        >
-            <button
-                v-for="s in sections"
-                :key="s.id"
-                type="button"
-                role="tab"
-                class="settings-sidebar__item"
-                :class="{ 'is-active': activeId === s.id }"
-                :aria-selected="activeId === s.id ? 'true' : 'false'"
-                @click="go(s.id)"
-            >
-                <span class="nav-emoji" aria-hidden="true">{{ s.emoji }}</span>
-                <span class="nav-label">{{ s.label }}</span>
-                <span
-                    v-if="resolveCount(s.count) !== undefined"
-                    class="settings-sidebar__count"
-                >
-                    {{ resolveCount(s.count) }}
-                </span>
-            </button>
-        </div>
-        <p class="settings-sidebar__footer">
-            <span class="dot" />
-            <span>v{{ versionTag }} · 一切为你而设</span>
-        </p>
-    </nav>
 
-    <!-- 移动端：顶部水平胶囊 -->
-    <nav
-        v-else
-        class="settings-mobile-nav"
-        aria-label="设置分区导航"
-        role="tablist"
-    >
-        <button
-            v-for="s in sections"
-            :key="s.id"
-            type="button"
-            role="tab"
-            class="nav-pill"
-            :class="{ 'is-active': activeId === s.id }"
-            :aria-selected="activeId === s.id ? 'true' : 'false'"
-            @click="go(s.id)"
-        >
-            <span class="nav-pill__emoji" aria-hidden="true">{{
-                s.emoji
-            }}</span>
-            <span class="nav-pill__label">{{ s.label }}</span>
-        </button>
-    </nav>
+        <nav class="sk-side__nav" aria-label="设置分区导航">
+            <button
+                v-if="showChat"
+                type="button"
+                class="sk-nav"
+                :class="{ 'is-active': chatActive }"
+                @click="emit('chat')"
+            >
+                <SettingsIcon name="chat" class="sk-nav__icon" />
+                <span class="sk-nav__label">聊天</span>
+            </button>
+            <template v-for="group in groups" :key="group.id">
+                <p class="sk-side__group">{{ group.label }}</p>
+                <button
+                    v-for="item in group.items"
+                    :key="item.id"
+                    type="button"
+                    class="sk-nav"
+                    :class="{ 'is-active': !chatActive && active === item.id }"
+                    :aria-current="!chatActive && active === item.id ? 'page' : undefined"
+                    @click="emit('select', item.id)"
+                >
+                    <SettingsIcon :name="item.icon" class="sk-nav__icon" />
+                    <span class="sk-nav__label">{{ item.label }}</span>
+                </button>
+            </template>
+        </nav>
+
+        <p v-if="foot" class="sk-side__foot">
+            <span class="sk-dot" aria-hidden="true" />
+            <span>{{ foot }}</span>
+        </p>
+    </aside>
 </template>

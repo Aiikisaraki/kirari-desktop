@@ -8,8 +8,9 @@ import type {
 } from "./types";
 import { getActiveRenderer, setActiveRenderer } from "./types";
 
-// 基础态：任何一次性（非 loop）动作播完后都平滑回到这个站姿，
-// 保证本段动画既能自循环也能与其他动作无缝衔接。
+// 基础态：仅作为"皮肤缺少该状态"时的回退目标，以及画布尺寸的参考。
+// 一次性动作播完后跳回哪里由 PetStage 的调度器决定，渲染器不参与状态流转
+//（否则会和调度器的继承计时器抢同一个状态，循环入口会被抢先改回站姿）。
 const BASE_STATE: AvatarState = "idle";
 
 // 命中测试阈值：alpha 低于该值的像素视为"透明"，应透传点击给下方窗口。
@@ -62,6 +63,12 @@ const FADE_MS_DEFAULT = 160;
 //  - 新格式：显式 {loop, clips:[{sheet,frameW,frameH,frames,fps}, ...]}
 //  - 旧扁平格式：{sheet,frameW,frameH,frames,fps,loop}（自动包成单 clip）
 // 任一变体缺 sheet/尺寸非法则返回 null，加载时跳过该状态。
+export function nextSpriteFrame(frame: number, frames: number, loop: boolean): number {
+    if (frames <= 0) return 0;
+    if (loop) return (frame + 1) % frames;
+    return Math.min(frame + 1, frames - 1);
+}
+
 function normalizeState(raw: unknown): SpriteStateDef | null {
     if (!raw || typeof raw !== "object") return null;
     const r = raw as Record<string, unknown>;
@@ -380,7 +387,7 @@ export class SpriteRenderer implements AvatarRenderer {
     }
 
     // 返回各状态动画时长（ms）：一次性动画 = 所有变体中最长的 frames/fps，loop 状态 = 0。
-    // 取最长以保证"播完回 idle"计时器不会提前截断较短的变体。供调度器精确衔接。
+    // 取最长以保证调度器的继承计时器不会提前截断较短的变体。供调度器精确衔接。
     getStateDurations(): Partial<Record<AvatarState, number>> {
         const map: Partial<Record<AvatarState, number>> = {};
         if (this.manifest) {
@@ -454,17 +461,10 @@ export class SpriteRenderer implements AvatarRenderer {
                 let changed = false;
                 while (this.acc >= frameDur) {
                     this.acc -= frameDur;
-                    this.frame += 1;
-                    changed = true;
-                    if (this.frame >= clip.frames) {
-                        if (def.loop) {
-                            this.frame = 0;
-                        } else {
-                            // 一次性动作播完：走 setState 回基础态，自动获得交叉溶解。
-                            // （原先直接改 state/frame 是硬切，动作末帧会"闪出"）
-                            this.setState(this.baseStateName);
-                            break;
-                        }
+                    const nextFrame = nextSpriteFrame(this.frame, clip.frames, def.loop);
+                    if (nextFrame !== this.frame) {
+                        this.frame = nextFrame;
+                        changed = true;
                     }
                 }
                 // 溶解进行中必须逐帧重绘（透明度按 rAF 连续插值），不能只在换帧时画

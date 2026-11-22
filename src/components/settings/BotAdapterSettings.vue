@@ -2,6 +2,10 @@
 import { inject, ref, computed } from "vue";
 import { useAdapters, type AdapterConfigInput } from "../../composables/useAdapters";
 import { SETTINGS_CONTEXT, type SettingsContext } from "./settingsContext";
+import SettingsIcon from "./SettingsIcon.vue";
+
+const emit = defineEmits<{ saved: [msg?: string] }>();
+const errorMsg = ref("");
 
 // 叶子节点：协议端跟随主机（主机才是 QQ 连接出口），只读
 const ctx = inject<SettingsContext | null>(SETTINGS_CONTEXT, null);
@@ -32,6 +36,7 @@ const isOneBot = computed(() => formType.value === "onebot");
 async function handleAdd() {
   if (botReadonly?.value) return;
   formError.value = "";
+  errorMsg.value = "";
   const name = formName.value.trim();
   if (!name) {
     formError.value = "请填写适配器名称";
@@ -75,33 +80,59 @@ async function handleAdd() {
   formAppId.value = "";
   formSecret.value = "";
   showForm.value = false;
+  emit("saved", "机器人适配器已添加");
 }
 
 async function handleToggle(ad: any) {
   if (botReadonly?.value) return;
-  if (ad.connected) await disconnect(ad.id);
-  else await connect(ad.id);
+  try {
+    if (ad.connected) await disconnect(ad.id);
+    else await connect(ad.id);
+    emit("saved", ad.connected ? "机器人已断开" : "正在连接机器人");
+  } catch (e) {
+    errorMsg.value = e instanceof Error ? e.message : "连接操作失败";
+  }
 }
 
 async function handleRemove(ad: any) {
   if (botReadonly?.value) return;
-  await remove(ad.id);
+  try {
+    await remove(ad.id);
+    emit("saved", "机器人适配器已删除");
+  } catch (e) {
+    errorMsg.value = e instanceof Error ? e.message : "删除失败";
+  }
 }
 
 async function handleSetOwner(ad: any) {
   if (botReadonly?.value) return;
   const key = (ad as any)._ownerKey || "";
-  await setOwner(ad.id, key);
+  try {
+    await setOwner(ad.id, key);
+    emit("saved", "主人账号已绑定");
+  } catch (e) {
+    errorMsg.value = e instanceof Error ? e.message : "绑定失败";
+  }
 }
 
 async function handleGroupMode(ad: any, val: string) {
   if (botReadonly?.value) return;
-  await update(ad.id, { config: { groupReplyMode: val } });
+  try {
+    await update(ad.id, { config: { groupReplyMode: val } });
+    emit("saved", "群消息策略已更新");
+  } catch (e) {
+    errorMsg.value = e instanceof Error ? e.message : "保存失败";
+  }
 }
 
 async function handleGroupFilter(ad: any, val: string) {
   if (botReadonly?.value) return;
-  await update(ad.id, { config: { groupFilter: val } });
+  try {
+    await update(ad.id, { config: { groupFilter: val } });
+    emit("saved", "群范围已更新");
+  } catch (e) {
+    errorMsg.value = e instanceof Error ? e.message : "保存失败";
+  }
 }
 
 async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklist", val: string) {
@@ -110,304 +141,149 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
     .split(/[,\s]+/)
     .map((s) => s.trim())
     .filter(Boolean);
-  await update(ad.id, { config: { [field]: arr } });
+  try {
+    await update(ad.id, { config: { [field]: arr } });
+    emit("saved", "群列表已更新");
+  } catch (e) {
+    errorMsg.value = e instanceof Error ? e.message : "保存失败";
+  }
 }
 </script>
 
+
 <template>
-  <section id="bot" class="settings-card">
-    <h3 class="settings-card__title">
-      <span class="title-emoji">🤖</span>
-      <span>机器人适配器</span>
-    </h3>
-    <p class="settings-card__desc">
-      默认使用 QQ 官方机器人（官方 WebSocket 反向连接，合规稳定）。OneBot 作为通用协议端保留，用于非 QQ 的自有机器人框架。可同时挂多个适配器。
-      把某个账号设为主人后，该账号与桌宠共享同一份聊天记录与记忆。
-    </p>
-    <p v-if="botReadonly" class="leaf-lock">
-      当前节点是组网叶子，QQ 连接由主机统一驱动，协议端跟随主机、这里只读。请到主机上操作，或先退出组网。
-    </p>
-
-    <!-- 已配置适配器列表（fieldset 原生禁用其下所有控件，样式由 CSS 抹平） -->
-    <fieldset class="leaf-fieldset" :disabled="!!botReadonly">
-    <div v-if="adapters.length" class="adapter-list">
-      <div v-for="ad in adapters" :key="ad.id" class="adapter-card">
-        <div class="adapter-head">
-          <div class="adapter-name">
-            <span class="badge" :class="ad.type">{{ ad.type === 'onebot' ? 'OneBot' : 'QQ官方' }}</span>
-            <strong>{{ ad.name }}</strong>
-          </div>
-          <span class="status-dot" :class="{ on: ad.connected, off: !ad.connected }">
-            {{ ad.connected ? "已连接" : "未连接" }}
-          </span>
-        </div>
-
-        <div v-if="ad.lastError" class="adapter-err">⚠ {{ ad.lastError }}</div>
-
-        <div class="adapter-actions">
-          <button type="button" class="btn btn--primary btn--sm" @click="handleToggle(ad)">
-            {{ ad.connected ? "断开" : "连接" }}
-          </button>
-          <button type="button" class="btn btn--ghost btn--sm" @click="handleRemove(ad)">删除</button>
-        </div>
-
-        <!-- 群消息回复触发方式（仅 OneBot，默认关闭，最安全） -->
-        <div v-if="ad.type === 'onebot'" class="group-row">
-          <label class="field-label">群消息回复</label>
-          <select
-            class="settings-select"
-            :value="(ad.config && ad.config.groupReplyMode) || 'off'"
-            @change="handleGroupMode(ad, ($event.target as HTMLSelectElement).value)"
-          >
-            <option value="off">关闭（不回复群消息）</option>
-            <option value="mention">仅当我被 @ 时回复</option>
-            <option value="all">回复所有消息（危险）</option>
-          </select>
-        </div>
-
-        <!-- 群范围过滤：白名单 / 黑名单 -->
-        <template
-          v-if="ad.type === 'onebot' && ad.config && ad.config.groupReplyMode && ad.config.groupReplyMode !== 'off'"
-        >
-          <div class="group-row">
-            <label class="field-label">群范围</label>
-            <select
-              class="settings-select"
-              :value="(ad.config && ad.config.groupFilter) || 'whitelist'"
-              @change="handleGroupFilter(ad, ($event.target as HTMLSelectElement).value)"
-            >
-              <option value="whitelist">白名单（仅允许列表内的群可被回复）</option>
-              <option value="blacklist">黑名单（排除列表内的群，其余均可回复）</option>
-            </select>
-          </div>
-
-          <div v-if="(ad.config && ad.config.groupFilter) !== 'blacklist'" class="group-row">
-            <label class="field-label">允许回复的群号</label>
-            <input
-              class="text-input"
-              type="text"
-              :value="((ad.config && (ad.config.groupAllowlist as unknown as string[])) || []).join(', ')"
-              @change="handleGroupList(ad, 'groupAllowlist', ($event.target as HTMLInputElement).value)"
-              placeholder="输入允许回复的群号，逗号分隔，如 123456789, 987654321"
-            />
-          </div>
-          <div v-else class="group-row">
-            <label class="field-label">排除回复的群号</label>
-            <input
-              class="text-input"
-              type="text"
-              :value="((ad.config && (ad.config.groupBlocklist as unknown as string[])) || []).join(', ')"
-              @change="handleGroupList(ad, 'groupBlocklist', ($event.target as HTMLInputElement).value)"
-              placeholder="输入永不回复的群号，逗号分隔，如 123456789（真实群聊建议列入此处）"
-            />
-          </div>
-        </template>
-        <p v-if="ad.type === 'onebot'" class="settings-hint settings-hint--warn">
-          ⚠ 群消息默认关闭。开启后默认「白名单」模式——只有你显式加入允许列表的群才会被回复；选「黑名单」会回复除排除列表外的所有群，请谨慎。
-        </p>
-
-        <!-- 主人绑定 -->
-        <div class="owner-row">
-          <template v-if="ad.ownerAccount">
-            <span class="owner-tag">主人：{{ ad.ownerAccount }}</span>
-            <button type="button" class="btn btn--ghost btn--sm" @click="setOwner(ad.id, '')">
-              取消主人
-            </button>
-          </template>
-          <template v-else>
-            <select v-model="(ad as any)._ownerKey" class="settings-select owner-select">
-              <option value="">设为某账号为主人…</option>
-              <option v-for="acc in ad.knownAccounts" :key="acc" :value="acc">
-                {{ acc }}
-              </option>
-            </select>
-            <button
-              type="button"
-              class="btn btn--primary btn--sm"
-              :disabled="!(ad as any)._ownerKey"
-              @click="handleSetOwner(ad)"
-            >
-              设为主人
-            </button>
-          </template>
-        </div>
-        <p v-if="!ad.knownAccounts.length" class="settings-hint">
-          连接后收到消息，才会出现可设为主人的账号。
-        </p>
-      </div>
+  <section class="sk-page">
+    <div v-if="botReadonly" class="sk-alert sk-alert--warn">
+      <SettingsIcon name="alert" />
+      <span>当前节点是组网叶子，QQ 连接由主机统一驱动，协议端跟随主机、这里只读。请到主机上操作，或先退出组网。</span>
     </div>
 
-    <!-- 新增表单 -->
-    <div v-if="showForm" class="adapter-form">
-      <div class="field">
-        <span class="field-label">协议类型</span>
-        <div class="provider-row">
-          <label class="provider-option">
-            <input type="radio" value="onebot" v-model="formType" />
-            <span>OneBot（通用协议端，非 QQ 默认）</span>
-          </label>
-          <label class="provider-option">
-            <input type="radio" value="qqofficial" v-model="formType" />
-            <span>QQ 官方机器人（默认推荐）</span>
-          </label>
+    <div class="sk-card">
+      <div class="sk-card__head">
+        <div>
+          <h2 class="sk-card__title">机器人</h2>
+          <p class="sk-card__desc">默认使用 QQ 官方机器人（官方 WebSocket 反向连接，合规稳定）。OneBot 作为通用协议端保留，用于非 QQ 的自有机器人框架。可同时挂多个适配器。把某个账号设为主人后，该账号与桌宠共享同一份聊天记录与记忆。</p>
         </div>
       </div>
 
-      <div class="field">
-        <label class="field-label" for="ad-name">名称</label>
-        <input id="ad-name" v-model="formName" class="text-input" type="text" placeholder="如：我的 QQ 机器人" />
-      </div>
+      <p v-if="errorMsg" class="sk-alert sk-alert--error">
+        <SettingsIcon name="alert" />
+        <span>{{ errorMsg }}</span>
+      </p>
+      <fieldset class="sk-fieldset" :disabled="!!botReadonly">
+        <p v-if="!adapters.length && !showForm" class="sk-empty">
+          {{ botReadonly ? "机器人由主机统一接入，本机不单独配置。" : "还没有接入机器人。添加一个 QQ 官方机器人或 OneBot 适配器。" }}
+        </p>
 
-      <template v-if="isOneBot">
-        <div class="field">
-          <label class="field-label" for="ad-ws">WS 地址</label>
-          <input id="ad-ws" v-model="formWsUrl" class="text-input" type="text" placeholder="ws://127.0.0.1:3001" />
-        </div>
-        <div class="field">
-          <label class="field-label" for="ad-token">访问令牌（可选）</label>
-          <input id="ad-token" v-model="formToken" class="text-input" type="password" placeholder="对应 OneBot 的 access_token" />
-        </div>
-      </template>
-      <template v-else>
-        <div class="field">
-          <label class="field-label" for="ad-appid">AppID</label>
-          <input id="ad-appid" v-model="formAppId" class="text-input" type="text" placeholder="QQ 开放平台 AppID" />
-        </div>
-        <div class="field">
-          <label class="field-label" for="ad-secret">Client Secret</label>
-          <input id="ad-secret" v-model="formSecret" class="text-input" type="password" placeholder="QQ 开放平台密钥" />
-        </div>
-        <p class="settings-hint">在 QQ 开放平台创建机器人后填入 AppID 与 Client Secret。无需公网回调、无需第三方 QQ 客户端在线。</p>
-      </template>
+        <div v-if="adapters.length" class="sk-items">
+          <article v-for="ad in adapters" :key="ad.id" class="sk-item">
+            <div class="sk-item__main">
+              <div class="sk-item__title">
+                <strong>{{ ad.name }}</strong>
+                <span class="sk-badge sk-badge--brand">{{ ad.type === 'onebot' ? 'OneBot' : 'QQ 官方' }}</span>
+                <span class="sk-badge" :class="ad.connected ? 'sk-badge--ok' : 'sk-badge--warn'">
+                  <span class="sk-dot" />{{ ad.connected ? "已连接" : "未连接" }}
+                </span>
+              </div>
+              <p v-if="ad.type === 'qqofficial'" class="sk-item__meta">AppID {{ ad.config?.appId || "（未填）" }}</p>
+              <p v-else class="sk-item__meta sk-item__meta--mono">{{ ad.config?.wsUrl || "（没填地址）" }}</p>
+              <p v-if="ad.lastError" class="sk-hint sk-hint--warn">{{ ad.lastError }}</p>
 
-      <div v-if="formError" class="settings-error">{{ formError }}</div>
-      <div class="btn-row">
-        <button type="button" class="btn btn--primary" @click="handleAdd">添加</button>
-        <button type="button" class="btn btn--ghost" @click="showForm = false">取消</button>
-      </div>
+              <div v-if="ad.type === 'onebot'" class="sk-editor">
+                <div class="sk-field">
+                  <label class="sk-field__label">群消息回复</label>
+                  <select class="sk-select" :value="(ad.config && ad.config.groupReplyMode) || 'off'" @change="handleGroupMode(ad, ($event.target as HTMLSelectElement).value)">
+                    <option value="off">关闭（不回复群消息）</option>
+                    <option value="mention">仅当我被 @ 时回复</option>
+                    <option value="all">回复所有消息（危险）</option>
+                  </select>
+                </div>
+                <template v-if="ad.config && ad.config.groupReplyMode && ad.config.groupReplyMode !== 'off'">
+                  <div class="sk-field">
+                    <label class="sk-field__label">群范围</label>
+                    <select class="sk-select" :value="(ad.config && ad.config.groupFilter) || 'whitelist'" @change="handleGroupFilter(ad, ($event.target as HTMLSelectElement).value)">
+                      <option value="whitelist">白名单（仅允许列表内的群可被回复）</option>
+                      <option value="blacklist">黑名单（排除列表内的群，其余均可回复）</option>
+                    </select>
+                  </div>
+                  <div v-if="(ad.config && ad.config.groupFilter) !== 'blacklist'" class="sk-field">
+                    <label class="sk-field__label">允许回复的群号</label>
+                    <input class="sk-input" type="text" :value="((ad.config && (ad.config.groupAllowlist as unknown as string[])) || []).join(', ')" @change="handleGroupList(ad, 'groupAllowlist', ($event.target as HTMLInputElement).value)" placeholder="输入允许回复的群号，逗号分隔，如 123456789, 987654321" />
+                  </div>
+                  <div v-else class="sk-field">
+                    <label class="sk-field__label">排除回复的群号</label>
+                    <input class="sk-input" type="text" :value="((ad.config && (ad.config.groupBlocklist as unknown as string[])) || []).join(', ')" @change="handleGroupList(ad, 'groupBlocklist', ($event.target as HTMLInputElement).value)" placeholder="输入永不回复的群号，逗号分隔，如 123456789（真实群聊建议列入此处）" />
+                  </div>
+                </template>
+                <p class="sk-hint sk-hint--warn">群消息默认关闭。开启后默认「白名单」模式——只有你显式加入允许列表的群才会被回复；选「黑名单」会回复除排除列表外的所有群，请谨慎。</p>
+              </div>
+
+              <div class="sk-row sk-row--stack">
+                <div class="sk-row__main">
+                  <div>
+                    <h3 class="sk-row__title">主人绑定</h3>
+                    <p class="sk-row__desc">绑定后，这个账号的私聊会并进主对话与记忆。</p>
+                  </div>
+                </div>
+                <div class="sk-row__control">
+                  <template v-if="ad.ownerAccount">
+                    <span class="sk-badge sk-badge--ok">主人：{{ ad.ownerAccount }}</span>
+                    <button type="button" class="sk-btn sk-btn--ghost sk-btn--sm" @click="setOwner(ad.id, '')">取消主人</button>
+                  </template>
+                  <template v-else>
+                    <select v-model="(ad as any)._ownerKey" class="sk-select">
+                      <option value="">设为某账号为主人…</option>
+                      <option v-for="acc in ad.knownAccounts" :key="acc" :value="acc">{{ acc }}</option>
+                    </select>
+                    <button type="button" class="sk-btn sk-btn--ghost sk-btn--sm" :disabled="!(ad as any)._ownerKey" @click="handleSetOwner(ad)">设为主人</button>
+                  </template>
+                </div>
+              </div>
+              <p v-if="!ad.knownAccounts.length" class="sk-hint">连接后收到消息，才会出现可设为主人的账号。</p>
+            </div>
+
+            <div v-if="!botReadonly" class="sk-item__ops">
+              <button type="button" class="sk-btn sk-btn--primary sk-btn--sm" @click="handleToggle(ad)">{{ ad.connected ? "断开" : "连接" }}</button>
+              <button type="button" class="sk-btn sk-btn--ghost sk-btn--sm sk-btn--danger" @click="handleRemove(ad)">删除</button>
+            </div>
+          </article>
+        </div>
+
+        <div v-if="showForm" class="sk-editor">
+          <h3 class="sk-editor__title">添加机器人适配器</h3>
+          <div class="sk-field">
+            <label class="sk-field__label" for="ad-type">协议类型</label>
+            <select id="ad-type" v-model="formType" class="sk-select">
+              <option value="qqofficial">QQ 官方机器人</option>
+              <option value="onebot">OneBot（通用协议端）</option>
+            </select>
+          </div>
+          <div class="sk-grid">
+            <div class="sk-field">
+              <label class="sk-field__label" for="ad-name">名称</label>
+              <input id="ad-name" v-model="formName" class="sk-input" type="text" placeholder="如：我的 QQ 机器人" />
+            </div>
+            <template v-if="isOneBot">
+              <div class="sk-field"><label class="sk-field__label" for="ad-ws">WS 地址</label><input id="ad-ws" v-model="formWsUrl" class="sk-input sk-input--mono" type="text" placeholder="ws://127.0.0.1:3001" /></div>
+              <div class="sk-field"><label class="sk-field__label" for="ad-token">访问令牌（可选）</label><input id="ad-token" v-model="formToken" class="sk-input" type="password" placeholder="对应 OneBot 的 access_token" /></div>
+            </template>
+            <template v-else>
+              <div class="sk-field"><label class="sk-field__label" for="ad-appid">AppID</label><input id="ad-appid" v-model="formAppId" class="sk-input" type="text" placeholder="QQ 开放平台 AppID" /></div>
+              <div class="sk-field"><label class="sk-field__label" for="ad-secret">Client Secret</label><input id="ad-secret" v-model="formSecret" class="sk-input" type="password" placeholder="QQ 开放平台密钥" /></div>
+            </template>
+          </div>
+          <p v-if="isOneBot" class="sk-hint">群消息策略默认关闭；添加后可以按需配置白名单。</p>
+          <p v-else class="sk-hint">在 QQ 开放平台创建机器人后填入 AppID 与 Client Secret。无需公网回调、无需第三方 QQ 客户端在线。</p>
+          <p v-if="formError" class="sk-alert sk-alert--error"><SettingsIcon name="alert" /><span>{{ formError }}</span></p>
+          <div class="sk-editor__foot">
+            <button type="button" class="sk-btn sk-btn--primary" @click="handleAdd">添加</button>
+            <button type="button" class="sk-btn sk-btn--ghost" @click="showForm = false">取消</button>
+          </div>
+        </div>
+        <div v-else-if="!botReadonly" class="sk-card__foot">
+          <button type="button" class="sk-btn sk-btn--primary" @click="showForm = true"><SettingsIcon name="plus" />添加机器人适配器</button>
+        </div>
+      </fieldset>
     </div>
-
-    <button v-else type="button" class="btn btn--import btn--block adapter-add" @click="showForm = true">
-      + 添加机器人适配器
-    </button>
-    </fieldset>
   </section>
 </template>
-
-<style scoped>
-/* 基础样式：窄窗口（视口 < 860px）沿用原样，不做任何改动 */
-.adapter-list {
-    display: grid;
-    gap: 12px;
-}
-.adapter-card {
-    display: grid;
-    gap: 10px;
-    padding: 14px;
-    border-radius: 14px;
-    background: var(--pet-accent-soft);
-    border: 1px dashed var(--pet-accent-strong-border);
-}
-/* 宽窗口（视口 ≥ 860px）：限宽 760 居中 + 加大内边距，与技能 / MCP 一致 */
-@media (min-width: 860px) {
-    .adapter-list {
-        width: 100%;
-        max-width: 760px;
-        margin: 0 auto;
-        gap: 14px;
-    }
-    .adapter-card {
-        gap: 12px;
-        padding: 18px 22px;
-        border-radius: 16px;
-    }
-}
-.adapter-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
-.adapter-name {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-.badge {
-    font-size: 11px;
-    font-weight: 700;
-    padding: 2px 9px;
-    border-radius: 999px;
-    color: #fff;
-    letter-spacing: 0.3px;
-}
-.badge.onebot {
-    background: linear-gradient(135deg, #34d399, #059669);
-}
-.badge.qqofficial {
-    background: linear-gradient(135deg, #38bdf8, #2563eb);
-}
-.status-dot {
-    font-size: 12px;
-    font-weight: 700;
-}
-.status-dot.on {
-    color: #16a34a;
-}
-.status-dot.off {
-    color: var(--pet-muted);
-}
-.adapter-err {
-    font-size: 12px;
-    color: var(--pet-danger);
-}
-.adapter-actions {
-    display: flex;
-    gap: 8px;
-}
-.group-row {
-    display: grid;
-    gap: 6px;
-}
-.owner-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-}
-.owner-tag {
-    font-size: 12px;
-    font-weight: 700;
-    color: #16a34a;
-    background: rgba(22, 163, 74, 0.1);
-    padding: 3px 8px;
-    border-radius: 999px;
-}
-.owner-select {
-    flex: 1;
-    min-width: 140px;
-}
-/* 基础样式：窄窗口沿用原样 */
-.adapter-form {
-    display: grid;
-    gap: 12px;
-    padding: 14px;
-    border-radius: 14px;
-    background: rgba(255, 255, 255, 0.55);
-    border: 1px solid var(--pet-border);
-}
-/* 添加按钮：基础态填满；宽窗口（≥ 860px）与 .adapter-list 同宽上限 760 居中 */
-.btn.btn--import.btn--block.adapter-add {
-    width: 100%;
-    margin: 18px auto 0;
-}
-@media (min-width: 860px) {
-    .adapter-form {
-        gap: 14px;
-        padding: 18px 22px;
-        border-radius: 16px;
-    }
-    .btn.btn--import.btn--block.adapter-add {
-        max-width: 760px;
-    }
-}
-</style>

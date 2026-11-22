@@ -51,3 +51,7 @@ release_old_*/
 
 # vitest 隔离测试的临时目录
 .tmp-test/
+
+# 精灵表修正前的原图备份（scripts/avatar-*.py 生成，可随时重建，不进版本库）
+.avatar-backup/
+.avatar-seam-backup/

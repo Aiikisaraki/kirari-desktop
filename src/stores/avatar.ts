@@ -70,7 +70,7 @@ export const useAvatarStore = defineStore("avatar", () => {
   const ready = ref(false);
   const customAvatars = ref<AvatarMeta[]>([]);
   // 各状态动画时长（ms）：一次性动画为 frames/fps，loop 状态为 0（持续不自动结束）。
-  // 由 PetAvatar 加载 frames.json 后回填，供调度器精确衔接"播完回 idle"。
+  // 由 PetAvatar 加载 frames.json 后回填，供调度器按真实时长精确衔接后继状态。
   const durations = ref<Partial<Record<AvatarState, number>>>({});
 
   const list = computed<AvatarMeta[]>(() => [...customAvatars.value]);
@@ -190,7 +190,7 @@ export const useAvatarStore = defineStore("avatar", () => {
     }
   }
 
-  // 驱动播放状态（语义意图）。idle 为基础态，其他动作播完由渲染器自动回到 idle。
+  // 驱动播放状态（语义意图）。一次性动作的后继状态由 PetStage 调度，渲染器只负责播帧。
   function setState(s: AvatarState) {
     currentState.value = s;
   }

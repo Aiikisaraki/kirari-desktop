@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
-import { useToast } from "../../composables/useToast";
+import SettingsIcon from "./SettingsIcon.vue";
 
 interface McpServer {
     id: string;
@@ -13,7 +13,8 @@ interface McpServer {
     enabled: boolean;
 }
 
-const toast = useToast();
+const emit = defineEmits<{ saved: [msg?: string] }>();
+const errorMsg = ref("");
 const servers = ref<McpServer[]>([]);
 const loading = ref(false);
 const showEditor = ref(false);
@@ -29,7 +30,7 @@ async function load() {
         const list = (await (window as any).mcpApi.list()) as McpServer[];
         servers.value = Array.isArray(list) ? list : [];
     } catch (e) {
-        toast.error("读取 MCP 配置失败");
+        errorMsg.value = "读取 MCP 配置失败";
     } finally {
         loading.value = false;
     }
@@ -41,14 +42,15 @@ function openAdd() {
 }
 
 function openEdit(s: McpServer) {
-    editing.value = JSON.parse(JSON.stringify(s));
+    editing.value = { ...JSON.parse(JSON.stringify(s)), argsStr: (s.args || []).join(", ") };
+    errorMsg.value = "";
     showEditor.value = true;
 }
 
 async function save() {
     if (!editing.value) return;
     if (!editing.value.name.trim()) {
-        toast.error("请填写名称");
+        errorMsg.value = "请填写名称";
         return;
     }
     const idx = servers.value.findIndex((x) => x.id === editing.value!.id);
@@ -80,9 +82,10 @@ async function toggle(s: McpServer) {
 async function persist() {
     try {
         await (window as any).mcpApi.save(servers.value);
-        toast.success("MCP 配置已保存，工具已更新");
+        errorMsg.value = "";
+        emit("saved", "MCP 配置已保存，工具已更新");
     } catch (e) {
-        toast.error("保存失败");
+        errorMsg.value = "保存失败";
     }
 }
 
@@ -90,235 +93,28 @@ onMounted(load);
 </script>
 
 <template>
-    <section id="mcp" class="settings-card">
-        <h3 class="settings-card__title">
-            <span class="title-emoji">🔌</span>
-            <span>MCP 服务器</span>
-        </h3>
-        <p class="settings-card__desc">
-            连接 MCP（Model Context Protocol）服务器，使用它们提供的工具。支持 HTTP
-            与本地命令（stdio）两种接入方式。启用后，服务器提供的工具会在桌宠对话中可用。
-        </p>
-
-        <div v-if="loading" class="settings-card__group">
-            <span class="settings-hint">加载中…</span>
-        </div>
-        <div v-else-if="servers.length === 0" class="settings-card__group">
-            <span class="settings-hint">尚未添加任何 MCP 服务器，点击下方按钮开始接入。</span>
-        </div>
-
-        <ul v-else class="mcp-list">
-            <li v-for="s in servers" :key="s.id" class="mcp-item">
-                <div class="mcp-item__main">
-                    <span class="mcp-item__name">{{ s.name }}</span>
-                    <span class="mcp-item__tag">{{ s.transport }}</span>
-                    <span class="mcp-item__endpoint">
-                        {{ s.transport === "http" ? s.url : s.command }}
-                    </span>
-                </div>
-                <div class="mcp-item__actions">
-                    <label class="switch" :aria-label="`启用 ${s.name}`">
-                        <input type="checkbox" :checked="s.enabled" @change="toggle(s)" />
-                        <span class="switch__slider"></span>
-                    </label>
-                    <button type="button" class="btn btn--ghost btn--sm" @click="openEdit(s)">
-                        编辑
-                    </button>
-                    <button
-                        type="button"
-                        class="btn btn--ghost btn--sm btn--danger"
-                        @click="remove(s)"
-                    >
-                        删除
-                    </button>
-                </div>
-            </li>
-        </ul>
-
-        <div class="settings-card__group mcp-add">
-            <button class="btn btn--import btn--block" @click="openAdd">
-                + 添加 MCP 服务器
-            </button>
-        </div>
-
-        <!-- 编辑弹层 -->
-        <div
-            v-if="showEditor && editing"
-            class="mcp-modal"
-            @click.self="showEditor = false"
-        >
-            <div class="mcp-modal__panel">
-                <h4>编辑 MCP 服务器</h4>
-                <label class="field">
-                    <span class="field-label">名称</span>
-                    <input
-                        v-model="editing.name"
-                        class="text-input"
-                        placeholder="例如：本地文件系统"
-                    />
-                </label>
-                <label class="field">
-                    <span class="field-label">传输方式</span>
-                    <select v-model="editing.transport" class="settings-select">
-                        <option value="http">HTTP (streamable)</option>
-                        <option value="stdio">stdio（本地命令）</option>
-                    </select>
-                </label>
-                <template v-if="editing.transport === 'http'">
-                    <label class="field">
-                        <span class="field-label">端点 URL</span>
-                        <input
-                            v-model="editing.url"
-                            class="text-input"
-                            placeholder="https://example.com/mcp"
-                        />
-                    </label>
-                </template>
-                <template v-else>
-                    <label class="field">
-                        <span class="field-label">命令</span>
-                        <input v-model="editing.command" class="text-input" placeholder="npx" />
-                    </label>
-                    <label class="field">
-                        <span class="field-label">参数（逗号分隔）</span>
-                        <input
-                            v-model="editing.argsStr"
-                            class="text-input"
-                            placeholder="-y, some-mcp-server"
-                        />
-                    </label>
-                </template>
-                <label class="checkbox-row">
-                    <input type="checkbox" v-model="editing.enabled" />
-                    <span>启用（启动时注册其工具）</span>
-                </label>
-                <div class="btn-row">
-                    <button type="button" class="btn btn--ghost" @click="showEditor = false">
-                        取消
-                    </button>
-                    <button type="button" class="btn btn--primary" @click="save">保存</button>
+    <section class="sk-page">
+        <div class="sk-card">
+            <div class="sk-card__head"><div><h2 class="sk-card__title">工具服务</h2><p class="sk-card__desc">连接外部 MCP 服务，使用它们提供的工具。支持 HTTP 服务地址与本地命令两种接入方式。</p></div></div>
+            <div class="sk-card__body">
+                <p v-if="loading" class="sk-empty">正在读取工具服务…</p>
+                <p v-else-if="servers.length === 0" class="sk-empty">还没有接入工具服务。</p>
+                <div v-else class="sk-items">
+                    <article v-for="s in servers" :key="s.id" class="sk-item" :class="{ 'is-muted': !s.enabled }">
+                        <div class="sk-item__main"><div class="sk-item__title">{{ s.name }} <span class="sk-badge sk-badge--brand">{{ s.transport === "http" ? "HTTP" : "本地命令" }}</span><span v-if="!s.enabled" class="sk-badge">已停用</span></div><p class="sk-item__meta sk-item__meta--mono">{{ s.transport === "http" ? s.url : [s.command, ...(s.args || [])].filter(Boolean).join(" ") }}</p></div>
+                        <div class="sk-item__ops"><label class="sk-switch" :aria-label="'启用 ' + s.name"><input type="checkbox" :checked="s.enabled" @change="toggle(s)" /><span class="sk-switch__track" /></label><button type="button" class="sk-btn sk-btn--ghost sk-btn--sm" @click="openEdit(s)"><SettingsIcon name="edit" /> 编辑</button><button type="button" class="sk-btn sk-btn--ghost sk-btn--sm sk-btn--danger" @click="remove(s)"><SettingsIcon name="trash" /> 删除</button></div>
+                    </article>
                 </div>
             </div>
+            <p v-if="errorMsg" class="sk-alert sk-alert--error"><SettingsIcon name="alert" /><span>{{ errorMsg }}</span></p>
+            <div v-if="showEditor && editing" class="sk-editor"><h3 class="sk-editor__title">{{ editing.name ? "编辑工具服务" : "添加工具服务" }}</h3>
+                <div class="sk-field"><span class="sk-field__label">连接方式</span><div class="sk-segmented"><button type="button" class="sk-segmented__item" :class="{ 'is-active': editing.transport === 'http' }" @click="editing.transport = 'http'">HTTP</button><button type="button" class="sk-segmented__item" :class="{ 'is-active': editing.transport === 'stdio' }" @click="editing.transport = 'stdio'">本地命令（stdio）</button></div></div>
+                <div class="sk-field"><label class="sk-field__label" for="mcp-name">名称</label><input id="mcp-name" v-model="editing.name" class="sk-input" placeholder="例如：本地文件系统" /></div>
+                <template v-if="editing.transport === 'http'"><div class="sk-field"><label class="sk-field__label" for="mcp-url">端点 URL</label><input id="mcp-url" v-model="editing.url" class="sk-input sk-input--mono" placeholder="https://example.com/mcp" /></div></template>
+                <template v-else><div class="sk-grid"><div class="sk-field"><label class="sk-field__label" for="mcp-command">命令</label><input id="mcp-command" v-model="editing.command" class="sk-input" placeholder="npx" /></div><div class="sk-field"><label class="sk-field__label" for="mcp-args">参数（逗号分隔）</label><input id="mcp-args" v-model="editing.argsStr" class="sk-input" placeholder="-y, some-mcp-server" /></div></div></template>
+                <label class="sk-check"><input type="checkbox" v-model="editing.enabled" /><span>启用（启动时注册其工具）</span></label><div class="sk-editor__foot"><button type="button" class="sk-btn sk-btn--primary" @click="save">保存</button><button type="button" class="sk-btn sk-btn--ghost" @click="showEditor = false">取消</button></div>
+            </div>
+            <div v-else class="sk-card__foot"><button type="button" class="sk-btn sk-btn--primary" @click="openAdd"><SettingsIcon name="plus" /> 添加工具服务</button></div>
         </div>
     </section>
 </template>
-
-<style scoped>
-/* 基础样式：窄窗口（视口 < 860px）沿用原样，不做任何改动 */
-.mcp-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
-.mcp-item {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 12px;
-    align-items: center;
-    padding: 12px 14px;
-    border-radius: 14px;
-    background: var(--pet-accent-soft);
-    border: 1px dashed var(--pet-accent-strong-border);
-}
-.mcp-item__main {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-    flex-wrap: wrap;
-}
-.mcp-item__name {
-    font-weight: 700;
-    font-size: 13.5px;
-    color: var(--pet-ink);
-}
-.mcp-item__tag {
-    font-size: 11px;
-    padding: 1px 8px;
-    border-radius: 999px;
-    background: rgba(91, 141, 239, 0.12);
-    color: #3b5bdb;
-    font-weight: 700;
-    text-transform: lowercase;
-    letter-spacing: 0.3px;
-}
-.mcp-item__endpoint {
-    font-size: 12px;
-    color: var(--pet-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 260px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
-.mcp-item__actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex: 0 0 auto;
-}
-/* 宽窗口（视口 ≥ 860px）：限宽 760 居中 + 加大 item 内边距，与技能 tab 一致 */
-@media (min-width: 860px) {
-    .mcp-list {
-        width: 100%;
-        max-width: 760px;
-        margin: 0 auto;
-        gap: 14px;
-    }
-    .mcp-item {
-        padding: 18px 24px;
-        gap: 16px;
-        border-radius: 16px;
-    }
-    .mcp-item__main { gap: 10px; }
-    .mcp-item__name,
-    .mcp-item__tag { flex: 0 0 auto; }
-    .mcp-item__endpoint {
-        white-space: normal;
-        line-height: 1.5;
-        max-width: 380px;
-        flex: 1 1 220px;
-    }
-    .mcp-item__actions { gap: 10px; }
-}
-.btn--danger {
-    color: var(--pet-danger);
-    border-color: rgba(243, 18, 96, 0.3);
-    background: rgba(243, 18, 96, 0.05);
-}
-.btn--danger:not(:disabled):hover {
-    background: rgba(243, 18, 96, 0.12);
-}
-
-/* 弹层（表单，保留居中卡片） */
-.mcp-modal {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.4);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 50;
-}
-.mcp-modal__panel {
-    width: 460px;
-    max-width: 90vw;
-    background: var(--pet-surface-strong);
-    border: 1px solid var(--pet-border);
-    border-radius: 18px;
-    padding: 18px 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    box-shadow: 0 18px 48px rgba(15, 23, 42, 0.2);
-}
-.mcp-modal__panel h4 {
-    margin: 0 0 4px;
-    font-size: 15px;
-    font-weight: 800;
-    color: var(--pet-ink);
-}
-</style>
