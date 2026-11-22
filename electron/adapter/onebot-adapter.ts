@@ -600,6 +600,15 @@ export class OneBotAdapter extends BotAdapter {
       const file = m ? `base64://${m[1]}` : img;
       segs.push({ type: "image", data: { file } });
     }
+    // 语音条：只有扩展包提供了音频才会走到这里。OneBot 的 record 段与图片同样
+    // 接受 base64:// 或 http URL，转 silk 由协议端负责（NapCat / Lagrange 都会转）。
+    if (outgoing.audio?.dataUrl) {
+      const m = /^data:audio\/[a-zA-Z0-9.+-]+;base64,(.+)$/.exec(outgoing.audio.dataUrl);
+      segs.push({
+        type: "record",
+        data: { file: m ? `base64://${m[1]}` : outgoing.audio.dataUrl },
+      });
+    }
     const params: Record<string, unknown> = { message: segs };
     if (target.isGroup && target.replyGroupId) params.group_id = target.replyGroupId;
     else params.user_id = target.senderId;

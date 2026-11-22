@@ -7,6 +7,7 @@ import type { LocalKnowledge } from "../../src/knowledge/localKnowledge";
 import * as db from "../ai/db/storage";
 import * as memory from "../ai/services/memory";
 import * as social from "../ai/services/social";
+import { buildVoiceOutgoing } from "../extensions/voiceOutgoing";
 
 // 当前存活的 AdapterManager 单例，供能力层（social 的 refresh 动作）拿到
 // 正在运行的适配器实例去协议端重新拉数据。main.ts 每次重建都会覆盖。
@@ -334,9 +335,21 @@ export class AdapterManager {
 
     const onResp = (resp: PetBackendResponse) => {
       this.backend.offResponse(sessionId);
-      adapter
-        .sendMessage(msg, { text: resp.speech, images: resp.images || [] })
-        .catch((e) => console.error(`[adapter] 回发失败 ${adapter.name}:`, e));
+      // 语音条：只有装了语音扩展包且策略允许时 buildVoiceOutgoing 才返回音频；
+      // 没装扩展包时它立刻返回 null，这里发出的内容与历史行为完全一致。
+      // 注意它是 await 的：扩展包停摆最多拖慢 policy.timeoutMs，之后照样发文本。
+      void (async () => {
+        const audio = await buildVoiceOutgoing({
+          text: resp.speech,
+          isGroup: msg.isGroup,
+          isOwner,
+        }).catch(() => null);
+        await adapter.sendMessage(msg, {
+          text: resp.speech,
+          images: resp.images || [],
+          ...(audio ? { audio } : {}),
+        });
+      })().catch((e) => console.error(`[adapter] 回发失败 ${adapter.name}:`, e));
       // 主人账号：把宠物回复同步进桌宠聊天框，实现跨端对话可见。
       if (isOwner && this.opts.pushOwnerMessage) {
         this.opts.pushOwnerMessage({

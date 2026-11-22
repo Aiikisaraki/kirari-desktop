@@ -69,10 +69,23 @@ export interface BotIncoming {
   memberCount?: number; // 群人数（拿不到就留空）
 }
 
+/**
+ * 出站语音条。
+ * 只有「装了语音扩展包 + 策略允许 + 协议端支持」三者同时成立时才会带上；
+ * 没有扩展包时这个字段永远是 undefined，适配器按纯文本发（与历史行为一致）。
+ */
+export interface BotOutgoingAudio {
+  /** data:audio/mpeg;base64,... —— 与图片同一种内联约定 */
+  dataUrl: string;
+  format: "mp3" | "wav" | "opus";
+  durationMs: number;
+}
+
 // 后端 → 适配器 的统一出站消息
 export interface BotOutgoing {
   text: string;
   images: string[];
+  audio?: BotOutgoingAudio;
 }
 
 /**
