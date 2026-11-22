@@ -17,6 +17,7 @@
 *.sln
 *.suo
 *.sw?
+.avatar-backup/
 .DS_Store
 .env
 .env.*.local
