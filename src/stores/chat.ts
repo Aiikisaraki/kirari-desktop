@@ -37,6 +37,9 @@ export type ChatStateSnapshot = {
   messages: ChatMessage[]
   bubbleMessage: string
   bubbleInteractive: boolean
+  // 在场感：她此刻的心情对应的动画变体（AvatarState 名）或 null。
+  // 主进程只在本机主人的会话上计算；情绪动画播完后回落到这里（见 PetStage.moodIdleVariant）。
+  presenceMood?: string | null
 }
 
 // 聊天相关状态的唯一真相来源（进程内共享）。
@@ -50,6 +53,8 @@ export const useChatStore = defineStore('chat', () => {
   const sessionId = ref('')
   const bubbleMessage = ref('')
   const bubbleInteractive = ref(false)
+  // 在场感：当前心情变体（由主进程随 chat:state 推送）。null = 照旧回 idle。
+  const presenceMood = ref<string | null>(null)
 
   // 未读消息数：仅当对话框未打开、且收到 pet 新消息时累加。
   const unreadCount = ref(0)
@@ -68,6 +73,7 @@ export const useChatStore = defineStore('chat', () => {
       messages.value = next.messages.map((m) => ({ ...m }))
       bubbleMessage.value = next.bubbleMessage
       bubbleInteractive.value = next.bubbleInteractive
+      presenceMood.value = next.presenceMood ?? null
       return
     }
 
@@ -79,6 +85,7 @@ export const useChatStore = defineStore('chat', () => {
     messages.value = next.messages.map((m) => ({ ...m }))
     bubbleMessage.value = next.bubbleMessage
     bubbleInteractive.value = next.bubbleInteractive
+    presenceMood.value = next.presenceMood ?? null
 
     const newLen = next.messages.length
     if (newLen > prevLen && !chatWindowOpen.value) {
@@ -106,6 +113,7 @@ export const useChatStore = defineStore('chat', () => {
     sessionId,
     bubbleMessage,
     bubbleInteractive,
+    presenceMood,
     unreadCount,
     chatWindowOpen,
     initialized,

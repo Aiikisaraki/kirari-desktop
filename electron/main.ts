@@ -18,6 +18,8 @@ import * as scheduledJobsService from "./ai/services/scheduledJobsService";
 // 阶段 E：每日简报落库调度（每 uid × 08/16/22 三档）+ 简报生成。
 import * as briefSchedule from "./ai/services/briefSchedule";
 import * as workspaceTask from "./ai/services/workspaceTask";
+import * as presenceSchedule from "./ai/presence/presenceSchedule";
+import { summarizePresence, loadOrInitPresenceState } from "./ai/presence/presenceIO";
 import * as aiToolRouting from "./ai/services/toolRouting";
 import * as aiCapabilities from "./ai/capabilities/registry";
 import { ExtensionHost, getExtensionHost, setExtensionHost } from "./extensions";
@@ -156,6 +158,9 @@ type DeployConfig = {
   window?: { x: number; y: number };
   // 机器人适配器配置（OneBot / QQ 官方机器人）。连接信息含令牌，仅存于本机 userData 配置。
   adapters?: AdapterConfig[];
+  // 专注模式（不主动打扰）：开启后她的自动主动搭话全部暂停，手动聊天照常。
+  // 设置页 UI 在 P2；先用这个字段落盘，右键菜单/托盘开关 P2 接上。
+  presenceFocus?: boolean;
 };
 const DEFAULT_LOCAL = {
   theme: DEFAULT_THEME,
@@ -184,6 +189,7 @@ function parseClientConfig(raw: unknown): DeployConfig {
           (a: AdapterConfig) => a && typeof a.id === "string" && typeof a.type === "string",
         )
       : [],
+    presenceFocus: o.presenceFocus === true,
     // 仅当 x/y 都是有效数字时才采用持久化位置；否则保持 undefined，启动时回退默认。
     window:
       o.window &&
@@ -211,6 +217,28 @@ function loadClientConfig(): DeployConfig {
 }
 
 const clientConfig = loadClientConfig();
+
+/**
+ * 写专注模式开关并广播所有渲染进程（桌宠/对话框/设置页立刻反映）。
+ * 持久化走 saveClientConfig 的既有链路（与 petName/window 同一份文件）。
+ * 主进程内存里的 clientConfig 同步更新 —— focusProvider 每 tick 读它，立即生效。
+ */
+function setPresenceFocus(on: boolean): void {
+  clientConfig.presenceFocus = on;
+  try {
+    saveClientConfig();
+  } catch (e) {
+    console.warn("[presence] 专注模式写盘失败:", e instanceof Error ? e.message : e);
+  }
+  for (const win of BrowserWindow.getAllWindows()) {
+    try {
+      win.webContents.send("presence:focus-changed", on);
+    } catch {
+      /* 窗口已销毁等，忽略 */
+    }
+  }
+  console.log("[presence] 专注模式 → " + (on ? "开（不主动打扰）" : "关（恢复主动搭话）"));
+}
 
 // 最后一次由**本进程**写出的配置文本。用来在文件监听里认出「这是我自己写的」，
 // 避免自己写→自己读→自己广播的回环。
@@ -2428,6 +2456,14 @@ ipcMain.on("desktop-pet:show-context-menu", (event) => {
       click: showChatWindow,
     },
     {
+      // 专注模式（不主动打扰）：开 → 她的自动主动搭话全停（手动聊天照常）。
+      // 单一真相是 clientConfig.presenceFocus；focusProvider 每次 tick 重读，立即生效。
+      label: clientConfig.presenceFocus ? "取消专注模式（恢复主动搭话）" : "专注模式（不主动打扰）",
+      click: () => {
+        setPresenceFocus(!clientConfig.presenceFocus);
+      },
+    },
+    {
       label: "重置位置",
       click: () => {
         const petWin = ensurePetWindow();
@@ -2441,6 +2477,25 @@ ipcMain.on("desktop-pet:show-context-menu", (event) => {
       click: hidePetWindow,
     },
   ]).popup({ window: win ?? undefined });
+});
+
+// 设置页 / 调试面板读她的状态（今日开口次数、心情摘要）。
+ipcMain.handle("presence:get-status", () => {
+  try {
+    return {
+      summary: summarizePresence(loadOrInitPresenceState(Date.now()), Date.now()),
+      outreachToday: presenceSchedule.outreachToday(),
+      focus: clientConfig.presenceFocus === true,
+    };
+  } catch (e) {
+    return { summary: "还没有状态", outreachToday: 0, focus: false, error: e instanceof Error ? e.message : String(e) };
+  }
+});
+
+// 专注模式开关（设置页 / 托盘共用）。写盘 → 下一次 tick 生效。
+ipcMain.handle("presence:set-focus", (_event, on: unknown) => {
+  setPresenceFocus(on === true);
+  return clientConfig.presenceFocus === true;
 });
 
 app.whenReady().then(async () => {
@@ -3007,6 +3062,63 @@ app.whenReady().then(async () => {
   void briefSchedule.ensureJobs().catch((e: unknown) => {
     console.warn("[brief] 初始化简报任务失败:", e instanceof Error ? e.message : e);
   });
+
+  // ── 在场感：她的主动搭话 ──────────────────────────────────────────
+  // runner：按目的机制的提示词做一次**轻量**模型调用（不走完整 agent 回合——
+  // 那会带上全部工具与几万 token，surfcore 的桌宠载体也是这么做的）。
+  // 返回 false = 模型说 SKIP / 调用失败 → 调度层按 failed 记账并重试。
+  presenceSchedule.setPresenceRunner(async ({ prompt }) => {
+    const cfg = readModelConfigFile();
+    if (!cfg.key || !cfg.model || !cfg.endpoint) return false;
+    const ctx = ensureContext({
+      model: cfg.model,
+      endpoint: cfg.endpoint,
+      key: cfg.key,
+      searchProvider: cfg.searchProvider,
+      searchKey: cfg.searchKey,
+      searchEndpoint: cfg.searchEndpoint,
+      userid: LOCAL_UID,
+    });
+    try {
+      const completion = await ctx.openai.chat.completions.create({
+        model: ctx.model,
+        messages: [
+          {
+            role: "system",
+            content:
+              (frontendTools.collectBasePersona() || "") +
+              "\n\n请只输出你要说的话本身（一到两句，口语化）。如果实在没话说，只输出 SKIP 三个字母。" +
+              "\n不要 JSON、不要引号、不要解释、不要提到任何机制或状态。",
+          },
+          { role: "user", content: prompt },
+        ],
+        max_tokens: 200,
+        temperature: 0.9,
+      });
+      const text = (completion.choices?.[0]?.message?.content || "").trim();
+      if (!text || /^SKIP$/i.test(text)) {
+        console.log("[presence] 她决定这轮不说话（SKIP）");
+        return false;
+      }
+      // 去掉模型偶尔裹上的引号
+      const speech = text.replace(/^["「『](.*)["」』]$/u, "$1").trim();
+      if (!speech) return false;
+      // 带情绪标签 wave（打招呼/主动搭话），表现层先播 wave 再说话
+      return ensureChatSessionService().injectProactiveMessage(speech, "wave");
+    } catch (e) {
+      console.warn("[presence] 主动搭话生成失败:", e instanceof Error ? e.message : e);
+      return false;
+    }
+  });
+  // 专注模式第一版先读一个配置项（设置页 P2 再做 UI）；默认不专注。
+  presenceSchedule.setFocusProvider(() => {
+    try {
+      return clientConfig?.presenceFocus === true;
+    } catch {
+      return false;
+    }
+  });
+  presenceSchedule.ensureJob();
   // 阶段 F：工作空间定期任务。到点后由她带完整工具集自动执行，产出写进
   // ~/KirariWorkspace/<taskId>/。三件事要注入：
   //   runner  —— 怎么跑（读本机模型配置 + engine.chat）

@@ -15,6 +15,8 @@ import { getOwnerKeySync } from "../db/storage";
 import { FALLBACK, samePerson } from "./ownerIdentity";
 import * as briefSchedule from "./briefSchedule";
 import * as workspaceTask from "./workspaceTask";
+// 在场感：她的主动搭话走同一条调度链（到点 → tickPresence → runner 决定说不说）。
+import * as presenceSchedule from "../presence/presenceSchedule";
 
 /**
  * 送达回调（由主进程注入）：把一句话送进桌面聊天界面。
@@ -204,6 +206,13 @@ export async function scanOnce(): Promise<number> {
                     // 叶子节点在这里会**转发给主机**执行（见 services/workspaceTask.ts），
                     // 产出落在主机，叶子只拿结果——用户 2026-11-19 明确要求的行为。
                     await workspaceTask.fire(job, now);
+                } else if (job.kind === ("presence_tick" as never)) {
+                    // 在场感主动搭话：tickPresence 内部自己判闸门（安静时段/每日上限/素材），
+                    // 没 fire 也会返回下一次该跑的时间 —— 把 job 顺延到那个点。
+                    const result = await presenceSchedule.tickPresence(now);
+                    if (result.fired) {
+                        console.log(`[sched] presence 主动搭话完成：${result.reason}`);
+                    }
                 }
                 const next = fireJob(job, now);
 
@@ -233,6 +242,19 @@ export async function scanOnce(): Promise<number> {
                             e instanceof Error ? e.message : e,
                         );
                     }
+                }
+
+                // presence_tick 的间隔不是 24h：2.5~5h 区间随机 + 安静时段避让，
+                // 都算在状态档的 nextFireAt 里（tickPresence 里 scheduleNext 的产物）。
+                // fireJob 的 daily 语义只会 +24h，必须在这里覆盖回去，否则她一天最多开口一次。
+                // ⚠️ nextFireAt 已经过去时（比如到点被安静时段挡下）不能退回 now+60s ——
+                // 那会变成安静时段里每分钟热循环；改用 quietEndAfter 推到安静时段结束。
+                if (job.kind === ("presence_tick" as never) && next.status === "pending") {
+                    const state = presenceSchedule.readState(now);
+                    const want = state?.nextFireAt || 0;
+                    const overridden =
+                        want > now ? want : presenceSchedule.quietEndAfter(now) || now + 60 * 60_000;
+                    next.dueAt = overridden;
                 }
 
                 jobStore.save(next, "job_fired");

@@ -15,6 +15,8 @@ import { createAiContext, cleanupAiContext } from "./aiContext";
 import type { AiContext, AiModelSettings } from "./aiContext";
 import { getReply } from "./services/conversationService";
 import type { ReplyResult } from "./services/conversationService";
+import { recordUserTurn, appraiseReply, isOwnerLocalSession } from "./presence/presenceHooks";
+import { loadOrInitPresenceState, savePresenceState } from "./presence/stateStore";
 import { getReply as getFallbackReply } from "./services/fallbackService";
 import { setFrontendTools } from "./tools";
 import * as capabilities from "./capabilities/registry";
@@ -216,6 +218,18 @@ export async function chat(options: ChatOptions): Promise<ReplyResult> {
     // 这张表现在同时是桌宠聊天界面的记录真源，只存文字会让历史里的图片全丢。
     await db.saveMessage(sessionId, "user", text, { images: images.length ? images : undefined });
 
+    // 在场感：她说完上一句之后的状态先落盘，再按这句话更新「她此刻的内在」。
+    // 只认本机主人的会话（bot-* / 组网客人不写驱动与心情——那是对外营业，不是私下相处）。
+    const presenceSession = isOwnerLocalSession(sessionId);
+    if (presenceSession) {
+        try {
+            const state = loadOrInitPresenceState(Date.now());
+            savePresenceState(recordUserTurn(state, text, Date.now()));
+        } catch (e) {
+            console.warn("[presence] 记录主人发言失败（已忽略）:", e instanceof Error ? e.message : e);
+        }
+    }
+
     try {
         // 归一化：tier 只接受白名单值（A/B/C），其余剥掉，别让脏数据进内核
         const kbNormalized: RetrievedPassage[] | null = kbContext
@@ -250,6 +264,16 @@ export async function chat(options: ChatOptions): Promise<ReplyResult> {
             emotion: (result.emotion as string | undefined) ?? null,
             images: Array.isArray(result.images) && result.images.length ? result.images : undefined,
         });
+        // 在场感：她说的话也是她经历的一部分 —— 按回复内容做一次评价，把结果写回状态。
+        // 失败只告警：这是锦上添花，绝不能让回复链路挂掉。
+        if (presenceSession) {
+            try {
+                const state = loadOrInitPresenceState(Date.now());
+                savePresenceState(appraiseReply(state, result.speech, (result.emotion as string | null) ?? null, Date.now()));
+            } catch (e) {
+                console.warn("[presence] 回复评价写入失败（已忽略）:", e instanceof Error ? e.message : e);
+            }
+        }
         return result;
     } catch (e) {
         const err = e as Error & { name?: string };

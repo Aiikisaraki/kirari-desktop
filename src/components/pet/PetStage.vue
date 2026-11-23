@@ -4,6 +4,8 @@ import { storeToRefs } from 'pinia'
 import { useChatSocket } from '../../composables/useChatSocket'
 import { usePetStore } from '../../stores/pet'
 import { useAvatarStore } from '../../stores/avatar'
+import { useChatStore } from '../../stores/chat'
+import { dialogueManager } from '../../pet/personality/dialogueManager'
 import type { PetEmotion } from '../../stores/chat'
 import type { AvatarState } from '../../pet/avatar/types'
 import type { BridgeIpcRenderer } from '../../types/electronBridge'
@@ -31,10 +33,31 @@ type PetIpc = Omit<BridgeIpcRenderer, 'send'> & {
 
 const petStore = usePetStore()
 const avatarStore = useAvatarStore()
+// chat store 主要为了拿 presenceMood（她此刻的心情变体）；messages 等字段另有所用。
+const chatStore = useChatStore()
 // 必须走 storeToRefs：pet store 是 setup store，直接解构拿到的是解包后的值
 // （isVisible 是 boolean 而非 Ref），`isVisible.value` 恒为 undefined —— 气泡永远不显示。
 const { isVisible, message } = storeToRefs(petStore)
 const { setMessage } = petStore
+// 在场感：她此刻的心情对应的动画变体（主进程随 chat:state 推送）。
+// 一次性情绪播完回落到这里，而不是无条件 idle —— 让"刚才被凶了"在动画上停留一会儿。
+const { presenceMood } = storeToRefs(chatStore)
+
+/**
+ * 心情 → 可播放的回落状态。
+ * 主进程给的 presenceMood 已经是 AvatarState 名（sad/head_tilt/stretch…），
+ * 这里只做两件事：确认皮肤真的有这个状态（hasState），且当前不忙（不在睡眠/拖拽/说话）。
+ * 不满足就返回 null（照旧回 idle），绝不因为"心情回落"打断睡眠链或拖拽。
+ */
+function moodIdleVariant(): AvatarState | null {
+  const mood = presenceMood.value
+  if (!mood) return null
+  const s = mood as AvatarState
+  if (!hasState(s)) return null
+  if (isAsleep() || avatarStore.currentState === 'drag' || avatarStore.currentState === 'drag_start') return null
+  if (PRIORITY[s] < PRIORITY['idle']) return null
+  return s
+}
 const {
   bubbleMessage,
   bubbleInteractive,
@@ -161,7 +184,7 @@ function requestState(s: AvatarState, opts: { force?: boolean } = {}): boolean {
       actionTimer = null
       // 期间被更高优先级抢走就不再改状态，避免踩掉别人
       if (avatarStore.currentState === s) {
-        avatarStore.setState(CHAIN_NEXT[s] ?? 'idle')
+        avatarStore.setState(CHAIN_NEXT[s] ?? moodIdleVariant() ?? 'idle')
       }
     }, d)
   }
@@ -182,7 +205,7 @@ const SPEAK_TAIL_MS = 2500
 function armSpeakTail() {
   if (speakTimer) clearTimeout(speakTimer)
   speakTimer = setTimeout(() => {
-    if (avatarStore.currentState === 'speak') avatarStore.setState('idle')
+    if (avatarStore.currentState === 'speak') avatarStore.setState(moodIdleVariant() ?? 'idle')
     maybeHappy(0.12) // 一轮对话结束小概率高兴
   }, SPEAK_TAIL_MS)
 }
@@ -226,12 +249,18 @@ watch(
     const lastPet = [...added].reverse().find((m) => m.author === 'pet')
     if (!lastPet) return
     const emo = lastPet.emotion
-    if (emo) {
-      // 携带情绪/动作标签 → 先播该动作，结束再衔接说话
-      playEmotionThenSpeak(emo)
-    } else {
-      playSpeak()
-    }
+    // 拟人延迟：真人不会秒回。读消息 + 想措辞需要一点时间，长回复想得更久
+    // （每 20 字 +120ms，封顶 1.6s）。等待期 thinking 动画通常正在播
+    // （对话框链路 waitingForReply 盖住这段；主动搭话时是一段自然停顿）。
+    const thinkMs = Math.min(1600, 400 + Math.floor((lastPet.text || '').length / 20) * 120)
+    setTimeout(() => {
+      if (emo) {
+        // 携带情绪/动作标签 → 先播该动作，结束再衔接说话
+        playEmotionThenSpeak(emo)
+      } else {
+        playSpeak()
+      }
+    }, thinkMs)
   },
 )
 
@@ -410,6 +439,11 @@ function scheduleSleepy() {
   sleepTimer = setTimeout(() => {
     sleepTimer = null
     if (avatarStore.currentState === 'idle') {
+      // 睡前嘟囔一句：深夜（23~5 点）用 lateNight 池，其余时段用 stretch 池。
+      // 台词来自皮肤 personality（dialogueManager），皮肤没配就用默认池 ——
+      // 这条链路此前从未接上（getDialogue 零调用点），"她睡着前说句话"是最低成本的活人感。
+      const hour = new Date().getHours()
+      setMessage(dialogueManager.getDialogue(hour >= 23 || hour < 5 ? 'lateNight' : 'stretch'))
       // sleep_start 是可选过渡态：皮肤没有就直连 sleepy 循环（首帧即睡姿，硬切可接受）。
       // 有则播完自动接 sleepy（见 CHAIN_NEXT）。
       requestState(hasState('sleep_start') ? 'sleep_start' : 'sleepy')
@@ -423,6 +457,9 @@ function scheduleSleepy() {
 function wakeUp(): boolean {
   if (!isAsleep()) return false
   if (avatarStore.currentState === 'sleep_end') return false
+
+  // 醒来第一句（greeting 池）——被叫醒却一言不发是"挂件"，出声才是"被吵醒的人"。
+  setMessage(dialogueManager.getDialogue('greeting'))
 
   // sleep_end 是可选过渡态：皮肤没有就从 sleepy 直接硬切 idle（无起床动画）。
   if (!hasState('sleep_end')) {
@@ -527,6 +564,10 @@ watch(
 )
 
 /* ===================== 生命周期 ===================== */
+// 专注模式广播的处理器必须模块级：onMounted 注册、onBeforeUnmount 注销，两处共用同一引用。
+const onPresenceFocusChanged = (_e: unknown, on: unknown) => {
+  if (on === true) isBubbleDismissed.value = true
+}
 const isDragging = ref(false)
 const isBubbleDismissed = ref(false)
 const displayMessage = computed(() => (isDragging.value ? message.value : bubbleMessage.value || message.value))
@@ -560,6 +601,9 @@ onMounted(() => {
   // 主进程每 20ms 轮询一次光标位置并广播到本窗口；这里注册接收器做判定。
   // 不依赖渲染进程能否读取 screen / 能否接收鼠标事件，彻底规避死锁。
   ipcRenderer?.on('desktop-pet:cursor', onCursorPos)
+  // 专注模式开启 → 立刻收回待显示的气泡（她刚要开口就被按住了）。
+  // 关闭不需要做什么：下一次主动搭话自然会来。
+  ipcRenderer?.on('presence:focus-changed', onPresenceFocusChanged as never)
   // 上报视口尺寸 / dpr 供主进程诊断坐标空间（见 main.ts 的 [renderer-diag]）。
   ipcRenderer?.send('desktop-pet:diag', {
     innerW: window.innerWidth,
@@ -583,6 +627,7 @@ onBeforeUnmount(() => {
   if (blinkTimer) clearTimeout(blinkTimer)
   if (tapResetTimer) clearTimeout(tapResetTimer)
   ipcRenderer?.off('desktop-pet:cursor', onCursorPos)
+  ipcRenderer?.off('presence:focus-changed', onPresenceFocusChanged as never)
   window.removeEventListener('focus', onFocus)
 })
 
@@ -606,7 +651,8 @@ function enterDragState() {
   if (dragStateEntered) return
   dragStateEntered = true
   stateBeforeDrag = avatarStore.currentState
-  setMessage('跟着你移动中。')
+  // 皮肤可覆盖的拖拽台词（drag.start 池）；皮肤没配时 dialogueManager 自己兜底。
+  setMessage(dialogueManager.getDialogue('drag', 'start'))
   // 清掉一次性动作的收尾计时器，否则它到点会把当前状态顶成 idle
   if (actionTimer) {
     clearTimeout(actionTimer)
@@ -685,7 +731,8 @@ function stopDrag() {
     return
   }
 
-  setMessage('这里看起来不错。')
+  // 松手台词（drag.end 池，皮肤可覆盖）
+  setMessage(dialogueManager.getDialogue('drag', 'end'))
   // 退出 drag：回到"拎起来之前那个还值得继续的表现"。
   // 不在这里走 requestState —— drag 优先级最高，用普通通道请求任何状态都会被自己挡住
   // （playSpeak 里的 requestState('speak') 会直接返回 false，所以不能调它）。

@@ -8,6 +8,10 @@ import { readModelConfigFile } from "./model-config";
 import type { LocalKnowledge, RetrievedPassage } from "../src/knowledge/localKnowledge";
 import { EMOTION_WHITELIST } from "./ai/types";
 import type { PetEmotion } from "./ai/types";
+// 在场感：情绪播完回落到"心情对应变体"用（只读本机主人的状态）。
+import { isOwnerLocalSession } from "./ai/presence/presenceHooks";
+import { idleVariantFor } from "./ai/presence/presenceHooks";
+import { loadOrInitPresenceState } from "./ai/presence/stateStore";
 
 export type ChatAuthor = "user" | "pet" | "system";
 
@@ -46,6 +50,13 @@ export type ChatStateSnapshot = {
     messages: ChatMessage[];
     bubbleMessage: string;
     bubbleInteractive: boolean;
+    /**
+     * 在场感：她此刻的心情对应的动画变体（AvatarState 名）或 null。
+     * 用途：一次性情绪动画播完之后，回落到这里而不是无条件 idle ——
+     * 这是"情绪有惯性"在表现层的落点。null = 没有状态/不要表态，照旧回 idle。
+     * 只在本机主人的会话上计算（isOwnerLocalSession 门控），其它会话恒为 null。
+     */
+    presenceMood?: string | null;
 };
 
 /**
@@ -718,7 +729,21 @@ export class ChatSessionService {
             messages: this.state.messages.map((message) => ({ ...message })),
             bubbleMessage: this.state.bubbleMessage,
             bubbleInteractive: this.state.bubbleInteractive,
+            presenceMood: this.computePresenceMood(),
         };
+    }
+
+    /**
+     * 当前心情对应的动画变体。只在主人的本机会话上算；
+     * 读状态失败一律 null（照旧回 idle），绝不影响聊天状态广播。
+     */
+    private computePresenceMood(): string | null {
+        if (!isOwnerLocalSession(this.state.sessionId)) return null;
+        try {
+            return idleVariantFor(loadOrInitPresenceState(Date.now()));
+        } catch {
+            return null;
+        }
     }
 
     private emit() {

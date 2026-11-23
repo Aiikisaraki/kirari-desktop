@@ -54,6 +54,9 @@ import { recorder, beginTurn, endTurn, newTurnId, refreshEnabled } from "../even
 import { getAgentProfile, getThinking } from "../../model-config";
 // 阶段 C 任务编排：plan / schedule_reminder 工具分派 + 未完成任务跨轮恢复。
 import * as taskRuntime from "./taskRuntime";
+// 在场感：把「她此刻的内在状态」注入 system。纯读，失败静默降级。
+// 只对主人的本机会话注入 —— 分人识别的边界见 buildPresenceBlock 门控处的说明。
+import { buildPresenceBlock, buildPaceBlock, loadOrInitPresenceState, isOwnerLocalSession } from "../presence/presenceIO";
 
 // 工具循环参数已从硬编码常量收进 config.json 的 agentProfile（阶段 B）。
 // 数值逐字等于改造前的 MAX_ROUNDS=5 / max_tokens=1500 / 超时 60s+15s*轮-封顶120s。
@@ -415,6 +418,23 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
         // 场合感知：告诉模型此刻在群聊还是私聊、对谁说话、该收着还是放松，
         // 并给出群聊隐私红线与「别像模板」的语气要求。
         systemPrompt += buildSceneContext(scene);
+
+        // 在场感：「此刻的你」—— 心情、多久没见你、此刻想要什么、惦记的事。
+        // 只对主人的本机会话注入：块里的"上次和对方说话"等时间戳全部来自主人，
+        // 对群友/客人注入等于把主人视角安到别人头上（分人识别的边界，不能破）。
+        // 读不到状态就返回空串，绝不阻塞。
+        try {
+            if (isOwnerLocalSession(sessionId)) {
+                const presenceState = loadOrInitPresenceState(Date.now());
+                const presenceBlock = buildPresenceBlock(presenceState, Date.now());
+                if (presenceBlock) systemPrompt += "\n\n" + presenceBlock;
+                // 说话节奏：深夜/心情低落 → 短句上限 + 短回许可；正常 → 软上限防小作文。
+                const paceBlock = buildPaceBlock(presenceState, Date.now());
+                if (paceBlock) systemPrompt += "\n\n" + paceBlock;
+            }
+        } catch (e) {
+            console.warn("[aiReply] 在场感注入失败（已忽略）:", e instanceof Error ? e.message : e);
+        }
 
         // 设备与工具执行位置：让她知道「组网里还有哪些机器、怎么点名换机器」。
         // 默认在哪台执行由 services/toolRouting 在服务端判定（不靠模型自觉），

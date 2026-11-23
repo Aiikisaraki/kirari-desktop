@@ -236,3 +236,14 @@ contextBridge.exposeInMainWorld("extApi", {
     ipcRenderer.invoke("voice:open-folder"),
 });
 
+// ── 在场感（她的状态 / 专注模式）────────────────────────────────────
+// 状态摘要与开关给设置页「她的状态」卡片和桌宠菜单用；专注模式变化会主动推送。
+contextBridge.exposeInMainWorld("presenceApi", {
+  getStatus: (): Promise<{ summary: string; outreachToday: number; focus: boolean; error?: string }> =>
+    ipcRenderer.invoke("presence:get-status"),
+  setFocus: (on: boolean): Promise<boolean> => ipcRenderer.invoke("presence:set-focus", on),
+  onFocusChanged: (cb: (on: boolean) => void): void => {
+    ipcRenderer.on("presence:focus-changed", (_event, on: boolean) => cb(on));
+  },
+});
+
