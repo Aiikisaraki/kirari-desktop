@@ -193,7 +193,8 @@ export async function downloadVoiceLib(
             if (active.cancelled) return { ok: false, error: "已取消" };
             try {
                 report("连接 " + new URL(url).host + "…");
-                const res = await fetch(url, { redirect: "follow" });
+                // 连接/首字节超时 20s：被墙的源会 TCP 半开挂死，必须主动掐断换下一个源
+                const res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(20000) });
                 if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
                 const total = Number(res.headers.get("content-length") || lib.sizeBytes);
                 const reader = res.body.getReader();
