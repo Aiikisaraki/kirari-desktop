@@ -17,12 +17,36 @@ export interface SettingsItem {
     desc: string;
     /** SettingsIcon 的图标名 */
     icon: string;
+    /**
+     * 条件显示：只有当对应的扩展包已安装时才出现在导航里。
+     * 值是扩展包 manifest 里的 contribution id（如 speech.tts）。
+     * 未装包时这一项被过滤掉 —— 这就是「装了扩展才有标签页」的机制。
+     */
+    requiresExtension?: string;
 }
 
 export interface SettingsGroup {
     id: string;
     label: string;
     items: SettingsItem[];
+}
+
+/**
+ * 过滤掉 requiresExtension 指向的扩展包未安装的条目。
+ * 扩展包清单来自主进程（ext:installed），没有宿主时视为全未安装。
+ */
+export function filterGroupsByExtensions(
+    groups: SettingsGroup[],
+    installedServiceIds: Set<string>,
+): SettingsGroup[] {
+    return groups
+        .map((g) => ({
+            ...g,
+            items: g.items.filter(
+                (it) => !it.requiresExtension || installedServiceIds.has(it.requiresExtension),
+            ),
+        }))
+        .filter((g) => g.items.length > 0);
 }
 
 export const SETTINGS_GROUPS: SettingsGroup[] = [
@@ -77,6 +101,14 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
         id: "ability",
         label: "能力",
         items: [
+            {
+                id: "voice",
+                label: "语音",
+                title: "语音",
+                icon: "chat",
+                desc: "让她开口说话：音色库下载与管理。需要安装语音扩展包。",
+                requiresExtension: "speech.tts",
+            },
             {
                 id: "model",
                 label: "模型",

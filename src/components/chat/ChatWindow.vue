@@ -76,10 +76,14 @@ const threadItems = computed<ThreadItem[]>(() => {
     const msgs = messages.value;
     for (let i = 0; i < msgs.length; i++) {
         const msg = msgs[i];
-        // 与上一条对比，间隔超过阈值则插入时间标记
         if (i > 0) {
-            const diff = msg.timestamp - msgs[i - 1].timestamp;
-            if (diff >= TIME_SEP_THRESHOLD) {
+            const prev = msgs[i - 1];
+            // 插分隔条的两个条件（满足其一）：
+            //   1. 与上一条间隔超过 5 分钟（原有的松弛节奏）
+            //   2. 跨了自然日（哪怕只隔 1 分钟，日期变了也必须标出来）
+            const gap = msg.timestamp - prev.timestamp;
+            const dayChanged = !isSameDay(msg.timestamp, prev.timestamp);
+            if (gap >= TIME_SEP_THRESHOLD || dayChanged) {
                 items.push({
                     type: "timestamp",
                     key: `ts-${msg.id}`,
@@ -92,12 +96,40 @@ const threadItems = computed<ThreadItem[]>(() => {
     return items;
 });
 
-/** 格式化时间戳为 HH:mm */
-function formatTime(ts: number): string {
+/** 判断两个时间戳是否同一个自然日（本地时区）。 */
+function isSameDay(a: number, b: number): boolean {
+    const da = new Date(a);
+    const db = new Date(b);
+    return (
+        da.getFullYear() === db.getFullYear() &&
+        da.getMonth() === db.getMonth() &&
+        da.getDate() === db.getDate()
+    );
+}
+
+/**
+ * 时间文案三档：
+ *  · 今天     → HH:mm（绝大多数场景，保持简洁）
+ *  · 今年其他天 → M月d日 HH:mm
+ *  · 往年     → yyyy年M月d日 HH:mm
+ * 为什么气泡内也要带日期：跨天翻历史时，只有分隔条有日期不够 ——
+ * 滚动快了根本没注意到分隔条，气泡上的 "13:26" 会让人以为是今天。
+ */
+function formatChatTime(ts: number): string {
     const d = new Date(ts);
     const hh = String(d.getHours()).padStart(2, "0");
     const mm = String(d.getMinutes()).padStart(2, "0");
-    return `${hh}:${mm}`;
+    const time = `${hh}:${mm}`;
+    const now = new Date();
+    if (isSameDay(ts, now.getTime())) return time;
+    const md = `${d.getMonth() + 1}月${d.getDate()}日`;
+    if (d.getFullYear() === now.getFullYear()) return `${md} ${time}`;
+    return `${d.getFullYear()}年${md} ${time}`;
+}
+
+/** 分隔条与气泡内时间共用同一套文案。 */
+function formatTime(ts: number): string {
+    return formatChatTime(ts);
 }
 
 onMounted(() => {
@@ -960,6 +992,28 @@ async function saveImage(src: string) {
 
 .msg-row.is-user .msg-bubble hr {
     border-top-color: rgba(255, 255, 255, 0.35);
+}
+
+/* 日期/时间分隔条：居中小药丸。文案可能带日期（M月d日 HH:mm），不许换行。 */
+.chat-time-sep {
+    display: flex;
+    justify-content: center;
+    margin: 16px 0 10px;
+}
+
+.chat-time-sep__pill {
+    max-width: 90%;
+    padding: 4px 14px;
+    border-radius: 999px;
+    background: var(--pet-accent-soft);
+    color: var(--pet-muted);
+    font-size: 11.5px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    user-select: none;
 }
 
 /* 时间：在气泡内部，接收左对齐 / 发送右对齐 */

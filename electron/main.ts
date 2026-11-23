@@ -20,6 +20,8 @@ import * as briefSchedule from "./ai/services/briefSchedule";
 import * as workspaceTask from "./ai/services/workspaceTask";
 import * as aiToolRouting from "./ai/services/toolRouting";
 import * as aiCapabilities from "./ai/capabilities/registry";
+import { ExtensionHost, getExtensionHost, setExtensionHost } from "./extensions";
+import * as voiceLibrary from "./voice/voiceLibrary";
 import { getOwnerKey, samePerson, sceneFromSessionId } from "./ai/services/ownerIdentity";
 import * as dailyBriefingService from "./ai/services/dailyBriefingService";
 import { AdapterManager, getAdapter } from "./adapter/adapter-manager";
@@ -476,6 +478,56 @@ ipcMain.handle("kb:update-remote", (_e, id: number, updates: any) => {
   if (!localKnowledge) return { ok: false };
   const ok = localKnowledge.updateRemote(id, updates);
   return { ok };
+});
+
+// ---- 语音扩展包：音色库管理（下载 / 删除 / 打开目录）----
+// 下载在主进程做（要写文件 + 长任务），渲染层经 IPC 调用并轮询进度。
+ipcMain.handle("voice:libs-list", async () => {
+  try {
+    return { ok: true, libs: await voiceLibrary.listVoiceLibs() };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+});
+ipcMain.handle("voice:lib-download", async (_e, libId: string) => {
+  if (typeof libId !== "string" || !libId.trim()) return { ok: false, error: "缺少 libId" };
+  return voiceLibrary.downloadVoiceLib(libId.trim(), {
+    onProgress: (msg) => console.log("[voice] " + libId + ": " + msg),
+  });
+});
+ipcMain.handle("voice:lib-remove", async (_e, libId: string) => {
+  if (typeof libId !== "string" || !libId.trim()) return { ok: false, error: "缺少 libId" };
+  return voiceLibrary.removeVoiceLib(libId.trim());
+});
+ipcMain.handle("voice:download-progress", () => voiceLibrary.getVoiceDownloadProgress());
+ipcMain.handle("voice:download-cancel", (_e, libId: string) => voiceLibrary.cancelVoiceDownload(libId));
+ipcMain.handle("voice:open-folder", async () => {
+  try {
+    return { ok: await voiceLibrary.openVoicesFolder() };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+});
+
+// ---- 扩展包（路线 A：宿主内置页面，装了包导航才出现）----
+// 渲染层据此决定是否显示「语音」设置页；没有扩展宿主或没装包时为空数组。
+ipcMain.handle("ext:installed", async () => {
+  try {
+    const host = getExtensionHost();
+    return {
+      ok: true,
+      packs: host
+        ? host.status().map((s) => ({
+            packId: s.packId,
+            name: s.name,
+            version: s.version,
+            contributions: s.contributions,
+          }))
+        : [],
+    };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 });
 
 // 重新把前端工具（MCP + skill）注册给后端：通过 ChatSessionService 重新发送 register_tools / register_skills。
@@ -2443,6 +2495,50 @@ app.whenReady().then(async () => {
   localKnowledge = new LocalKnowledge(path.dirname(HOME_PATHS.knowledge));
   console.log(`[kb] 私人知识库已加载 ${localKnowledge.getAll().length} 条`);
 
+  // ── 外部扩展包 ──────────────────────────────────────────────────────────
+  // 扩展包由**独立安装包**装进 ~/.kirari/extensions/<pack-id>/，本进程只读扫描。
+  // 不阻塞启动：没有包时 startAll() 立刻返回空数组；有包时握手失败也只记日志。
+  // 这一步之前必须已经有数据根（ensureHomeLayout 建好 extensions 目录）。
+  {
+    const host = new ExtensionHost({
+      rootDir: HOME_PATHS.extensions,
+      userDataDir: KIRARI_HOME_PATHS.home,
+      hostVersion: app.getVersion(),
+      locale: app.getLocale(),
+      onCapabilities: (packId, cap, invoke) => {
+        // 扩展包贡献的工具直接进能力注册表，模型即可调用。
+        aiCapabilities.registerGlobal([
+          {
+            name: cap.name,
+            description: cap.description || "",
+            parameters: cap.parameters,
+            execute: (args: unknown) => invoke(cap.name, args),
+          },
+        ]);
+        console.log(`[ext] ${packId} 贡献能力：${cap.name}`);
+      },
+      onError: (packId, message) => console.warn(`[ext] ${packId} 不可用：${message}`),
+    });
+    setExtensionHost(host);
+    void host
+      .startAll()
+      .then((list) => {
+        if (!list.length) {
+          console.log("[ext] 未安装扩展包");
+          return;
+        }
+        for (const s of list) {
+          console.log(
+            `[ext] 已加载 ${s.packId}@${s.version} → 服务 ${s.contributions
+              .filter((c) => c.type === "service")
+              .map((c) => (c as { id: string }).id)
+              .join(", ") || "(无)"}`,
+          );
+        }
+      })
+      .catch((e) => console.warn("[ext] 扩展扫描失败（已忽略）：", e));
+  }
+
   // 初始化进程内 AI 引擎（本地数据库落在本机 userData）。
   // 桌宠自此不再依赖任何外部后端进程——大脑、知识库、历史全在本进程内。
   //
@@ -3017,6 +3113,8 @@ app.whenReady().then(async () => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  // 扩展包的 sidecar 进程要主动收掉，否则会留一堆孤儿进程。
+  void getExtensionHost()?.dispose();
   scheduledJobsService.stop();
   chatSessionService?.dispose();
   shutdownEngine();

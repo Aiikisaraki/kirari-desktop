@@ -28,6 +28,7 @@
 //   ├── network/{net-state,net-identity}.json
 //   ├── avatars/                   皮肤
 //   ├── user-avatar/               我的头像
+//   ├── extensions/<pack-id>/      外部扩展包（独立安装包装进来，宿主只读这里）
 //   ├── logs/
 //   └── backups/
 //
@@ -66,6 +67,9 @@ export const LAYOUT = {
     netIdentity: "network/net-identity.json",
     avatars: "avatars",
     userAvatar: "user-avatar",
+    // 外部扩展包根目录：每个包一个子目录（内含 manifest.json）。
+    // 由独立安装包装入，宿主启动时扫描；本仓库不往里写任何东西。
+    extensions: "extensions",
     logs: "logs",
     backups: "backups",
 } as const;
@@ -73,7 +77,7 @@ export const LAYOUT = {
 export type LayoutKey = keyof typeof LAYOUT;
 export type HomePaths = { home: string } & Record<LayoutKey, string>;
 
-const DIR_KEYS: LayoutKey[] = ["skillsRoot", "avatars", "userAvatar", "logs", "backups"];
+const DIR_KEYS: LayoutKey[] = ["skillsRoot", "avatars", "userAvatar", "extensions", "logs", "backups"];
 
 /** main.ts 登记的数据根（setHomeRoot）；未登记时为 null，交给 resolveHome / electron 求值。 */
 let homeRootOverride: string | null = null;

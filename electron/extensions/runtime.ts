@@ -90,12 +90,25 @@ export class ExtensionRuntime {
         const commandPath = path.join(this.dir, m.engine.command);
         const env: NodeJS.ProcessEnv = { ...process.env, ...(m.engine.env || {}) };
 
-        const child = spawn(commandPath, m.engine.args || [], {
-            cwd: this.dir,
-            env,
-            windowsHide: true,
-            stdio: "pipe",
-        }) as ChildProcessWithoutNullStreams;
+        // launch=host-node：用宿主自带的 Node 跑包里的 JS 入口。
+        // 打包后 process.execPath 是应用自己的 exe，加 ELECTRON_RUN_AS_NODE=1
+        // 就退化成纯 Node —— 扩展包不必自带运行时，安装包能小两个数量级。
+        const isHostNode = (m.engine.launch ?? "binary") === "host-node";
+        const child = (
+            isHostNode
+                ? spawn(process.execPath, [commandPath, ...(m.engine.args || [])], {
+                      cwd: this.dir,
+                      env: { ...env, ELECTRON_RUN_AS_NODE: "1" },
+                      windowsHide: true,
+                      stdio: "pipe",
+                  })
+                : spawn(commandPath, m.engine.args || [], {
+                      cwd: this.dir,
+                      env,
+                      windowsHide: true,
+                      stdio: "pipe",
+                  })
+        ) as ChildProcessWithoutNullStreams;
 
         const client = new JsonRpcClient(child, m.engine.requestTimeoutMs ?? 15000);
         client.onEvent((type, payload) => {

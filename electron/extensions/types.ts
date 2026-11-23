@@ -44,6 +44,14 @@ export interface ExtensionEngineSpec {
     runtime: "sidecar";
     /** 通信协议标识，宿主按这个派发 client 实现 */
     protocol: "jsonrpc-stdio@1";
+    /**
+     * 用什么进程跑 command：
+     *  - "host-node"（推荐）：用宿主自带的 Node（Electron 的 ELECTRON_RUN_AS_NODE 模式）
+     *    直接跑 command 指向的 JS 入口。扩展包不必自带运行时，安装包可以只有几百 KB。
+     *  - "binary"：command 指向包内自带的可执行文件（需要原生依赖、或非 Node 实现时用）。
+     * 不填默认 "binary"（向后兼容最早期的契约）。
+     */
+    launch?: "host-node" | "binary";
     /** 相对扩展包根目录的可执行文件/脚本；禁止绝对路径与 .. 逃逸 */
     command: string;
     args?: string[];

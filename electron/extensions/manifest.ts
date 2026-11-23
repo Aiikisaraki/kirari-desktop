@@ -134,6 +134,15 @@ export function parseManifest(raw: unknown): ExtensionManifest {
             "不支持的协议：" + String(e.protocol) + "（目前只有 jsonrpc-stdio@1）",
         );
     }
+    let launch: "host-node" | "binary" | undefined;
+    if (e.launch !== undefined) {
+        if (e.launch !== "host-node" && e.launch !== "binary") {
+            throw new ExtensionManifestError(
+                "不支持的 launch：" + String(e.launch) + "（只有 host-node / binary）",
+            );
+        }
+        launch = e.launch;
+    }
     const command = asString(e.command, "engine.command");
     if (path.isAbsolute(command) || command.includes("..")) {
         throw new ExtensionManifestError("engine.command 只允许扩展包目录内的相对路径");
@@ -182,6 +191,7 @@ export function parseManifest(raw: unknown): ExtensionManifest {
         engine: {
             runtime: "sidecar",
             protocol: "jsonrpc-stdio@1",
+            launch,
             command,
             args,
             env,

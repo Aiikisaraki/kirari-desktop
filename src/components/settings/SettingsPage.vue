@@ -11,7 +11,7 @@ import { computed, nextTick, onMounted, provide, ref, type Component } from "vue
 import WindowChrome from "../common/WindowChrome.vue";
 import SettingsIcon from "./SettingsIcon.vue";
 import SettingsNav from "./SettingsNav.vue";
-import { SETTINGS_GROUPS } from "./sections";
+import { SETTINGS_GROUPS, filterGroupsByExtensions } from "./sections";
 import { SETTINGS_CONTEXT, type SettingsContext } from "./settingsContext";
 import AppearanceSettings from "./AppearanceSettings.vue";
 import AvatarSettings from "./AvatarSettings.vue";
@@ -24,6 +24,7 @@ import KnowledgeSettings from "./KnowledgeSettings.vue";
 import McpSettings from "./McpSettings.vue";
 import BotAdapterSettings from "./BotAdapterSettings.vue";
 import SyncSettings from "./SyncSettings.vue";
+import VoiceSettings from "./VoiceSettings.vue";
 
 const PAGES: Record<string, Component> = {
     appearance: AppearanceSettings,
@@ -37,10 +38,17 @@ const PAGES: Record<string, Component> = {
     mcp: McpSettings,
     bot: BotAdapterSettings,
     sync: SyncSettings,
+    voice: VoiceSettings,
 };
 
-const groups = SETTINGS_GROUPS;
-const allItems = groups.flatMap((g) => g.items);
+/**
+ * 已安装扩展包提供的服务 id 集合（如 "speech.tts"）。
+ * 空 Set = 没装任何扩展包 → 带 requiresExtension 的导航项全部隐藏。
+ */
+const installedServices = ref(new Set<string>());
+
+const groups = computed(() => filterGroupsByExtensions(SETTINGS_GROUPS, installedServices.value));
+const allItems = groups.value.flatMap((g) => g.items);
 const activeId = ref("appearance");
 const active = computed(() => allItems.find((i) => i.id === activeId.value) ?? allItems[0]);
 const activeComponent = computed(() => PAGES[activeId.value] ?? AppearanceSettings);
@@ -100,7 +108,30 @@ if (netApiAny) {
 }
 provide(SETTINGS_CONTEXT, { botReadonly } as SettingsContext);
 
-onMounted(loadPetName);
+/** 拉已安装扩展包提供的服务清单，供条件导航过滤（装了语音包才有"语音"页）。 */
+async function loadInstalledExtensions() {
+    try {
+        const w = window as unknown as {
+            extApi?: { listInstalledPacks?: () => Promise<{ ok: boolean; packs?: { packId: string; contributions: { type: string; id: string }[] }[] }> };
+        };
+        const res = await w.extApi?.listInstalledPacks?.();
+        if (!res?.ok || !res.packs?.length) return;
+        const ids = new Set<string>();
+        for (const pack of res.packs) {
+            for (const c of pack.contributions) {
+                if (c.type === "service" && c.id) ids.add(c.id);
+            }
+        }
+        installedServices.value = ids;
+    } catch {
+        /* 读不到就维持空集合：条件页全部隐藏，不影响其它页 */
+    }
+}
+
+onMounted(() => {
+    void loadPetName();
+    void loadInstalledExtensions();
+});
 </script>
 
 <template>

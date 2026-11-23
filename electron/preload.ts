@@ -216,3 +216,23 @@ contextBridge.exposeInMainWorld("viewerApi", {
     ipcRenderer.on("viewer:update", (_event, src: string, kind?: string) => cb(src, kind));
   },
 });
+
+// ── 扩展包（extension packs）────────────────────────────────────────
+// 路线 A：宿主内置设置页，扩展包只声明贡献。设置窗口用这两个通道：
+//   · listInstalledPacks → 条件导航（装了语音包才显示「语音」页）
+//   · voice* → 音色库下载/删除/进度/打开目录（主进程执行，长任务轮询进度）
+contextBridge.exposeInMainWorld("extApi", {
+  listInstalledPacks: (): Promise<{ ok: boolean; packs?: unknown[] }> =>
+    ipcRenderer.invoke("ext:installed"),
+  voiceListLibs: (): Promise<{ ok: boolean; libs?: unknown[]; error?: string }> =>
+    ipcRenderer.invoke("voice:libs-list"),
+  voiceDownload: (libId: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("voice:lib-download", libId),
+  voiceRemove: (libId: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("voice:lib-remove", libId),
+  voiceProgress: (): Promise<{ progress: string }> =>
+    ipcRenderer.invoke("voice:download-progress"),
+  voiceOpenFolder: (): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("voice:open-folder"),
+});
+
