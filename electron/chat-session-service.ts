@@ -401,9 +401,23 @@ export class ChatSessionService {
             const replyImages = Array.isArray(result.images)
                 ? result.images.filter((x: string) => typeof x === "string" && x.trim())
                 : [];
-            this.state.messages.push(
-                this.createMessage("pet", result.speech, emotion, replyImages),
-            );
+            // 气泡拆分：engine 已按句拆好（result.bubbles），逐条渲染。
+            // 真人聊天是连发短消息，不是一整段。emotion 跟第一条走。
+            const bubbles: string[] = Array.isArray(
+                (result as { bubbles?: string[] }).bubbles,
+            )
+                ? (result as { bubbles?: string[] }).bubbles!
+                : [result.speech];
+            for (let i = 0; i < bubbles.length; i++) {
+                this.state.messages.push(
+                    this.createMessage(
+                        "pet",
+                        bubbles[i],
+                        i === 0 ? emotion : null,
+                        i === 0 ? replyImages : [],
+                    ),
+                );
+            }
             this.state.bubbleMessage = result.speech.length <= 10 ? result.speech : LONG_REPLY_PROMPT;
             this.state.bubbleInteractive = result.speech.length > 10;
             this.persist();

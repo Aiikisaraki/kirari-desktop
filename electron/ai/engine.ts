@@ -260,10 +260,18 @@ export async function chat(options: ChatOptions): Promise<ReplyResult> {
         });
         // 助手回复入库，保证下一轮上下文连贯。emotion 一并落库 ——
         // 界面重放历史时要按当时的情绪播动画，见 ChatSessionService.loadFromDb。
-        await db.saveMessage(sessionId, "assistant", result.speech, {
-            emotion: (result.emotion as string | undefined) ?? null,
-            images: Array.isArray(result.images) && result.images.length ? result.images : undefined,
-        });
+        // 气泡拆分：一条回复按句拆成多条独立消息（真人聊天是连发短消息）。
+        // 桌宠端/核心版读历史看到一致的拆分气泡。
+        const { splitSpeechBubbles } = await import("./reply/promptBuilder");
+        const bubbles = splitSpeechBubbles(result.speech);
+        for (let i = 0; i < bubbles.length; i++) {
+            await db.saveMessage(sessionId, "assistant", bubbles[i], {
+                emotion: i === 0 ? ((result.emotion as string | undefined) ?? null) : null,
+                images: i === 0 && Array.isArray(result.images) && result.images.length ? result.images : undefined,
+            });
+        }
+        // 实时回复也带拆分结果（渲染层按气泡渲染）
+        (result as { bubbles?: string[] }).bubbles = bubbles;
         // 在场感：她说的话也是她经历的一部分 —— 按回复内容做一次评价，把结果写回状态。
         // 失败只告警：这是锦上添花，绝不能让回复链路挂掉。
         if (presenceSession) {

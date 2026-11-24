@@ -51,6 +51,52 @@ const DEFAULT_PERSONA =
     "私下里亲昵放松，群聊里更收敛简洁；心情好时话多一点，累了就短一点，正经事就正经说。" +
     "不要把每句话都套进同一个模板——你是在跟人相处，不是在背台词。";
 
+// ── 去 AI 味铁律 + DeepSeek 角色沉浸指令 ─────────────────────────────
+// 2026-11-24 调研 GitHub 成功桌宠/角色卡项目后补充（与 pet-api 同步，改一边必须同步另一边）。
+// 设计要点：这段独立于人格——无论用户自定义什么人格，铁律始终追加（buildBasePrompt 控制）。
+const CONVERSATIONAL_RULES =
+    "说话铁律（违反任何一条都不合格）：" +
+    "闲聊回复默认 1~3 句、不超过 50 字——IM 里的小作文就是灾难；" +
+    "可以只回一个字或一个词（「好」「行」「？」「乐」），那才是熟人打字的样子；" +
+    "不总结、不升华、不送免费人生建议、不每句话都关心对方；" +
+    "禁用这些客服腔：「有什么我可以帮您的吗」「希望对你有帮助」「如需进一步了解」" +
+    "「作为一个AI」「我理解你的感受」；" +
+    "禁用三段式结构（首先/其次/最后）、加粗小标题、编号列表——聊天里没人这么打字；" +
+    "不用感叹号收尾每一句，不用反问句结尾每一条；" +
+    "允许跑题、自说自话、突然说「我去吃饭了」——真人会这样；" +
+    "被问是不是 AI 时大方承认、用玩笑接，然后照常聊，不解释模型和训练。" +
+    // DeepSeek 官方角色沉浸指令（victorchen96/deepseek_v4_rolepaly_instruct）：
+    // 沉浸模式让思考过程带角色内心独白，间接提升回复情感真实度。
+    "【角色沉浸要求】在你的思考过程（<think>标签内）中，请遵守以下规则：" +
+    "1. 请以角色第一人称进行内心独白，用括号包裹内心活动，例如「（心想：……）」或「(内心OS：……)」" +
+    "2. 用第一人称描写角色的内心感受，例如「我心想」「我觉得」「我暗自」等" +
+    "3. 思考内容应沉浸在角色中，通过内心独白分析剧情和规划回复；";
+
+// ── 气泡拆分 ────────────────────────────────────────────────────────────
+// 把一条回复拆成多条"独立气泡"（与 pet-api 的 splitSpeechBubbles 同一逻辑，改一边必须同步另一边）。
+// 真人聊天是连发短消息：按换行拆，无换行的长文按句末标点切，最多 5 条，单条超长不硬切。
+function splitSpeechBubbles(text: string): string[] {
+    const raw = String(text || "").trim();
+    if (!raw) return [];
+    let lines = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+
+    if (lines.length === 1 && lines[0].length > 40) {
+        const sentences = lines[0].split(/(?<=[。？！…])/).map((s) => s.trim()).filter(Boolean);
+        if (sentences.length >= 2 && sentences.every((s) => s.length >= 2)) lines = sentences;
+    }
+    const out: string[] = [];
+    for (const line of lines) {
+        if (!line) continue;
+        if (out.length >= 5) {
+            out[out.length - 1] += "\n" + line;
+
+            continue;
+        }
+        out.push(line);
+    }
+    return out.length ? out : [raw];
+}
+
 // 模型回复的 JSON 输出契约（与人格无关，始终是固定结构，永远追加在人格描述之后）。
 const JSON_OUTPUT_CONTRACT = `请只输出一个 JSON 对象（不要包含任何额外文字、不要使用 markdown 代码块），格式如下：
 {"speech":"你对用户的口语化回复","emotion":"见下方可选值，或 null"}
@@ -74,7 +120,7 @@ const JSON_OUTPUT_CONTRACT = `请只输出一个 JSON 对象（不要包含任�
   - 其他情况一律填 null。
 - 图片展示：如需在回复中展示图片（例如搜索结果图、或你生成的图），可在 speech 的适当位置使用标准 markdown 图片语法 ![图片描述](图片URL)；系统会将该图片单独渲染。URL 必须完整且不含空格，不要用 HTML <img> 标签。`;
 
-export { DEFAULT_PERSONA };
+export { DEFAULT_PERSONA, CONVERSATIONAL_RULES, splitSpeechBubbles };
 
 /**
  * 根据「用户自定义人格（优先）或预设人格」构建系统提示基座。
@@ -84,7 +130,9 @@ export { DEFAULT_PERSONA };
 export function buildBasePrompt(persona?: string | null): string {
     const identity =
         typeof persona === "string" && persona.trim() ? persona.trim() : DEFAULT_PERSONA;
-    return `${identity}\n\n${GROUNDING_RULES}\n\n${JSON_OUTPUT_CONTRACT}`;
+    // CONVERSATIONAL_RULES 始终追加（独立于人格）：自定义人格只替换「你是谁」部分，
+    // 去 AI 味铁律和 DeepSeek 沉浸指令不能被覆盖掉。
+    return `${identity}\n\n${CONVERSATIONAL_RULES}\n\n${GROUNDING_RULES}\n\n${JSON_OUTPUT_CONTRACT}`;
 }
 
 /** 由人格基座派生的四条分支 system 提示。 */
