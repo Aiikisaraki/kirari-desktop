@@ -7,10 +7,12 @@ import { onMounted, ref } from "vue";
 import SettingsIcon from "./SettingsIcon.vue";
 
 const emit = defineEmits<{ saved: [msg?: string] }>();
-type Settings = { comment: boolean; dynamic: boolean; dm: boolean; like: boolean; coin: boolean; favorite: boolean };
-const state = ref<Settings>({ comment: false, dynamic: false, dm: false, like: false, coin: false, favorite: false });
+type Settings = { enabled: boolean; autoBrowse: boolean; comment: boolean; dynamic: boolean; dm: boolean; like: boolean; coin: boolean; favorite: boolean };
+const state = ref<Settings>({ enabled: false, autoBrowse: false, comment: false, dynamic: false, dm: false, like: false, coin: false, favorite: false });
 const loading = ref(true); const saving = ref(false); const error = ref("");
 const CH: { key: keyof Settings; name: string; desc: string }[] = [
+  { key: 'enabled', name: 'B站总开关', desc: '关掉后我完全不去B站，所有B站动作都会被拒绝。' },
+  { key: 'autoBrowse', name: '自主闲逛', desc: '允许我空闲时自己去看有趣内容（低优先级可中断）；关掉后只有你明确叫我才去。' },
   { key: 'comment', name: '评论', desc: '视频与专栏下只就当前话题表达看法态度；不引用记忆、不引流。' },
   { key: 'dynamic', name: '动态', desc: '需要时发一条动态；不带浏览历史或他人信息。' },
   { key: 'dm', name: '私信', desc: '默认永久关闭；即使开启也绝不主动私信任何人。' },

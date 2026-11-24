@@ -4,7 +4,8 @@
 import { getDb } from "./ai/db/storage";
 
 const KEY = "bili_interaction";
-const DEFAULTS = { comment: false, dynamic: false, dm: false, like: false, coin: false, favorite: false };
+// enabled = 总闸；autoBrowse = 允许闲时自主刷（默认都关）。
+const DEFAULTS = { enabled: false, autoBrowse: false, comment: false, dynamic: false, dm: false, like: false, coin: false, favorite: false };
 type Settings = typeof DEFAULTS;
 
 export function readInteraction(): Settings {

@@ -8,8 +8,8 @@ import { remember } from "../../services/memory";
 
 const SERVICE_ID = "bili.explore";
 const KEY = "bili_interaction";
-const DEFAULTS = { comment: false, dynamic: false, dm: false, like: false, coin: false, favorite: false };
-const CHANNELS: Record<string, string> = { comment: '评论', dynamic: '动态', dm: '私信', like: '点赞', coin: '投币', favorite: '收藏' };
+const DEFAULTS = { enabled: false, autoBrowse: false, comment: false, dynamic: false, dm: false, like: false, coin: false, favorite: false };
+const CHANNELS: Record<string, string> = { enabled: '总开关', autoBrowse: '自主闲逛', comment: '评论', dynamic: '动态', dm: '私信', like: '点赞', coin: '投币', favorite: '收藏' };
 
 type Settings = typeof DEFAULTS;
 function readSettings(): Settings {
@@ -65,6 +65,11 @@ const capability: Capability = defineCapability({
 
 async function dispatch(args: any, ctx: any): Promise<any> {
   const a = args || {}; const action = String(a.action || '');
+  const bs = readSettings();
+  // 总闸：B站功能关掉后，除查看/修改开关外一律拒绝
+  if (!bs.enabled && !['settings', 'setInteraction'].includes(action)) {
+    return { ok: false, disabled: true, error: 'B站功能总开关已关闭。要让我去B站，先说「开启B站」（需确认）。' };
+  }
   const uid = ctx?.uid ?? 1;
   const svc: any = getService(SERVICE_ID);
   if (!svc) return { ok: false, error: 'B站扩展包未安装或未加载（两端共用）' };
@@ -104,6 +109,7 @@ async function dispatch(args: any, ctx: any): Promise<any> {
   }
 
   if (action === 'discover' || action === 'explore') {
+    if (a.fromSchedule === true && !bs.autoBrowse) return { ok: false, disabled: true, error: '自主闲逛已关闭（autoBrowse=false）' };
     activityStart('刷B站', uid);
     try {
       let knownPersons: string[] = [];
