@@ -25,6 +25,7 @@ import McpSettings from "./McpSettings.vue";
 import BotAdapterSettings from "./BotAdapterSettings.vue";
 import SyncSettings from "./SyncSettings.vue";
 import VoiceSettings from "./VoiceSettings.vue";
+import BiliSettings from "./BiliSettings.vue";
 
 const PAGES: Record<string, Component> = {
     appearance: AppearanceSettings,
@@ -39,6 +40,7 @@ const PAGES: Record<string, Component> = {
     bot: BotAdapterSettings,
     sync: SyncSettings,
     voice: VoiceSettings,
+    bili: BiliSettings,
 };
 
 /**

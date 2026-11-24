@@ -110,6 +110,14 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
                 requiresExtension: "speech.tts",
             },
             {
+                id: "bili",
+                label: "B站互动",
+                title: "B站互动",
+                icon: "globe",
+                desc: "评论/动态/私信/点赞/投币/收藏六个开关。命令与这里双向同步，需要安装 B站扩展包。",
+                requiresExtension: "bili.explore",
+            },
+            {
                 id: "model",
                 label: "模型",
                 title: "模型",

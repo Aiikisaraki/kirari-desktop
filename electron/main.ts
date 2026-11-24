@@ -33,6 +33,7 @@ import { NetManager } from "kirari-net";
 import type { HostExecutor, RelayBackfill } from "kirari-net";
 import { setupNetIpc } from "./net/ipc";
 import { saveMessage as saveChatMessage, LOCAL_UID } from "./ai/db/storage";
+import { readInteraction, writeInteraction } from "./biliIpc";
 import { ensureLocalSessionId } from "./ai/local-session";
 import { migrateLegacyChatJson } from "./ai/migrate/legacy-chat";
 import { migrateLegacyChatDb } from "./ai/migrate/legacy-db";
@@ -536,6 +537,10 @@ ipcMain.handle("voice:open-folder", async () => {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 });
+
+// ---- B站互动开关：与命令/核心端共库，双向同步 ----
+ipcMain.handle("bili:interaction:get", () => readInteraction());
+ipcMain.handle("bili:interaction:set", (_e, patch: any) => writeInteraction(patch || {}));
 
 // ---- 扩展包（路线 A：宿主内置页面，装了包导航才出现）----
 // 渲染层据此决定是否显示「语音」设置页；没有扩展宿主或没装包时为空数组。
