@@ -53,9 +53,10 @@ const capability: Capability = defineCapability({
   parameters: {
     type: 'object',
     properties: {
-      action: { type: 'string', enum: ['popular','search','explore','discover','settings','setInteraction','activity','subtitles','comments','opus','liveInfo','liveList','musicSearch','loginStatus','qrGenerate','qrPoll','logout','like','coin','favorite','comment','opusLike','opusCoin','opusFavorite'], description: '动作。' },
+      action: { type: 'string', enum: ['popular','search','explore','discover','settings','setInteraction','activity','subtitles','comments','opus','liveInfo','liveList','musicSearch','loginStatus','qrGenerate','qrPoll','logout','like','coin','favorite','comment','opusLike','opusCoin','opusFavorite','reviewList','reviewDecide'], description: '动作。' },
       keyword: { type: 'string' }, count: { type: 'number' }, takeaway: { type: 'string' },
       bvid: { type: 'string' }, opusId: { type: 'string' }, roomId: { type: 'number' }, text: { type: 'string' },
+      reviewId: { type: 'string' }, approve: { type: 'boolean' },
       channel: { type: 'string', enum: Object.keys(CHANNELS) }, enabled: { type: 'boolean' }, confirm: { type: 'boolean' }, stop: { type: 'boolean' },
     },
     required: ['action'],
@@ -99,6 +100,9 @@ async function dispatch(args: any, ctx: any): Promise<any> {
     if (a.stop === true) { activityClear(uid); return { ok: true, activity: null }; }
     return { ok: true, activity: activityGet(uid) };
   }
+
+  if (action === 'reviewList') return { ok: true, pending: await svc.listPending() };
+  if (action === 'reviewDecide') return { ok: true, ...(await svc.decide({ id: String(a.reviewId||a.id||''), approve: !!a.approve })) };
 
   const writeMap: Record<string,string> = { like:'like', coin:'coin', favorite:'favorite', comment:'comment', opusLike:'like', opusCoin:'coin', opusFavorite:'favorite' };
   if (writeMap[action]) {
