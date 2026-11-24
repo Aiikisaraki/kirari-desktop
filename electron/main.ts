@@ -3129,7 +3129,7 @@ app.whenReady().then(async () => {
   //   runner  —— 怎么跑（读本机模型配置 + engine.chat）
   //   pusher  —— 结果送到哪（注入当前聊天会话，跟提醒同一条路）
   //   role/relay —— 叶子节点把任务转发给主机（用户 2026-11-19 明确要求）
-  workspaceTask.setTaskRunner(async ({ sessionId, instruction }) => {
+  workspaceTask.setTaskRunner(async ({ sessionId, instruction, owner }) => {
     const cfg = readModelConfigFile();
     if (!cfg.key || !cfg.model || !cfg.endpoint) {
       return { ok: false, error: "还没配置大脑：先去设置里填一套（服务地址 + 型号 + 钥匙）" };
@@ -3153,7 +3153,14 @@ app.whenReady().then(async () => {
         persona: null,
         skillPrompts: [],
         kbContext: null,
-        scene: null,
+        // 任务执行带归属身份：能力 dispatch 的 owner/role 取自 scene。
+        // 不传的话主人建的任务调不了 owner 级能力（如 B站）。
+        scene: {
+          chatType: 'local',
+          isOwner: samePerson(String(owner || ''), getOwnerKey()),
+          role: samePerson(String(owner || ''), getOwnerKey()) ? 'owner' : 'user',
+          senderId: String(owner || ''),
+        },
         // 组网/任务场景宁可给兜底语也不要让整条链路失败
         allowFallback: true,
       });
