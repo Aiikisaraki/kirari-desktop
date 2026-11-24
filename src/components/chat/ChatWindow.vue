@@ -108,8 +108,9 @@ function isSameDay(a: number, b: number): boolean {
 }
 
 /**
- * 时间文案三档：
+ * 时间文案四档：
  *  · 今天     → HH:mm（绝大多数场景，保持简洁）
+ *  · 昨天     → 昨天 HH:mm（比日期更自然）
  *  · 今年其他天 → M月d日 HH:mm
  *  · 往年     → yyyy年M月d日 HH:mm
  * 为什么气泡内也要带日期：跨天翻历史时，只有分隔条有日期不够 ——
@@ -122,6 +123,9 @@ function formatChatTime(ts: number): string {
     const time = `${hh}:${mm}`;
     const now = new Date();
     if (isSameDay(ts, now.getTime())) return time;
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    if (isSameDay(ts, yesterday.getTime())) return `昨天 ${time}`;
     const md = `${d.getMonth() + 1}月${d.getDate()}日`;
     if (d.getFullYear() === now.getFullYear()) return `${md} ${time}`;
     return `${d.getFullYear()}年${md} ${time}`;
