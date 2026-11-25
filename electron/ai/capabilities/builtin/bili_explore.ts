@@ -5,6 +5,7 @@ import { defineCapability, type Capability } from "kirari-agent";
 import { getService } from "../../../extensions/host";
 import * as db from "../../db/storage";
 import { remember } from "../../services/memory";
+import * as presenceSchedule from "../../presence/presenceSchedule";
 
 const SERVICE_ID = "bili.explore";
 const KEY = "bili_interaction";
@@ -39,6 +40,71 @@ function activityStart(name: string, uid: any) {
 function activityClear(uid: any) { try { db.getDb().prepare('DELETE FROM settings_kv WHERE key=?').run(ACT_KEY(uid)); } catch {} }
 function activityGet(uid: any): any {
   try { const row = db.getDb().prepare('SELECT value FROM settings_kv WHERE key=?').get(ACT_KEY(uid)) as {value?:string}|undefined; return row?.value ? JSON.parse(row.value) : null; } catch { return null; }
+}
+
+/** 分享时最多带几条标题（多了就不是「想跟你说说」，是念清单）。 */
+const SHARE_TITLES_MAX = 3;
+
+/**
+ * 这次 discover 是不是「她自己去的」（而不是主人当面叫她去的）。
+ *
+ * ── 为什么不用 fromSchedule ────────────────────────────────────────
+ * 那个标记两端都**没有任何调用方**会置 true（核心版只在 capability 里读它，
+ * 写它的 biolock 走的是 svc.discover 直连）。拿它当判据等于挂了一条永不到达的线。
+ *
+ * 桌宠端的「她自己去的」只有一种可观测形态：**不是主人当面的那个会话**。
+ * 定期任务 / 子任务跑 discover 时 sessionId 是 workspace:<owner>:<task> 或 sub::<uid>::<task>；
+ * 主人当面说「去B站看看」时是聊天会话（纯 UUID 或 bot-*）。
+ * 这与 presenceHooks.isOwnerLocalSession、workspaceTask.parseSessionId 用的是同一套形状判据。
+ */
+export function isAutonomousBrowse(ctx: any): boolean {
+  const sid = String(ctx?.sessionId || "");
+  if (!sid) return true;
+  return sid.startsWith("workspace:") || sid.startsWith("sub::");
+}
+
+/**
+ * 看完 B站之后：她可能想跟你说说。
+ *
+ * ── 为什么在这里（2026-11-25，与核心版 biliBiolock.js 同一改法）─────
+ * 原来 discover 完就结束了：见闻写进记忆，但**没有任何渠道让她开口**。
+ * 用户要的是「她主动联系我」—— 光有记忆不算联系。
+ *
+ * 素材用**真的读到的标题**，不是「我刷了B站」这种空话；
+ * 闸门与账本全部交给 presence 的关系时机通道（proactiveWithTiming）——
+ *   · 同一条 runner（发桌面气泡、支持 SKIP、带人设）；
+ *   · 同一份日账本与安静时段/专注模式闸门（不会因为她刷了B站就多刷一次屏）。
+ *
+ * ⚠️ 只给**自主**浏览用，见 isAutonomousBrowse。主人当面叫她「去B站看看」时，
+ *    她这一轮本来就要回话，再补一条就成了自己跟自己抢话。
+ *
+ * @param titles 已经过安全过滤的标题
+ * @param uid 归属
+ * @param now 注入时刻（测试用）
+ */
+export async function shareAfterBrowse(
+  titles: string[],
+  uid: number | string,
+  now: number = Date.now(),
+): Promise<{ fired: boolean; reason: string }> {
+  const picked = (Array.isArray(titles) ? titles : [])
+    .filter((t) => !!t && String(t).trim())
+    .slice(0, SHARE_TITLES_MAX);
+  if (!picked.length) return { fired: false, reason: "no titles" };
+  const prompt = [
+    '【刚看完B站，可能想跟他说说】',
+    '你刚从B站回来，看到这些：' + picked.join('、') + '。',
+    '· 想跟他讲哪条就讲哪条，讲你看到的、你怎么想的。',
+    '· **不想说就跳过**（不想说是正常选项）。别只是汇报「我刷了B站」——那是流水账。',
+    '· 最多两三句，一行一个念头。',
+    '· 他可能不回，别追。',
+    '· 别说这是「系统让我发的」，也别说「刚才刷到了」这种旁白腔 —— 就像你平时跟他聊天的样子。',
+  ].join('\n');
+  return presenceSchedule.proactiveWithTiming(Number(uid) || 1, now, {
+    prompt,
+    timing: 'after_browse',
+    chance: 0.5,
+  });
 }
 
 const capability: Capability = defineCapability({
@@ -127,6 +193,21 @@ async function dispatch(args: any, ctx: any): Promise<any> {
         if (!check.safe) continue;
         const r = await remember({ content: '[B站见闻·只谈自己的感受] ' + ob.text, scope: 'self', source: 'observed', kind: 'event', visibility: 'private', importance: 3 }, ctx);
         if (r?.ok) written.push({ id: r.id, text: ob.text });
+      }
+      // ── 看完之后：她可能想跟你说说 ────────────────────────────────
+      // 只给自主浏览（见 isAutonomousBrowse）。主人当面叫她去时她本来就要回话，别再抢一句。
+      if (action === 'discover' && isAutonomousBrowse(ctx)) {
+        try {
+          const titles = ((result.observations || []) as any[])
+            .map((ob) => (ob && ob.title ? '《' + String(ob.title) + '》' : ''))
+            .filter(Boolean);
+          const res = await shareAfterBrowse(titles, uid);
+          if (res.fired) console.log('[bili] 她把看到的分享出来了');
+          else console.log('[bili] 这次没主动说：' + res.reason);
+        } catch (e) {
+          // 分享是锦上添花，绝不能让它把「逛B站」本身弄失败
+          console.warn('[bili] 浏览后的主动分享失败（已忽略）:', e instanceof Error ? e.message : e);
+        }
       }
       return { ok: true, audience: 'owner', personalized: result.personalized, videos: (result.videos||[]).map((v:any)=>({...fullMeta(v), score: v.score})), written };
     } finally { activityClear(uid); }

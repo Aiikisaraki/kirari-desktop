@@ -9,7 +9,7 @@ import { isDue, fireJob } from "kirari-agent";
 import type { ScheduledJob } from "kirari-agent";
 import { jobStore } from "../events/jobStore";
 import { recorder } from "../events/recorder";
-import { getOwnerKeySync } from "../db/storage";
+import { getOwnerKeySync, LOCAL_UID } from "../db/storage";
 // 2026-11-20 规范化：身份比较一律走 samePerson（两侧先归一），
 // 不再在各处手写 ownerKey === "_local" / !== desktopOwner。
 import { FALLBACK, samePerson } from "./ownerIdentity";
@@ -183,6 +183,46 @@ export function deliverReminder(job: ScheduledJob): number {
     return total;
 }
 
+/**
+ * 一次性提醒的「过期容忍窗口」：超过这么久还没送出去的 once 提醒，直接结掉，不再补发。
+ *
+ * ── 在防什么（2026-11-25 用户报障，桌宠端先出现的同款问题）────────────
+ *   「能不能把这测试任务清理掉，我每次启动都会触发」
+ *
+ * 根因不是清理没做，而是调度器对 once 任务的语义太宽：
+ *   · once 任务的 status 只有 pending / fired / cancelled，没有「已过期」这个终态；
+ *   · 进程停机期间的 once 任务会一直躺在 pending 里；
+ *   · 每次启动首扫把 due_at <= now 的 pending 全部补发一次 ——
+ *     于是一条两周前的测试提醒，每次开机都会再念一遍，永久重复。
+ *
+ * 补发本身是对的（用户 2026-11-19 要的就是「关机期间的提醒开机补上」），
+ * 但不能无限期补：窗口内补发保住原意，窗口外的静默清掉并写清日志。
+ */
+export const ONCE_CATCHUP_WINDOW_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * 这条一次性提醒是不是已经过期到不值得补发了。
+ *
+ * 抽成独立纯函数是为了可测：调度器里「送没送到」很难在单测中断言，
+ * 但「该不该送」可以一行钉死（见 electron/ai/services/scheduledJobs.spec.ts）。
+ * 与核心版 scheduledJobsService.isStaleOnceReminder 同一语义。
+ *
+ * 周期任务（daily）永远返回 false —— 迟到一天也该补跑。
+ *
+ * @param job 待判定的任务
+ * @param now 当前毫秒
+ * @returns true = 已过期，不补发
+ */
+export function isStaleOnceReminder(
+    job: { recurrence?: string; dueAt?: number } | null | undefined,
+    now: number,
+): boolean {
+    if (!job || job.recurrence !== "once") return false;
+    const due = Number(job.dueAt);
+    if (!Number.isFinite(due)) return false;
+    return now - due > ONCE_CATCHUP_WINDOW_MS;
+}
+
 export async function scanOnce(): Promise<number> {
     if (scanning) return 0;
     scanning = true;
@@ -194,6 +234,16 @@ export async function scanOnce(): Promise<number> {
             if (!isDue(job, now)) continue;
             try {
                 if (job.kind === "reminder") {
+                    // 一次性提醒超出补发窗口 = 已经没意义了：直接结掉，不补发。
+                    // 必须在 deliverReminder **之前**判，否则用户开机就会被两周前的旧提醒刷屏。
+                    if (isStaleOnceReminder(job, now)) {
+                        const lateMinutes = Math.round((now - job.dueAt) / 60_000);
+                        console.log(
+                            `[sched] 提醒 job=${job.jobId} 已过期 ${lateMinutes} 分钟，超出补发窗口，标记结束（不补发）`,
+                        );
+                        jobStore.save({ ...job, status: "fired", updatedAt: now }, "job_fired");
+                        continue;
+                    }
                     // 送没送到都算「触发过」：once 任务不能因为「没连上」而永远 pending 反复推。
                     // 但送达数会被 deliverReminder 如实打日志，不再假装成功。
                     deliverReminder(job);
@@ -278,12 +328,41 @@ export async function scanOnce(): Promise<number> {
     return fired;
 }
 
+// ── 主动联系：久未联系的检查周期（2026-11-25）────────────────────────
+// 每 10 分钟看一次「是不是很久没跟主人说话了」，比 presence tick（2.5~5h）灵敏得多。
+// 为什么不用 job：这是个**关系时机**，不是一件「事」—— 塞进 scheduled_jobs
+// 会变成一条永远 pending 的记录，还会被 once/daily 语义纠缠。独立定时器更干净。
+export const PROACTIVE_CHECK_MS = 10 * 60 * 1000;
+let proactiveTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * 检查一次久未联系。失败只 warn —— 主动联系是锦上添花，绝不能影响正常调度。
+ *
+ * 与核心版的差异只有「查谁的」：核心版是多用户服务，从 api_tokens 里取最近活跃的 uid；
+ * 桌宠端是单机单主人，uid 恒为 LOCAL_UID，不需要也没有那张表。
+ * 时机/闸门/账本全部走 presenceSchedule.tickProactive，两端同一套。
+ */
+export async function tickProactiveIdle(now = Date.now()): Promise<void> {
+    try {
+        await presenceSchedule.tickProactive(LOCAL_UID, now, {});
+    } catch (e) {
+        console.warn("[sched] 久未联系检查失败（已忽略）:", e instanceof Error ? e.message : e);
+    }
+}
+
 export function start(): void {
     if (timer) return;
     void scanOnce();
     timer = setInterval(() => {
         void scanOnce();
     }, SCAN_INTERVAL_MS);
+    // 久未联系：独立定时器，10 分钟一次（见 PROACTIVE_CHECK_MS 注释）
+    if (!proactiveTimer) {
+        proactiveTimer = setInterval(() => {
+            void tickProactiveIdle();
+        }, PROACTIVE_CHECK_MS);
+        proactiveTimer.unref?.();
+    }
     timer.unref?.();
     console.log("[sched] 定时任务调度器已启动（每 15s 扫描）");
 }
@@ -292,5 +371,9 @@ export function stop(): void {
     if (timer) {
         clearInterval(timer);
         timer = null;
+    }
+    if (proactiveTimer) {
+        clearInterval(proactiveTimer);
+        proactiveTimer = null;
     }
 }
