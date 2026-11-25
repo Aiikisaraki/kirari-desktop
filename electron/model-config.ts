@@ -13,6 +13,10 @@ import {
 // 数据根布局真源：config.json 落 ~/.kirari/config.json（与核心版同一份 LAYOUT）。
 import { homePath } from "./kirari-home";
 import * as modelsFile from "./models/modelsFile";
+// 人格独立文件（persona.md）的读写真源。
+// ⚠️ 与 ai/persona-file.ts 是**互相 import**（那边要 getRawBasePersona 读老字段），
+// 两边都只在函数体内调对方的导出，模块体没有求值，所以循环 import 安全。
+import { resolvePersona, writePersonaFile } from "./ai/persona-file";
 
 export interface ModelProfile {
     id: number;
@@ -77,6 +81,16 @@ export function readModelConfigFile(): ModelConfigFile {
     }
 }
 
+/**
+ * 老字段清理：把 config.json 里的 basePersona 拿掉（人格真源已经是 persona.md）。
+ * 与 setBasePersona 用同一套写法，避免「一个入口清、一个入口留」的半吊子状态。
+ */
+function clearLegacyPersonaField(): void {
+    const cfg = readModelConfigFile();
+    if (cfg.basePersona === undefined) return;
+    writeConfig({ ...cfg, basePersona: "" });
+}
+
 export function writeModelConfigFile(patch: Partial<ModelConfigFile>): ModelConfigFile {
     const current = readModelConfigFile();
     // 合并规则：
@@ -84,10 +98,20 @@ export function writeModelConfigFile(patch: Partial<ModelConfigFile>): ModelConf
     //    把用户未改动的配置无声清空（JSON.stringify 会丢弃 undefined 的 key）。
     //  - 非空字符串：写入（trim 后）。
     //  - 空字符串：显式删除该字段（用于「恢复预设」等清空场景，如 basePersona）。
+    //
+    // ⚠️ basePersona 是例外：它不是普通配置字段，人格正文的真源是 persona.md
+    //（见 ai/persona-file.ts）。写进 config.json 等于把老的回退链又喂饱了——
+    //「恢复预设」会立刻被读回来。所以这里改走 setBasePersona，并且永远清空老字段。
     const next: ModelConfigFile = { ...current };
     for (const k of Object.keys(patch) as (keyof ModelConfigFile)[]) {
         const v = patch[k];
         if (typeof v !== "string") continue;
+        if (k === "basePersona") {
+            // 空串 = 恢复预设：写空会真删 persona.md，再清老字段。
+            setBasePersona(v);
+            delete (next as Partial<ModelConfigFile>).basePersona;
+            continue;
+        }
         // k 是 keyof 联合，直接索引赋值时 TS 会把目标类型收成所有字段的交集
         // （string & boolean & undefined → undefined），只能显式断言。
         if (v.trim() !== "") (next as Record<string, string>)[k] = v.trim();
@@ -286,22 +310,62 @@ export function getProfileSnapshot(): {
         searchEndpoint: c.searchEndpoint || "",
         searchKeyMasked: maskOf(c.searchKey || ""),
         hasSearchKey: !!c.searchKey,
-        basePersona: typeof c.basePersona === "string" ? c.basePersona : "",
+        // 与核心版一致：设置页要看到「她真正在用的人格」，优先 persona.md。
+        basePersona: getBasePersona(),
     };
 }
 
-/** 读自定义人格。空串 = 未自定义。 */
-export function getBasePersona(): string {
+// ── 人格 ────────────────────────────────────────────────────────────────
+//
+// 2026-11-25 用户拍板：人格从 config.json 搬到独立文件（数据根下的 persona.md）。
+// 原因：4000 字上限写不细、和模型密钥一损俱损、没法当明文编辑。
+//
+// 但**读入口的签名不变**（仍然叫 getBasePersona 返回字符串），
+// 因为它在两端有十几个调用点；改签名等于把一次文件搬家变成一次跨仓库重构。
+// 真正的读写都在 ai/persona-file.ts 里，这里只做转发 + 兼容回退。
+
+/** 读 config.json 里的原始 basePersona（**不**查 persona.md）。仅供迁移与回退用。 */
+export function getRawBasePersona(): string {
     const v = readModelConfigFile().basePersona;
     return typeof v === "string" ? v : "";
 }
 
-/** 写自定义人格（空串=恢复预设，4000 字上限）。 */
+/**
+ * 读自定义人格。优先 persona.md；没有再回退 config.json 的老字段；都空 = 未自定义。
+ *
+ * ⚠️ 这是一个**读口**，两侧的存储都可能被外部（另一个版本）改写，所以不能缓存：
+ * persona.md 是明文文件，用户可能正在编辑器里改它。
+ */
+export function getBasePersona(): string {
+    try {
+        const r = resolvePersona();
+        if (r.text) return r.text;
+    } catch (e) {
+        // persona.md 读写异常不能让人格变成空：继续走下面的老字段
+        console.warn("[model-config] 读 persona.md 失败，回退 config.json:", e instanceof Error ? e.message : String(e));
+    }
+    return getRawBasePersona();
+}
+
+/**
+ * 写自定义人格。传空串 = 「恢复预设」（删掉 persona.md，真正回到内置预设）。
+ *
+ * 同时**清空 config.json 里的老字段**：不清的话回退链会立刻把它读回来，
+ * 用户点「恢复预设」看起来毫无反应 —— 这是这类双层存储最典型的坑。
+ */
 export function setBasePersona(value: string): string {
-    const v = (typeof value === "string" ? value : "").slice(0, 4000);
-    const cfg = readModelConfigFile();
-    writeConfig({ ...cfg, basePersona: v });
-    return v;
+    const v = typeof value === "string" ? value : "";
+    let saved = "";
+    try {
+        const w = writePersonaFile(v);
+        if (w.truncated) console.warn("[model-config] 人格超过上限，已截断到", w.saved.length, "字");
+        saved = w.saved;
+    } catch (e) {
+        console.warn("[model-config] 写 persona.md 失败:", e instanceof Error ? e.message : String(e));
+    }
+    // 老字段跟着清（不留旧值，否则回退链会把刚删掉的人格读回来）
+    clearLegacyPersonaField();
+    return saved;
 }
 
 /** 搜索配置明文。 */

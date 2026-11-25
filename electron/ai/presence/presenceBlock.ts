@@ -77,32 +77,38 @@ export function buildPresenceBlock(state: PresenceState | null | undefined, now:
 }
 
 /**
- * 说话节奏约束（跟着状态走的长度上限与短回许可）。
+ * 说话节奏：状态怎么给语气上色。**只描述状态，不设字数上限。**
  *
- *真人不会每句都一样长：深夜困了说话短、难过时更短、
- * 被夸了轻快时才话多。没有这个约束，模型默认往 100 字写 —— AI 味的主要来源之一。
- * 返回空串表示"现在不需要约束"（白天 + 心情正常）。
+ * 2026-11-25 改造：原来的写法是「深夜/低落 → 回复不超过 40 字 + 一两个字也完全可以 +
+ * 不要反问」。三条都是硬约束，叠上声音层原有的「闲聊 1~3 句、不超过 50 字」，
+ * 结果是她被两道锁同时摁住——遇到想聊的话题也只能憋着，用户读到的就是「高冷」。
+ *
+ * 现在的分工：
+ *   · 这一段只说「此刻的状态让语气往哪儿偏」（困了就慢、低了就安静），不写字数；
+ *   · 「这一轮该多说还是少说」交给 reply/speakingDesire.ts，那边按精力/情绪/驱动/话题/
+ *     底子五个信号算档位，并且只输出倾向。
+ *
+ * 白天或心情正常时返回空串：不打扰，也不制造「每轮都要克制」的心理暗示。
+ *
+ * @param state presence 状态
+ * @param now 当前毫秒
+ * @returns 需要时返回一段「此刻的说话节奏」，否则空串
  */
 export function buildPaceBlock(state: PresenceState | null | undefined, now: number): string {
     if (!state || state.version !== 1) return "";
     const hour = new Date(now).getHours();
     const energy = energyAt(hour);
-    const mood = state.mood?.emotion ?? "content";
-    const sad = mood === "lonely" || mood === "tired" || mood === "worried";
-
-    // 深夜（体力低）或心情低落 → 硬上限 40 字，并给短回许可
-    if (energy <= 0.3 || sad) {
-        return [
-            "【此刻的说话节奏】",
-            energy <= 0.3
-                ? "· 现在是深夜/清晨，你很困：回复不超过 40 字，语气可以懒一点、慢一点。"
-                : "· 你现在心情不高：回复不超过 40 字，话少一点是正常的，不用强行轻松。",
-            "· 一两个字也完全可以：嗯。/ 好。/ 在听。/ 困了… 这都是合法回复。",
-            "· 不要反问，不要为了把话接下去而硬找话题。",
-        ].join("\n");
+    const mood = state.mood ? state.mood.emotion : "content";
+    const low = mood === "lonely" || mood === "tired" || mood === "worried" || mood === "envious";
+    const lines: string[] = [];
+    if (energy <= 0.3) {
+        lines.push("【此刻的说话节奏】现在是深夜或清晨，你有点困：说话自然会短一些、慢一些，语气可以懒一点。");
+        lines.push("· 累了话少是正常的；但别拿「省字数」当借口把话说得冷淡——困着也还是你自己。");
+    } else if (low) {
+        lines.push("【此刻的说话节奏】你现在心情不高：话少一点、语速慢一点都是正常的，不用强行轻松。");
+        lines.push("· 对方问起来就照实说；用冷淡当保护色会把人推远，不如说实话。");
     }
-    // 白天心情正常 → 只给一个软上限，防小作文
-    return "【此刻的说话节奏】正常聊天时也请克制：多数回复控制在两三句以内；有实质内容（解释/步骤/列表）才可以长。";
+    return lines.join("\n");
 }
 
 /** 给设置页/调试面板看的一行摘要（不注入 prompt）。 */

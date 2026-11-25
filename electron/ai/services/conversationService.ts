@@ -57,6 +57,10 @@ import * as taskRuntime from "./taskRuntime";
 // 在场感：把「她此刻的内在状态」注入 system。纯读，失败静默降级。
 // 只对主人的本机会话注入 —— 分人识别的边界见 buildPresenceBlock 门控处的说明。
 import { buildPresenceBlock, buildPaceBlock, loadOrInitPresenceState, isOwnerLocalSession } from "../presence/presenceIO";
+// 此刻的说话欲望 + 人格返场提醒（2026-11-25 分层改造的收尾两段，与核心版同构）。
+import { computeSpeakingDesire, buildDesireBlock } from "../reply/speakingDesire";
+import { buildPersonaEcho } from "../reply/persona";
+import { effectiveDrives, energyAt } from "../presence/mood";
 
 // 工具循环参数已从硬编码常量收进 config.json 的 agentProfile（阶段 B）。
 // 数值逐字等于改造前的 MAX_ROUNDS=5 / max_tokens=1500 / 超时 60s+15s*轮-封顶120s。
@@ -423,12 +427,15 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
         // 只对主人的本机会话注入：块里的"上次和对方说话"等时间戳全部来自主人，
         // 对群友/客人注入等于把主人视角安到别人头上（分人识别的边界，不能破）。
         // 读不到状态就返回空串，绝不阻塞。
+        // presenceState 提到外层：下面「此刻的说话欲望」要用同一份状态算档位，
+        // 不能在这里读一次、那里再读一次（两读数会跨时钟，档位和注入的「此刻的你」对不上）。
+        let presenceState: ReturnType<typeof loadOrInitPresenceState> | null = null;
         try {
             if (isOwnerLocalSession(sessionId)) {
-                const presenceState = loadOrInitPresenceState(Date.now());
+                presenceState = loadOrInitPresenceState(Date.now());
                 const presenceBlock = buildPresenceBlock(presenceState, Date.now());
                 if (presenceBlock) systemPrompt += "\n\n" + presenceBlock;
-                // 说话节奏：深夜/心情低落 → 短句上限 + 短回许可；正常 → 软上限防小作文。
+                // 说话节奏：只描述状态（困了就慢、低了就安静），不写字数上限。
                 const paceBlock = buildPaceBlock(presenceState, Date.now());
                 if (paceBlock) systemPrompt += "\n\n" + paceBlock;
             }
@@ -493,6 +500,8 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
         }
 
         // 长期记忆：按当前场合可见的记忆池做联想检索（跨对话存续的关键）。
+        // memoryBlock 提到外层：说话欲望的「底子」信号要知道这一轮有没有记忆命中。
+        let memoryBlock = "";
         try {
             const mem = await memory.buildMemoryBlock(
                 {
@@ -508,7 +517,8 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
                 },
                 text || "",
             );
-            if (mem.block) systemPrompt += mem.block;
+            memoryBlock = mem.block || "";
+            if (memoryBlock) systemPrompt += memoryBlock;
         } catch (e: any) {
             console.warn("[aiReply] 记忆注入失败（已忽略）:", e?.message || e);
         }
@@ -523,6 +533,29 @@ export async function getReply(options: GetReplyOptions): Promise<ReplyResult> {
             "\n记的时候 scope 想清楚：关于主人本人的长期事实 → self；关于此刻这个人 → person；" +
             "关于这个群/这个场合大家的事 → scene；通用约定与常识 → global。" +
             "\n不确定要不要记就先别记；记错了比没记更麻烦。对方说「忘了这件事」时用 action=forget。";
+
+        // ── 此刻的说话欲望 + 返场提醒（2026-11-25 分层改造的收尾两段）──────────────
+        // 顺序：先给「这一轮该多说还是少说」的档位，最后用「返场提醒」把口吻钉回人格。
+        // 为什么放在最末：system 的前九成是准则、清单、记忆、状态，模型读到最后只看得到
+        // 「不许／上限／不要」；这两段用最后的位置把「她是谁」和「有没有得说」拉回来。
+        // 失败静默降级——提示词缺一段不该阻断对话。
+        try {
+            const now = Date.now();
+            const hour = new Date(now).getHours();
+            const desire = computeSpeakingDesire({
+                energy: energyAt(hour),
+                mood: presenceState ? presenceState.mood : null,
+                drives: presenceState ? effectiveDrives(presenceState, now) : undefined,
+                gapMs: presenceState ? Math.max(0, now - presenceState.lastUserAt) : undefined,
+                text: text || "",
+                knowledge: { kbHit: !!kbBlock, memHit: !!memoryBlock },
+                isGroup: scene ? String(scene.chatType || "") === "group" : false,
+            });
+            systemPrompt += "\n\n" + buildDesireBlock(desire);
+            systemPrompt += "\n\n" + buildPersonaEcho(persona);
+        } catch (e) {
+            console.warn("[aiReply] 说话欲望/人格回响注入失败（已忽略）:", e instanceof Error ? e.message : e);
+        }
 
         // 阶段 D：SKILL.md 渐进披露——system 里只放目录摘要，正文用 load_skill 按需加载。
         const skillCatalog = skillMd.catalogBlock();
