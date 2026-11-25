@@ -2,9 +2,18 @@
 // 阶段 C 完成标志（desktop）：mock LLM 驱动 getReply，「查天气再提醒我带伞」一条请求完成两步。
 import fs from "node:fs";
 import path from "node:path";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi, afterAll } from "vitest";
 
-const configDir = vi.hoisted(() => `${process.cwd()}/.tmp-test/tasks-reply-${process.pid}`);
+// 临时目录用**随机后缀**而不是 process.pid：
+// PID 会被系统复用，`.tmp-test/tasks-reply-<pid>` 一旦残留（上一次异常退出没清理），
+// 下一次同 PID 就会读到上一轮的 d-e2e 数据 —— 表现为偶发失败，且只在 CI 上偶现，最难查。
+// mkdtempSync 保证每次都是全新目录。
+const configDir = vi.hoisted(() => {
+    const fsx = require("node:fs");
+    const osx = require("node:os");
+    const pax = require("node:path");
+    return fsx.mkdtempSync(pax.join(osx.tmpdir(), "kirari-tasks-reply-"));
+});
 vi.mock("electron", () => ({ app: { getPath: () => configDir } }));
 
 vi.mock("../reply/parser", () => ({
@@ -114,4 +123,9 @@ describe("desktop 完成标志：一条请求完成两步", () => {
         const types = (db.prepare("SELECT type FROM session_events WHERE session_id='d-e2e' ORDER BY seq").all() as { type: string }[]).map((r) => r.type);
         for (const t of ["task_created", "task_updated", "task_completed", "job_created"]) expect(types).toContain(t);
     });
+});
+
+// 用完即清：别让临时目录留到下一次（配合上面的 mkdtemp 双保险）
+afterAll(() => {
+    try { fs.rmSync(configDir, { recursive: true, force: true }); } catch { /* ignore */ }
 });

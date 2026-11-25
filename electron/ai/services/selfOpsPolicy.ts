@@ -23,10 +23,12 @@ type Rule = { describe: string; validate: (v: unknown) => unknown };
 
 export const WRITABLE: Record<string, Rule> = {
     "persona.basePersona": {
-        describe: "主人自定义人格（留空恢复预设，上限 4000 字）",
+        describe: "主人自定义人格（留空恢复预设，上限 20000 字，存 persona.md）",
         validate(v) {
             if (typeof v !== "string") throw new Error("basePersona 必须是字符串");
-            if (v.length > 4000) throw new Error("basePersona 超过 4000 字");
+            // 2026-11-25：人格搬进 persona.md 后上限与那边对齐（4000 → 20000）。
+        // 只改写入端不改这里的话，self_ops 会成唯一还在卡 4000 的入口。
+        if (v.length > 20000) throw new Error("basePersona 超过 20000 字");
             return v;
         },
     },
